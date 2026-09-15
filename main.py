@@ -286,8 +286,8 @@ def generate_reply(
             contents=contents,
             config={
                 "system_instruction": _system_prompt_for_user(user),
-                "temperature": 0.9,
-                "max_output_tokens": 700,
+                "temperature": 0.85,
+                "max_output_tokens": 2000,
             },
         )
         answer = str(getattr(response, "text", "") or "").strip()
@@ -395,7 +395,7 @@ def generate_media_reply(
             config={
                 "system_instruction": _system_prompt_for_user(user),
                 "temperature": 0.85,
-                "max_output_tokens": 700,
+                "max_output_tokens": 2000,
             },
         )
         answer = str(getattr(response, "text", "") or "").strip()

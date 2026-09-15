@@ -518,7 +518,6 @@ def _remember_outbound_message(chat_id: int | str, message_id: int) -> None:
 
 
 def _was_our_message(chat_id: int | str, message_id: int | None) -> bool:
-def _was_our_message(chat_id: int | str, message_id: int | None) -> bool:
     if message_id is None:
         return False
     with outbound_ids_lock:

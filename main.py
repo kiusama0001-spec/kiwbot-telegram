@@ -46,7 +46,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 OWNER_TELEGRAM_ID = 7745029153
 OWNER_PRIMARY_NAME = "Kiu"
 OWNER_HONORIFIC = "Amo"
-MODEL_NAME = "llama-3.1-70b-versatile"
+MODEL_NAME = "llama-3.3-70b-versatile"
 DEFAULT_PORT = 5000
 MAX_MEMORY_MESSAGES = 12
 MAX_STORED_MESSAGE_CHARS = 2_000
@@ -225,6 +225,7 @@ def _history_as_groq_messages(chat_id: int | str, system_instruction: str) -> li
     """Return Groq-compatible message dictionaries including system prompt and history."""
     messages = [{"role": "system", "content": system_instruction}]
     for item in memory.recent(chat_id):
+        role = item.role if item.role in ("user", "assistant") else "user"
         messages.append({"role": item.role, "content": item.text})
     return messages
 

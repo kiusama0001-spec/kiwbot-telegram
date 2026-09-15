@@ -518,4 +518,306 @@ def _remember_outbound_message(chat_id: int | str, message_id: int) -> None:
 
 
 def _was_our_message(chat_id: int | str, message_id: int | None) -> bool:
-   
+def _was_our_message(chat_id: int | str, message_id: int | None) -> bool:
+    if message_id is None:
+        return False
+    with outbound_ids_lock:
+        return message_id in recent_outbound_ids[str(chat_id)]
+
+
+def send_long_message(
+    chat_id: int | str,
+    text: str,
+    reply_to_message_id: int | None = None,
+    message_thread_id: int | None = None,
+) -> None:
+    chunks = split_message(text)
+    for index, chunk in enumerate(chunks):
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": escape_markdown_v2(chunk),
+            "parse_mode": "MarkdownV2",
+        }
+        if index == 0 and reply_to_message_id is not None:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        if message_thread_id is not None:
+            payload["message_thread_id"] = message_thread_id
+
+        try:
+            result = telegram_api("sendMessage", payload)
+        except Exception as markdown_error:
+            logger.warning("Markdown rechazado; reintentando texto plano: %s", markdown_error)
+            payload.pop("parse_mode", None)
+            payload["text"] = chunk
+            try:
+                result = telegram_api("sendMessage", payload)
+            except Exception as reply_error:
+                if "reply_to_message_id" not in payload:
+                    raise
+                logger.warning("Reply rechazado; enviando sin reply: %s", reply_error)
+                payload.pop("reply_to_message_id", None)
+                payload.pop("allow_sending_without_reply", None)
+                result = telegram_api("sendMessage", payload)
+
+        sent_message = result.get("result") or {}
+        sent_message_id = sent_message.get("message_id")
+        if isinstance(sent_message_id, int):
+            _remember_outbound_message(chat_id, sent_message_id)
+
+
+# ---------------------------------------------------------------------------
+# Update processing
+# ---------------------------------------------------------------------------
+
+def _reply_context(message: dict[str, Any]) -> str | None:
+    replied = message.get("reply_to_message")
+    if not isinstance(replied, dict):
+        return None
+    if isinstance(replied.get("text"), str):
+        return f"{_author_label(replied.get('from'))}: {replied['text']}"
+    if isinstance(replied.get("caption"), str):
+        return f"{_author_label(replied.get('from'))}: {replied['caption']}"
+    dice = replied.get("dice")
+    if isinstance(dice, dict):
+        return f"{_author_label(replied.get('from'))} lanzó {dice.get('emoji')} y sacó {dice.get('value')}"
+    for media_key, media_label in (
+        ("voice", "un audio"),
+        ("audio", "un archivo de audio"),
+        ("video", "un video"),
+        ("video_note", "un video"),
+    ):
+        if isinstance(replied.get(media_key), dict):
+            return f"{_author_label(replied.get('from'))} envió {media_label}"
+    return None
+
+
+def _media_info(message: dict[str, Any]) -> dict[str, Any] | None:
+    for field, kind, default_mime in (
+        ("voice", "audio", "audio/ogg"),
+        ("audio", "audio", "audio/mpeg"),
+        ("video", "video", "video/mp4"),
+        ("video_note", "video", "video/mp4"),
+    ):
+        media = message.get(field)
+        if isinstance(media, dict) and isinstance(media.get("file_id"), str):
+            return {
+                "file_id": media["file_id"],
+                "kind": kind,
+                "mime_type": str(media.get("mime_type") or default_mime),
+                "file_size": media.get("file_size"),
+                "caption": message.get("caption")
+                if isinstance(message.get("caption"), str)
+                else None,
+            }
+    return None
+
+
+def _command_name(text: str) -> str | None:
+    first = text.strip().split(maxsplit=1)[0].lower() if text.strip() else ""
+    command = first.split("@", 1)[0]
+    return command if command in {"/verdad", "/reto"} else None
+
+
+def process_update(update: dict[str, Any]) -> None:
+    """Process one Telegram update. Every failure is contained here."""
+    try:
+        message: dict[str, Any] | None = None
+        if isinstance(update.get("message"), dict):
+            message = update["message"]
+        elif isinstance(update.get("channel_post"), dict):
+            message = update["channel_post"]
+        else:
+            return
+
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or "id" not in chat:
+            return
+        chat_id = chat["id"]
+        message_id = message.get("message_id")
+        if not isinstance(message_id, int):
+            return
+        if _was_our_message(chat_id, message_id):
+            return
+
+        sender = message.get("from")
+        if isinstance(sender, dict) and sender.get("is_bot") is True:
+            return
+
+        reply_to = message_id
+        thread_id = message.get("message_thread_id")
+
+        dice = message.get("dice")
+        if isinstance(dice, dict):
+            emoji = str(dice.get("emoji") or "🎲")
+            value = dice.get("value")
+            if not isinstance(value, int):
+                return
+            answer = generate_dice_reply(
+                chat_id,
+                emoji,
+                value,
+                user=sender if isinstance(sender, dict) else None,
+            )
+            send_long_message(chat_id, answer, reply_to, thread_id)
+            return
+
+        media = _media_info(message)
+        if media is not None:
+            if isinstance(media.get("file_size"), int) and media["file_size"] > MAX_MEDIA_BYTES:
+                answer = _address_owner(MEDIA_TOO_LARGE_RESPONSE, sender)
+                send_long_message(chat_id, answer, reply_to, thread_id)
+                return
+            try:
+                answer = generate_media_reply(
+                    chat_id,
+                    media["kind"],
+                    user=sender if isinstance(sender, dict) else None,
+                    caption=media["caption"],
+                    reply_context=_reply_context(message),
+                )
+                send_long_message(chat_id, answer, reply_to, thread_id)
+            except Exception:
+                logger.exception("Error manejando media para chat %s", chat_id)
+                answer = _address_owner(MEDIA_FALLBACK_RESPONSE, sender)
+                send_long_message(chat_id, answer, reply_to, thread_id)
+            return
+
+        text = message.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return
+
+        command = _command_name(text)
+        if command == "/verdad":
+            answer = _address_owner(
+                _fresh_command_text(chat_id, "verdad", TRUTH_PROMPTS),
+                sender if isinstance(sender, dict) else None,
+            )
+            memory.add(chat_id, "user", f"{_author_label(sender)}: {text}")
+            memory.add(chat_id, "model", answer)
+        elif command == "/reto":
+            answer = _address_owner(
+                _fresh_command_text(chat_id, "reto", DARE_PROMPTS),
+                sender if isinstance(sender, dict) else None,
+            )
+            memory.add(chat_id, "user", f"{_author_label(sender)}: {text}")
+            memory.add(chat_id, "model", answer)
+        else:
+            answer = generate_reply(
+                chat_id,
+                text,
+                user=sender if isinstance(sender, dict) else None,
+                reply_context=_reply_context(message),
+            )
+        send_long_message(chat_id, answer, reply_to, thread_id)
+    except Exception:
+        logger.exception("Error procesando actualización de Telegram")
+
+
+def _check_webhook_secret() -> bool:
+    if not TELEGRAM_WEBHOOK_SECRET:
+        return True
+    return request.headers.get("X-Telegram-Bot-Api-Secret-Token") == TELEGRAM_WEBHOOK_SECRET
+
+
+@app.get("/")
+def home() -> Any:
+    return jsonify({"status": "ok", "bot": "KiwBot", "mode": "webhook"})
+
+
+@app.get("/healthz")
+def healthz() -> Any:
+    return jsonify(
+        {
+            "status": "ok",
+            "bot": "KiwBot",
+            "telegram_configured": bool(TELEGRAM_TOKEN),
+            "groq_configured": bool(groq_client),
+        }
+    )
+
+
+@app.post("/webhook")
+def telegram_webhook() -> Any:
+    if not _check_webhook_secret():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    update = request.get_json(silent=True)
+    if not isinstance(update, dict):
+        return jsonify({"ok": False, "error": "invalid JSON"}), 400
+    executor.submit(process_update, update)
+    return jsonify({"ok": True})
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error: Exception) -> Any:
+    logger.exception("Error Flask no controlado: %s", error)
+    return jsonify({"ok": False, "error": "internal server error"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Webhook setup helpers
+# ---------------------------------------------------------------------------
+
+def set_webhook(webhook_url: str) -> dict[str, Any]:
+    parsed = urlparse(webhook_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("El webhook debe ser una URL HTTPS pública de Render")
+    payload: dict[str, Any] = {"url": webhook_url.rstrip("/")}
+    if TELEGRAM_WEBHOOK_SECRET:
+        payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
+    return telegram_api("setWebhook", payload)
+
+
+def configure_webhook_from_environment() -> None:
+    if not WEBHOOK_URL:
+        return
+    try:
+        result = set_webhook(WEBHOOK_URL)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", "Telegram rechazó el webhook"))
+        logger.info("Webhook de Telegram configurado automáticamente: %s", WEBHOOK_URL)
+    except Exception:
+        logger.exception("No se pudo configurar automáticamente el webhook de Telegram")
+
+
+def get_webhook_info() -> dict[str, Any]:
+    return telegram_api("getWebhookInfo", {})
+
+
+def _cli() -> int:
+    if len(sys.argv) < 2:
+        return 0
+    command = sys.argv[1].lower()
+    try:
+        if command == "set-webhook":
+            if len(sys.argv) != 3:
+                print("Uso: python main.py set-webhook https://tu-servicio.onrender.com/webhook")
+                return 2
+            set_webhook(sys.argv[2])
+            print("Webhook configurado correctamente.")
+            return 0
+        if command == "webhook-info":
+            info = get_webhook_info().get("result", {})
+            print(
+                {
+                    "url": info.get("url", ""),
+                    "pending_update_count": info.get("pending_update_count", 0),
+                    "last_error_date": info.get("last_error_date"),
+                    "last_error_message": info.get("last_error_message"),
+                }
+            )
+            return 0
+        print("Comando no reconocido. Usa set-webhook o webhook-info.")
+        return 2
+    except Exception as error:
+        logger.error("No se pudo ejecutar %s: %s", command, error)
+        return 1
+
+
+if __name__ == "__main__":
+    exit_code = _cli()
+    if exit_code:
+        raise SystemExit(exit_code)
+    configure_webhook_from_environment()
+    port = int(os.getenv("PORT", str(DEFAULT_PORT)))
+    app.run(host="0.0.0.0", port=port)   

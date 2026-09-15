@@ -9,6 +9,7 @@ Required environment variables:
 
 Optional environment variable:
     TELEGRAM_WEBHOOK_SECRET
+    WEBHOOK_URL
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from google import genai
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
 OWNER_TELEGRAM_ID = 7745029153
 OWNER_PRIMARY_NAME = "Kiu"
@@ -898,6 +900,20 @@ def set_webhook(webhook_url: str) -> dict[str, Any]:
     return telegram_api("setWebhook", payload)
 
 
+def configure_webhook_from_environment() -> None:
+    """Register the Telegram webhook automatically on Render when configured."""
+    if not WEBHOOK_URL:
+        return
+    try:
+        result = set_webhook(WEBHOOK_URL)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", "Telegram rechazó el webhook"))
+        logger.info("Webhook de Telegram configurado automáticamente: %s", WEBHOOK_URL)
+    except Exception:
+        # Keep the HTTP service alive so Render can retry after a transient failure.
+        logger.exception("No se pudo configurar automáticamente el webhook de Telegram")
+
+
 def get_webhook_info() -> dict[str, Any]:
     return telegram_api("getWebhookInfo", {})
 
@@ -936,5 +952,6 @@ if __name__ == "__main__":
     exit_code = _cli()
     if exit_code:
         raise SystemExit(exit_code)
+    configure_webhook_from_environment()
     port = int(os.getenv("PORT", str(DEFAULT_PORT)))
     app.run(host="0.0.0.0", port=port)

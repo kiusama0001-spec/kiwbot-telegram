@@ -523,7 +523,6 @@ def send_long_message(
         try:
             result = telegram_api("sendMessage", payload)
         except Exception as markdown_error:
-        except Exception as markdown_error:
             logger.warning("Markdown rechazado; reintentando texto plano: %s", markdown_error)
             payload.pop("parse_mode", None)
             payload["text"] = chunk

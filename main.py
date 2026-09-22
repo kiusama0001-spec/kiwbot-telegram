@@ -291,6 +291,13 @@ def init_db():
         """)
 
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_settings (
+                chat_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 1
+            )
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS processed_updates (
                 update_id INTEGER PRIMARY KEY,
                 processed_at INTEGER
@@ -553,6 +560,31 @@ def get_memory(
     ]
 
 
+def is_ai_enabled(chat_id):
+    """Indica si la IA está activa en este chat. Por defecto está activa."""
+    with db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT enabled FROM ai_settings WHERE chat_id = ?",
+            (int(chat_id),)
+        ).fetchone()
+        conn.close()
+    return True if row is None else bool(row["enabled"])
+
+
+def set_ai_enabled(chat_id, enabled):
+    """Guarda permanentemente el estado de la IA para un chat."""
+    with db_lock:
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO ai_settings (chat_id, enabled)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET enabled = excluded.enabled
+        """, (int(chat_id), 1 if enabled else 0))
+        conn.commit()
+        conn.close()
+
+
 def add_long_term_memory(
     scope,
     owner_id,
@@ -749,6 +781,26 @@ def delete_long_term_memories(
         conn.close()
 
     return deleted
+
+
+def extract_preference_memory(text):
+    """Detecta preferencias explícitas de Kiu que deben quedar permanentes."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not text:
+        return ""
+
+    patterns = [
+        r"^(?:no me digas|no me llames|no uses conmigo|no quiero que me digas|no quiero que me llames)\s+(.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            forbidden = match.group(1).strip().rstrip(".!?")
+            if forbidden:
+                return f"Kiu no quiere que lo llamen ni le digan: {forbidden}."
+
+    return ""
 
 
 def format_long_term_memory(memories):
@@ -1532,8 +1584,9 @@ Kalu NO es tu Amo.
     if long_term_context:
         long_term_instruction = f"""
 MEMORIA PERMANENTE RELEVANTE:
-Estas memorias fueron guardadas anteriormente. Úsalas como contexto,
-pero no inventes recuerdos que no aparezcan aquí.
+Estas memorias fueron guardadas anteriormente. Úsalas como contexto y respétalas,
+especialmente las preferencias o prohibiciones de trato de Kiu. No inventes
+recuerdos que no aparezcan aquí.
 
 {long_term_context}
 """
@@ -1670,6 +1723,36 @@ def process_command(
             "Pong. Sigo viva. 😌"
         )
 
+        return True
+
+
+    # -----------------------------------------------------
+    # IA: ENCENDER / APAGAR / ESTADO
+    # -----------------------------------------------------
+
+    if command in ("/iaon", "/iaoff", "/iastatus"):
+        user = message.get("from", {})
+        user_id = user.get("id")
+
+        if not is_owner(user_id):
+            send_message(
+                chat_id,
+                "Ese interruptor es solo para Kiu. 😌"
+            )
+            return True
+
+        if command == "/iaon":
+            set_ai_enabled(chat_id, True)
+            send_message(chat_id, "🧠 IA activada. Ya puedes volver a molestarme, Amo Kiu.")
+            return True
+
+        if command == "/iaoff":
+            set_ai_enabled(chat_id, False)
+            send_message(chat_id, "💤 IA apagada en este chat. Mis neuronas se van de vacaciones.")
+            return True
+
+        estado = "ACTIVADA" if is_ai_enabled(chat_id) else "APAGADA"
+        send_message(chat_id, f"🧠 IA: {estado}")
         return True
 
 
@@ -2729,6 +2812,25 @@ def process_update(
 
 
         # =================================================
+        # PREFERENCIAS PERMANENTES DE KIU
+        # =================================================
+
+        if is_owner(user_id):
+            preference_memory = extract_preference_memory(text)
+            if preference_memory:
+                saved = add_long_term_memory(
+                    "user",
+                    user_id,
+                    preference_memory
+                )
+                send_message(
+                    chat_id,
+                    "🧠 Preferencia guardada. Eso sí no se me olvida." if saved
+                    else "🧠 Ya tenía registrada esa preferencia."
+                )
+                return
+
+        # =================================================
         # MEMORIA AUTOMÁTICA EXPLÍCITA
         # =================================================
 
@@ -2758,6 +2860,9 @@ def process_update(
         # =================================================
         # IA
         # =================================================
+
+        if not is_ai_enabled(chat_id):
+            return
 
         if not text:
             return

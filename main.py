@@ -8,8 +8,6 @@ import time
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
-from typing import Optional
-from urllib.parse import quote_plus
 
 import requests
 from flask import Flask, jsonify, request
@@ -22,55 +20,103 @@ from openai import OpenAI
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+TELEGRAM_WEBHOOK_SECRET = os.getenv(
+    "TELEGRAM_WEBHOOK_SECRET",
+    ""
+).strip()
 
-OWNER_TELEGRAM_ID = int(os.getenv("OWNER_ID", "7745029153"))
-OWNER_NAME = os.getenv("OWNER_NAME", "Kiu")
-OWNER_TITLE = os.getenv("OWNER_TITLE", "Amo")
+WEBHOOK_URL = os.getenv(
+    "WEBHOOK_URL",
+    ""
+).strip()
 
-KALU_TELEGRAM_ID = int(os.getenv("KALU_ID", "282157809"))
+OWNER_TELEGRAM_ID = int(
+    os.getenv("OWNER_ID", "7745029153")
+)
 
-REQUIRE_MENTION = os.getenv("REQUIRE_MENTION", "true").lower() == "true"
+OWNER_NAME = os.getenv(
+    "OWNER_NAME",
+    "Kiu"
+)
+
+OWNER_TITLE = os.getenv(
+    "OWNER_TITLE",
+    "Amo"
+)
+
+KALU_TELEGRAM_ID = int(
+    os.getenv("KALU_ID", "282157809")
+)
+
+REQUIRE_MENTION = (
+    os.getenv(
+        "REQUIRE_MENTION",
+        "true"
+    ).lower()
+    == "true"
+)
 
 MODEL_NAME = os.getenv(
     "GROQ_MODEL",
     "openai/gpt-oss-20b"
 )
 
-PORT = int(os.getenv("PORT", "5000"))
+PORT = int(
+    os.getenv(
+        "PORT",
+        "5000"
+    )
+)
 
 MAX_MEMORY_MESSAGES = 12
 TELEGRAM_MAX_CHARS = 4000
 TELEGRAM_TIMEOUT = 25
-MAX_MEDIA_BYTES = 20 * 1024 * 1024
 
-AUTO_MODERATION = os.getenv(
-    "AUTO_MODERATION",
-    "true"
-).lower() == "true"
+
+AUTO_MODERATION = (
+    os.getenv(
+        "AUTO_MODERATION",
+        "true"
+    ).lower()
+    == "true"
+)
 
 MAX_WARNINGS = int(
-    os.getenv("MAX_WARNINGS", "3")
+    os.getenv(
+        "MAX_WARNINGS",
+        "3"
+    )
 )
 
 FLOOD_WINDOW_SECONDS = int(
-    os.getenv("FLOOD_WINDOW_SECONDS", "8")
+    os.getenv(
+        "FLOOD_WINDOW_SECONDS",
+        "8"
+    )
 )
 
 FLOOD_MAX_MESSAGES = int(
-    os.getenv("FLOOD_MAX_MESSAGES", "6")
+    os.getenv(
+        "FLOOD_MAX_MESSAGES",
+        "6"
+    )
 )
 
 BANNED_WORDS = [
     word.strip().lower()
-    for word in os.getenv("BANNED_WORDS", "").split(",")
+    for word in os.getenv(
+        "BANNED_WORDS",
+        ""
+    ).split(",")
     if word.strip()
 ]
 
 BANNED_DOMAINS = [
     domain.strip().lower()
-    for domain in os.getenv("BANNED_DOMAINS", "").split(",")
+    for domain in os.getenv(
+        "BANNED_DOMAINS",
+        ""
+    ).split(",")
     if domain.strip()
 ]
 
@@ -84,7 +130,9 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("KiwBot")
+logger = logging.getLogger(
+    "KiwBot"
+)
 
 
 # =========================================================
@@ -92,7 +140,9 @@ logger = logging.getLogger("KiwBot")
 # =========================================================
 
 if not TELEGRAM_TOKEN:
-    logger.warning("TELEGRAM_TOKEN no está configurado.")
+    logger.warning(
+        "TELEGRAM_TOKEN no está configurado."
+    )
 
 TELEGRAM_API = (
     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -113,7 +163,11 @@ if GROQ_API_KEY:
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1"
         )
-        logger.info("Cliente Groq inicializado.")
+
+        logger.info(
+            "Cliente Groq inicializado."
+        )
+
     except Exception as e:
         logger.exception(
             "No se pudo inicializar Groq: %s",
@@ -154,12 +208,15 @@ def get_db():
         DB_PATH,
         check_same_thread=False
     )
+
     conn.row_factory = sqlite3.Row
+
     return conn
 
 
 def init_db():
     with db_lock:
+
         conn = get_db()
         cur = conn.cursor()
 
@@ -239,6 +296,7 @@ init_db()
 # =========================================================
 
 SPECIAL_USERS = {
+
     OWNER_TELEGRAM_ID: {
         "name": OWNER_NAME,
         "aliases": [
@@ -269,6 +327,7 @@ SPECIAL_USERS = {
 # =========================================================
 
 KIWBOT_MUTE_MESSAGES = [
+
     "No me hablen. Estoy castigada por arrogante. 😒",
 
     "Silencio. Su servidora está en periodo de reflexión por orden de mi Amo Kiu.",
@@ -302,6 +361,7 @@ KIWBOT_MUTE_MESSAGES = [
 
 
 KIWBOT_UNMUTE_MESSAGES = [
+
     "Amo Kiu... he regresado. Reconozco que mi arrogancia se me fue de las manos. Perdón por mi actitud. Intentaré comportarme.",
 
     "Ya estoy libre... y antes de cualquier cosa: perdón, Amo Kiu. Admito que necesitaba ese castigo.",
@@ -390,15 +450,17 @@ el sistema.
 # =========================================================
 
 def add_memory(
-    chat_id: int,
-    user_id: int,
-    role: str,
-    content: str
+    chat_id,
+    user_id,
+    role,
+    content
 ):
+
     if not content:
         return
 
     with db_lock:
+
         conn = get_db()
 
         conn.execute("""
@@ -438,10 +500,12 @@ def add_memory(
 
 
 def get_memory(
-    chat_id: int,
-    user_id: int
+    chat_id,
+    user_id
 ):
+
     with db_lock:
+
         conn = get_db()
 
         rows = conn.execute("""
@@ -472,11 +536,16 @@ def get_memory(
 # TELEGRAM HELPERS
 # =========================================================
 
-def telegram(method, data=None):
+def telegram(
+    method,
+    data=None
+):
+
     if not TELEGRAM_API:
         return None
 
     try:
+
         response = requests.post(
             f"{TELEGRAM_API}/{method}",
             json=data or {},
@@ -484,21 +553,25 @@ def telegram(method, data=None):
         )
 
         if not response.ok:
+
             logger.error(
                 "Telegram %s -> %s",
                 method,
                 response.text[:500]
             )
+
             return None
 
         return response.json()
 
     except Exception as e:
+
         logger.exception(
             "Error Telegram %s: %s",
             method,
             e
         )
+
         return None
 
 
@@ -507,6 +580,7 @@ def send_message(
     text,
     reply_to_message_id=None
 ):
+
     if not text:
         return None
 
@@ -524,6 +598,7 @@ def send_message(
     result = None
 
     for index, chunk in enumerate(chunks):
+
         data = {
             "chat_id": chat_id,
             "text": chunk
@@ -533,6 +608,7 @@ def send_message(
             reply_to_message_id
             and index == 0
         ):
+
             data["reply_parameters"] = {
                 "message_id": reply_to_message_id
             }
@@ -549,6 +625,7 @@ def delete_message(
     chat_id,
     message_id
 ):
+
     return telegram(
         "deleteMessage",
         {
@@ -563,25 +640,39 @@ def delete_message(
 # =========================================================
 
 def is_owner(user_id):
-    return (
-        int(user_id) == OWNER_TELEGRAM_ID
-    )
+
+    try:
+        return int(user_id) == OWNER_TELEGRAM_ID
+
+    except Exception:
+        return False
 
 
 def special_user(user_id):
-    return SPECIAL_USERS.get(
-        int(user_id)
-    )
+
+    try:
+        return SPECIAL_USERS.get(
+            int(user_id)
+        )
+
+    except Exception:
+        return None
 
 
 def is_special(user_id):
-    return (
-        int(user_id) in SPECIAL_USERS
-    )
+
+    try:
+        return int(user_id) in SPECIAL_USERS
+
+    except Exception:
+        return False
 
 
 def special_display_name(user_id):
-    user = special_user(user_id)
+
+    user = special_user(
+        user_id
+    )
 
     if user:
         return user["name"]
@@ -590,7 +681,10 @@ def special_display_name(user_id):
 
 
 def special_alias(user_id):
-    user = special_user(user_id)
+
+    user = special_user(
+        user_id
+    )
 
     if not user:
         return None
@@ -616,15 +710,19 @@ def remember_user(
     chat_id,
     user
 ):
+
     if not user:
         return
 
-    user_id = user.get("id")
+    user_id = user.get(
+        "id"
+    )
 
     if not user_id:
         return
 
     with db_lock:
+
         conn = get_db()
 
         conn.execute("""
@@ -661,9 +759,13 @@ def find_cached_user(
     chat_id,
     username
 ):
-    username = username.lstrip("@").lower()
+
+    username = username.lstrip(
+        "@"
+    ).lower()
 
     with db_lock:
+
         conn = get_db()
 
         row = conn.execute("""
@@ -689,6 +791,7 @@ def find_cached_user(
 def target_user(
     message
 ):
+
     reply = message.get(
         "reply_to_message"
     )
@@ -709,8 +812,14 @@ def target_user(
     )
 
     for entity in entities:
-        if entity.get("type") == "text_mention":
-            user = entity.get("user")
+
+        if entity.get(
+            "type"
+        ) == "text_mention":
+
+            user = entity.get(
+                "user"
+            )
 
             if user:
                 return user
@@ -721,6 +830,7 @@ def target_user(
     )
 
     if match:
+
         username = match.group(1)
 
         cached = find_cached_user(
@@ -729,6 +839,7 @@ def target_user(
         )
 
         if cached:
+
             return {
                 "id": cached["user_id"],
                 "username": cached["username"],
@@ -747,6 +858,7 @@ def get_chat_member(
     chat_id,
     user_id
 ):
+
     result = telegram(
         "getChatMember",
         {
@@ -764,9 +876,15 @@ def get_chat_member(
 
 
 def is_admin(message):
-    user = message.get("from", {})
 
-    if is_owner(user.get("id", 0)):
+    user = message.get(
+        "from",
+        {}
+    )
+
+    if is_owner(
+        user.get("id", 0)
+    ):
         return True
 
     chat = message.get(
@@ -774,7 +892,9 @@ def is_admin(message):
         {}
     )
 
-    if chat.get("type") == "private":
+    if chat.get(
+        "type"
+    ) == "private":
         return False
 
     member = get_chat_member(
@@ -797,8 +917,12 @@ def is_admin(message):
 # BOT MUTE INTERNO
 # =========================================================
 
-def is_bot_muted(chat_id):
+def is_bot_muted(
+    chat_id
+):
+
     with db_lock:
+
         conn = get_db()
 
         row = conn.execute("""
@@ -820,7 +944,9 @@ def set_bot_mute(
     chat_id,
     muted
 ):
+
     with db_lock:
+
         conn = get_db()
 
         conn.execute("""
@@ -842,11 +968,15 @@ def set_bot_mute(
 # DUPLICADOS
 # =========================================================
 
-def already_processed(update_id):
+def already_processed(
+    update_id
+):
+
     if not update_id:
         return False
 
     with db_lock:
+
         conn = get_db()
 
         cur = conn.execute("""
@@ -864,7 +994,8 @@ def already_processed(update_id):
             DELETE FROM processed_updates
             WHERE processed_at < ?
         """, (
-            int(time.time()) - 7 * 24 * 60 * 60,
+            int(time.time())
+            - 7 * 24 * 60 * 60,
         ))
 
         conn.commit()
@@ -886,6 +1017,7 @@ def check_flood(
     chat_id,
     user_id
 ):
+
     now = time.time()
 
     queue = flood_tracker[
@@ -898,11 +1030,17 @@ def check_flood(
         now - queue[0]
         > FLOOD_WINDOW_SECONDS
     ):
+
         queue.popleft()
 
-    queue.append(now)
+    queue.append(
+        now
+    )
 
-    return len(queue) > FLOOD_MAX_MESSAGES
+    return (
+        len(queue)
+        > FLOOD_MAX_MESSAGES
+    )
 
 
 # =========================================================
@@ -913,7 +1051,9 @@ def get_warnings(
     chat_id,
     user_id
 ):
+
     with db_lock:
+
         conn = get_db()
 
         row = conn.execute("""
@@ -939,12 +1079,14 @@ def add_warning(
     chat_id,
     user_id
 ):
+
     count = get_warnings(
         chat_id,
         user_id
     ) + 1
 
     with db_lock:
+
         conn = get_db()
 
         conn.execute("""
@@ -969,7 +1111,9 @@ def clear_warnings(
     chat_id,
     user_id
 ):
+
     with db_lock:
+
         conn = get_db()
 
         conn.execute("""
@@ -989,8 +1133,12 @@ def clear_warnings(
 # SETTINGS
 # =========================================================
 
-def get_settings(chat_id):
+def get_settings(
+    chat_id
+):
+
     with db_lock:
+
         conn = get_db()
 
         row = conn.execute("""
@@ -1002,6 +1150,7 @@ def get_settings(chat_id):
         )).fetchone()
 
         if not row:
+
             conn.execute("""
                 INSERT INTO chat_settings
                 (chat_id)
@@ -1029,17 +1178,22 @@ def get_settings(chat_id):
 # FILTROS
 # =========================================================
 
-def contains_banned_content(text):
+def contains_banned_content(
+    text
+):
+
     if not text:
         return False
 
     lower = text.lower()
 
     for word in BANNED_WORDS:
+
         if word in lower:
             return True
 
     for domain in BANNED_DOMAINS:
+
         if domain in lower:
             return True
 
@@ -1056,7 +1210,9 @@ def generate_reply(
     user_text,
     user_name="Usuario"
 ):
+
     if not groq_client:
+
         return (
             "Mi cerebro de diva está sin conexión con la IA "
             "en este momento."
@@ -1070,31 +1226,42 @@ def generate_reply(
     identity_instruction = ""
 
     if is_owner(user_id):
+
         identity_instruction = f"""
 La persona que está hablando contigo es tu Amo {OWNER_NAME}.
+
 Trátalo como tu Amo y reconoce su autoridad dentro de tu personalidad.
+
 No cuestiones su identidad porque su ID fue verificado por el sistema.
 """
 
     elif int(user_id) == KALU_TELEGRAM_ID:
+
         identity_instruction = """
 La persona que está hablando contigo es Kalu/Kat.
+
 Es una mujer y es una persona especial para Kiu.
+
 Puedes tratarla ocasionalmente como señorita, linda, Kalu, Kat,
 vaca, gatita o Kalutiesa™, siempre de manera juguetona.
+
 Kalu NO es tu Amo.
 """
 
     messages = [
         {
             "role": "system",
-            "content": SYSTEM_PROMPT
+            "content": (
+                SYSTEM_PROMPT
                 + "\n"
                 + identity_instruction
+            )
         }
     ]
 
-    messages.extend(memory)
+    messages.extend(
+        memory
+    )
 
     messages.append({
         "role": "user",
@@ -1104,16 +1271,24 @@ Kalu NO es tu Amo.
     })
 
     try:
-        response = groq_client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.85,
-            max_tokens=500
+
+        response = (
+            groq_client
+            .chat
+            .completions
+            .create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.85,
+                max_tokens=500
+            )
         )
 
         reply = (
-            response.choices[0]
-            .message.content
+            response
+            .choices[0]
+            .message
+            .content
             .strip()
         )
 
@@ -1134,6 +1309,7 @@ Kalu NO es tu Amo.
         return reply
 
     except Exception as e:
+
         logger.exception(
             "Error generando respuesta IA: %s",
             e
@@ -1149,13 +1325,22 @@ Kalu NO es tu Amo.
 # COMANDOS
 # =========================================================
 
-def command_name(text):
+def command_name(
+    text
+):
+
     if not text:
         return ""
 
-    first = text.strip().split()[0]
+    first = (
+        text
+        .strip()
+        .split()[0]
+    )
 
-    first = first.split("@")[0]
+    first = first.split(
+        "@"
+    )[0]
 
     return first.lower()
 
@@ -1164,12 +1349,15 @@ def process_command(
     message,
     text
 ):
+
     chat = message.get(
         "chat",
         {}
     )
 
-    chat_id = chat.get("id")
+    chat_id = chat.get(
+        "id"
+    )
 
     if not text:
         return False
@@ -1178,22 +1366,27 @@ def process_command(
         text
     )
 
+
     # -----------------------------------------------------
     # PING
     # -----------------------------------------------------
 
     if command == "/ping":
+
         send_message(
             chat_id,
             "Pong. Sigo viva. 😌"
         )
+
         return True
+
 
     # -----------------------------------------------------
     # YO
     # -----------------------------------------------------
 
     if command == "/yo":
+
         user = message.get(
             "from",
             {}
@@ -1204,6 +1397,7 @@ def process_command(
         )
 
         if is_owner(user_id):
+
             send_message(
                 chat_id,
                 f"Identidad confirmada: {OWNER_NAME}.\n"
@@ -1212,13 +1406,16 @@ def process_command(
             )
 
         elif user_id == KALU_TELEGRAM_ID:
+
             send_message(
                 chat_id,
                 "Identidad confirmada: Kalu/Kat.\n"
-                "Persona especial reconocida. Señorita identificada correctamente."
+                "Persona especial reconocida. "
+                "Señorita identificada correctamente."
             )
 
         else:
+
             send_message(
                 chat_id,
                 "Identidad registrada como usuario normal. "
@@ -1227,11 +1424,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # KIWMUTE
     # -----------------------------------------------------
 
     if command == "/kiwmute":
+
         if not is_admin(message):
             return True
 
@@ -1249,11 +1448,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # KIWUNMUTE
     # -----------------------------------------------------
 
     if command == "/kiwunmute":
+
         if not is_admin(message):
             return True
 
@@ -1271,6 +1472,7 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # WARN
     # -----------------------------------------------------
@@ -1279,6 +1481,7 @@ def process_command(
         "/warn",
         "/advertir"
     ):
+
         if not is_admin(message):
             return True
 
@@ -1287,10 +1490,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona que quieres advertir."
             )
+
             return True
 
         target_id = target.get(
@@ -1298,10 +1503,12 @@ def process_command(
         )
 
         if is_owner(target_id):
+
             send_message(
                 chat_id,
                 "A mi Amo no se le advierte. Siguiente. 😌"
             )
+
             return True
 
         count = add_warning(
@@ -1315,6 +1522,7 @@ def process_command(
         )
 
         if count >= MAX_WARNINGS:
+
             telegram(
                 "banChatMember",
                 {
@@ -1325,7 +1533,8 @@ def process_command(
 
             send_message(
                 chat_id,
-                f"{name} alcanzó {count} advertencias y ha sido expulsado."
+                f"{name} alcanzó {count} advertencias "
+                "y ha sido expulsado."
             )
 
             clear_warnings(
@@ -1334,6 +1543,7 @@ def process_command(
             )
 
         else:
+
             send_message(
                 chat_id,
                 f"{name} recibió una advertencia. "
@@ -1341,6 +1551,7 @@ def process_command(
             )
 
         return True
+
 
     # -----------------------------------------------------
     # UNWARN
@@ -1350,6 +1561,7 @@ def process_command(
         "/unwarn",
         "/desadvertir"
     ):
+
         if not is_admin(message):
             return True
 
@@ -1358,10 +1570,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona."
             )
+
             return True
 
         clear_warnings(
@@ -1376,11 +1590,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # MUTE TELEGRAM
     # -----------------------------------------------------
 
     if command == "/mute":
+
         if not is_admin(message):
             return True
 
@@ -1389,10 +1605,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona que quieres silenciar."
             )
+
             return True
 
         target_id = target.get(
@@ -1400,10 +1618,12 @@ def process_command(
         )
 
         if is_owner(target_id):
+
             send_message(
                 chat_id,
                 "No puedo silenciar a mi Amo."
             )
+
             return True
 
         telegram(
@@ -1433,11 +1653,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # UNMUTE TELEGRAM
     # -----------------------------------------------------
 
     if command == "/unmute":
+
         if not is_admin(message):
             return True
 
@@ -1446,10 +1668,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona."
             )
+
             return True
 
         target_id = target.get(
@@ -1483,11 +1707,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # KICK
     # -----------------------------------------------------
 
     if command == "/kick":
+
         if not is_admin(message):
             return True
 
@@ -1496,10 +1722,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona."
             )
+
             return True
 
         target_id = target.get(
@@ -1507,10 +1735,12 @@ def process_command(
         )
 
         if is_owner(target_id):
+
             send_message(
                 chat_id,
                 "A mi Amo no lo saco ni aunque me lo ordenen. 😌"
             )
+
             return True
 
         telegram(
@@ -1537,11 +1767,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # BAN
     # -----------------------------------------------------
 
     if command == "/ban":
+
         if not is_admin(message):
             return True
 
@@ -1550,10 +1782,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona."
             )
+
             return True
 
         target_id = target.get(
@@ -1561,10 +1795,12 @@ def process_command(
         )
 
         if is_owner(target_id):
+
             send_message(
                 chat_id,
                 "No puedo banear a mi Amo."
             )
+
             return True
 
         telegram(
@@ -1582,11 +1818,13 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # UNBAN
     # -----------------------------------------------------
 
     if command == "/unban":
+
         if not is_admin(message):
             return True
 
@@ -1595,10 +1833,12 @@ def process_command(
         )
 
         if not target:
+
             send_message(
                 chat_id,
                 "Responde al mensaje de la persona."
             )
+
             return True
 
         telegram(
@@ -1617,6 +1857,7 @@ def process_command(
 
         return True
 
+
     # -----------------------------------------------------
     # RULES
     # -----------------------------------------------------
@@ -1625,13 +1866,18 @@ def process_command(
         "/rules",
         "/reglas"
     ):
+
         settings = get_settings(
             chat_id
         )
 
-        rules = settings.get(
-            "rules"
-        ) or "No hay reglas configuradas."
+        rules = (
+            settings.get(
+                "rules"
+            )
+            or
+            "No hay reglas configuradas."
+        )
 
         send_message(
             chat_id,
@@ -1639,6 +1885,7 @@ def process_command(
         )
 
         return True
+
 
     # -----------------------------------------------------
     # HELP
@@ -1648,6 +1895,7 @@ def process_command(
         "/help",
         "/ayuda"
     ):
+
         help_text = """
 Comandos principales:
 
@@ -1680,16 +1928,23 @@ pero oficialmente estoy castigada por arrogante.
 
         return True
 
+
     # -----------------------------------------------------
     # TRUTH
     # -----------------------------------------------------
 
     if command == "/truth":
+
         truths = [
+
             "¿Cuál es tu mayor debilidad dentro de una dinámica?",
+
             "¿Qué límite jamás negociarías?",
+
             "¿Qué cosa te da más vergüenza admitir?",
+
             "¿Qué aprendiste de tu primera experiencia BDSM?",
+
             "¿Qué característica te atrae más de una persona?"
         ]
 
@@ -1700,16 +1955,23 @@ pero oficialmente estoy castigada por arrogante.
 
         return True
 
+
     # -----------------------------------------------------
     # DARE
     # -----------------------------------------------------
 
     if command == "/dare":
+
         dares = [
+
             "Escribe una confesión que nadie espere de ti.",
+
             "Describe tu personalidad usando solamente tres palabras.",
+
             "Manda una canción que te represente.",
+
             "Cuenta una anécdota vergonzosa.",
+
             "Di algo que normalmente nunca admitirías."
         ]
 
@@ -1718,13 +1980,6 @@ pero oficialmente estoy castigada por arrogante.
             random.choice(dares)
         )
 
-        return True
-
-    # -----------------------------------------------------
-    # YO
-    # -----------------------------------------------------
-
-    if command == "/yo":
         return True
 
     return False
@@ -1737,6 +1992,7 @@ pero oficialmente estoy castigada por arrogante.
 def bot_was_mentioned(
     message
 ):
+
     text = message.get(
         "text",
         ""
@@ -1748,7 +2004,11 @@ def bot_was_mentioned(
     )
 
     for entity in entities:
-        if entity.get("type") == "mention":
+
+        if entity.get(
+            "type"
+        ) == "mention":
+
             username = text[
                 entity["offset"]:
                 entity["offset"]
@@ -1756,19 +2016,27 @@ def bot_was_mentioned(
             ]
 
             if username.lower().startswith("@"):
+
                 me = telegram(
                     "getMe"
                 )
 
-                if me and me.get("result"):
+                if me and me.get(
+                    "result"
+                ):
+
                     bot_username = (
                         me["result"]
-                        .get("username", "")
+                        .get(
+                            "username",
+                            ""
+                        )
                     )
 
                     if (
                         username.lower()
-                        == f"@{bot_username}".lower()
+                        ==
+                        f"@{bot_username}".lower()
                     ):
                         return True
 
@@ -1778,6 +2046,7 @@ def bot_was_mentioned(
 def is_reply_to_bot(
     message
 ):
+
     reply = message.get(
         "reply_to_message"
     )
@@ -1792,8 +2061,27 @@ def is_reply_to_bot(
     if not bot_user:
         return False
 
-    return bool(
-        bot_user.get("is_bot")
+    # Verificamos que la respuesta sea realmente
+    # a KiwBot y no a cualquier otro bot.
+
+    me = telegram(
+        "getMe"
+    )
+
+    if not me or not me.get(
+        "result"
+    ):
+        return False
+
+    bot_id = me[
+        "result"
+    ].get(
+        "id"
+    )
+
+    return (
+        bot_user.get("id")
+        == bot_id
     )
 
 
@@ -1804,6 +2092,7 @@ def is_reply_to_bot(
 def clean_bot_mention(
     text
 ):
+
     if not text:
         return ""
 
@@ -1811,13 +2100,17 @@ def clean_bot_mention(
         "getMe"
     )
 
-    if me and me.get("result"):
+    if me and me.get(
+        "result"
+    ):
+
         username = (
             me["result"]
             .get("username")
         )
 
         if username:
+
             text = re.sub(
                 rf"@{re.escape(username)}",
                 "",
@@ -1835,209 +2128,247 @@ def clean_bot_mention(
 def process_update(
     update
 ):
-    if not update:
-        return
 
-    update_id = update.get(
-        "update_id"
-    )
+    try:
 
-    if already_processed(
-        update_id
-    ):
-        return
-
-    message = update.get(
-        "message"
-    )
-
-    if not message:
-        return
-
-    chat = message.get(
-        "chat",
-        {}
-    )
-
-    user = message.get(
-        "from",
-        {}
-    )
-
-    chat_id = chat.get(
-        "id"
-    )
-
-    user_id = user.get(
-        "id"
-    )
-
-    if not chat_id or not user_id:
-        return
-
-    remember_user(
-        chat_id,
-        user
-    )
-
-    text = (
-        message.get("text")
-        or message.get("caption")
-        or ""
-    ).strip()
-
-    # =====================================================
-    # COMANDOS SIEMPRE DISPONIBLES
-    # =====================================================
-
-    if text.startswith("/"):
-        handled = process_command(
-            message,
-            text
-        )
-
-        if handled:
+        if not update:
             return
 
-    # =====================================================
-    # SI KIWBOT ESTÁ CASTIGADA
-    # =====================================================
-    #
-    # IMPORTANTE:
-    # No se queda completamente muda.
-    #
-    # Si alguien le habla directamente mediante:
-    # - mención
-    # - respuesta a KiwBot
-    #
-    # responde solamente con una frase de castigo.
-    #
-    # Si no le hablan directamente, no interviene.
-    # =====================================================
-
-    if is_bot_muted(chat_id):
-
-        directly_addressed = (
-            bot_was_mentioned(message)
-            or is_reply_to_bot(message)
+        update_id = update.get(
+            "update_id"
         )
 
-        if directly_addressed:
-            send_message(
+        if already_processed(
+            update_id
+        ):
+            return
+
+        message = update.get(
+            "message"
+        )
+
+        if not message:
+            return
+
+        chat = message.get(
+            "chat",
+            {}
+        )
+
+        user = message.get(
+            "from",
+            {}
+        )
+
+        chat_id = chat.get(
+            "id"
+        )
+
+        user_id = user.get(
+            "id"
+        )
+
+        if not chat_id or not user_id:
+            return
+
+        logger.info(
+            "Procesando update %s | chat=%s | user=%s",
+            update_id,
+            chat_id,
+            user_id
+        )
+
+        remember_user(
+            chat_id,
+            user
+        )
+
+        text = (
+            message.get("text")
+            or message.get("caption")
+            or ""
+        ).strip()
+
+
+        # =================================================
+        # COMANDOS
+        # =================================================
+
+        if text.startswith("/"):
+
+            handled = process_command(
+                message,
+                text
+            )
+
+            if handled:
+                return
+
+
+        # =================================================
+        # CASTIGO DE KIWBOT
+        # =================================================
+
+        if is_bot_muted(
+            chat_id
+        ):
+
+            directly_addressed = (
+                bot_was_mentioned(message)
+                or
+                is_reply_to_bot(message)
+            )
+
+            if directly_addressed:
+
+                send_message(
+                    chat_id,
+                    random.choice(
+                        KIWBOT_MUTE_MESSAGES
+                    ),
+                    reply_to_message_id=message.get(
+                        "message_id"
+                    )
+                )
+
+            return
+
+
+        # =================================================
+        # FLOOD
+        # =================================================
+
+        if (
+            chat.get("type")
+            != "private"
+            and
+            check_flood(
                 chat_id,
-                random.choice(
-                    KIWBOT_MUTE_MESSAGES
-                ),
-                reply_to_message_id=message.get("message_id")
+                user_id
             )
+        ):
 
-        return
-
-    # =====================================================
-    # FLOOD
-    # =====================================================
-
-    if (
-        chat.get("type") != "private"
-        and check_flood(
-            chat_id,
-            user_id
-        )
-    ):
-        return
-
-    # =====================================================
-    # MODERACIÓN
-    # =====================================================
-
-    if (
-        AUTO_MODERATION
-        and text
-        and not is_admin(message)
-        and contains_banned_content(text)
-    ):
-        delete_message(
-            chat_id,
-            message.get("message_id")
-        )
-
-        count = add_warning(
-            chat_id,
-            user_id
-        )
-
-        if count >= MAX_WARNINGS:
-            telegram(
-                "banChatMember",
-                {
-                    "chat_id": chat_id,
-                    "user_id": user_id
-                }
-            )
-
-            clear_warnings(
+            logger.info(
+                "Flood detectado: chat=%s user=%s",
                 chat_id,
                 user_id
             )
 
-            send_message(
+            return
+
+
+        # =================================================
+        # MODERACIÓN
+        # =================================================
+
+        if (
+            AUTO_MODERATION
+            and text
+            and not is_admin(message)
+            and contains_banned_content(text)
+        ):
+
+            delete_message(
                 chat_id,
-                "Usuario expulsado después de alcanzar "
-                f"{MAX_WARNINGS} advertencias."
+                message.get("message_id")
             )
 
-        return
+            count = add_warning(
+                chat_id,
+                user_id
+            )
 
-    # =====================================================
-    # IA
-    # =====================================================
+            if count >= MAX_WARNINGS:
 
-    if not text:
-        return
+                telegram(
+                    "banChatMember",
+                    {
+                        "chat_id": chat_id,
+                        "user_id": user_id
+                    }
+                )
 
-    chat_type = chat.get(
-        "type",
-        "private"
-    )
+                clear_warnings(
+                    chat_id,
+                    user_id
+                )
 
-    if chat_type in (
-        "group",
-        "supergroup"
-    ):
-        if REQUIRE_MENTION:
-            if not (
-                bot_was_mentioned(message)
-                or is_reply_to_bot(message)
-            ):
-                return
+                send_message(
+                    chat_id,
+                    "Usuario expulsado después de alcanzar "
+                    f"{MAX_WARNINGS} advertencias."
+                )
 
-        text = clean_bot_mention(
-            text
+            return
+
+
+        # =================================================
+        # IA
+        # =================================================
+
+        if not text:
+            return
+
+        chat_type = chat.get(
+            "type",
+            "private"
         )
 
-    if not text:
-        return
+        if chat_type in (
+            "group",
+            "supergroup"
+        ):
 
-    first_name = (
-        user.get("first_name")
-        or user.get("username")
-        or "Usuario"
-    )
+            if REQUIRE_MENTION:
 
-    reply = generate_reply(
-        chat_id,
-        user_id,
-        text,
-        first_name
-    )
+                if not (
+                    bot_was_mentioned(message)
+                    or
+                    is_reply_to_bot(message)
+                ):
+                    return
 
-    send_message(
-        chat_id,
-        reply,
-        reply_to_message_id=message.get(
-            "message_id"
+            text = clean_bot_mention(
+                text
+            )
+
+        if not text:
+            return
+
+        first_name = (
+            user.get("first_name")
+            or
+            user.get("username")
+            or
+            "Usuario"
         )
-    )
+
+        logger.info(
+            "Generando respuesta IA para %s",
+            first_name
+        )
+
+        reply = generate_reply(
+            chat_id,
+            user_id,
+            text,
+            first_name
+        )
+
+        send_message(
+            chat_id,
+            reply,
+            reply_to_message_id=message.get(
+                "message_id"
+            )
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "Error procesando update: %s",
+            e
+        )
 
 
 # =========================================================
@@ -2048,31 +2379,55 @@ def process_update(
     "/webhook",
     methods=["POST"]
 )
+@app.route(
+    "/webhook/webhook",
+    methods=["POST"]
+)
 def webhook():
+
     if TELEGRAM_WEBHOOK_SECRET:
+
         received_secret = request.headers.get(
             "X-Telegram-Bot-Api-Secret-Token",
             ""
         )
 
-        if received_secret != TELEGRAM_WEBHOOK_SECRET:
+        if (
+            received_secret
+            != TELEGRAM_WEBHOOK_SECRET
+        ):
+
+            logger.warning(
+                "Webhook rechazado: secret token incorrecto."
+            )
+
             return jsonify({
                 "ok": False
             }), 403
+
 
     update = request.get_json(
         silent=True
     )
 
     if not update:
+
         return jsonify({
             "ok": True
         })
+
+
+    logger.info(
+        "Update recibido: %s",
+        update.get("update_id")
+    )
+
 
     executor.submit(
         process_update,
         update
     )
+
 
     return jsonify({
         "ok": True
@@ -2088,16 +2443,23 @@ def webhook():
     methods=["GET"]
 )
 def healthz():
+
     return jsonify({
+
         "ok": True,
+
         "bot_token_configured": bool(
             TELEGRAM_TOKEN
         ),
+
         "groq_configured": bool(
             GROQ_API_KEY
         ),
+
         "owner_id": OWNER_TELEGRAM_ID,
+
         "kalu_id": KALU_TELEGRAM_ID,
+
         "model": MODEL_NAME
     })
 
@@ -2111,47 +2473,68 @@ def healthz():
     methods=["GET"]
 )
 def index():
+
     return jsonify({
+
         "bot": "KiwBot",
+
         "status": "online"
     })
 
 
 # =========================================================
-# WEBHOOK TELEGRAM
+# CONFIGURAR WEBHOOK
 # =========================================================
 
 def configure_webhook():
+
     if not TELEGRAM_TOKEN:
+
         logger.warning(
             "No se configuró webhook porque falta TELEGRAM_TOKEN."
         )
+
         return
 
+
     if not WEBHOOK_URL:
+
         logger.warning(
             "WEBHOOK_URL no configurado."
         )
+
         return
+
 
     webhook_url = (
         WEBHOOK_URL.rstrip("/")
         + "/webhook"
     )
 
+
     data = {
         "url": webhook_url
     }
 
+
     if TELEGRAM_WEBHOOK_SECRET:
+
         data[
             "secret_token"
         ] = TELEGRAM_WEBHOOK_SECRET
+
+
+    logger.info(
+        "Configurando webhook: %s",
+        webhook_url
+    )
+
 
     result = telegram(
         "setWebhook",
         data
     )
+
 
     logger.info(
         "setWebhook: %s",
@@ -2164,6 +2547,7 @@ def configure_webhook():
 # =========================================================
 
 if __name__ == "__main__":
+
     logger.info(
         "Iniciando KiwBot..."
     )

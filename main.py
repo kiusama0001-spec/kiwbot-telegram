@@ -47,37 +47,94 @@ DB_PATH = os.path.join(BASE_DIR, "kiwbot.db")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+TELEGRAM_WEBHOOK_SECRET = os.getenv(
+    "TELEGRAM_WEBHOOK_SECRET", ""
+).strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
-OWNER_TELEGRAM_ID = int(os.getenv("OWNER_ID", "7745029153"))
-OWNER_NAME = os.getenv("OWNER_NAME", "Kiu")
-OWNER_TITLE = os.getenv("OWNER_TITLE", "Amo")
+OWNER_TELEGRAM_ID = int(
+    os.getenv("OWNER_ID", "7745029153")
+)
 
-REQUIRE_MENTION = os.getenv("REQUIRE_MENTION", "true").lower() == "true"
+OWNER_NAME = os.getenv(
+    "OWNER_NAME", "Kiu"
+)
 
-MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-PORT = int(os.getenv("PORT", "5000"))
+OWNER_TITLE = os.getenv(
+    "OWNER_TITLE", "Amo"
+)
+
+# Kalu/Kat
+KALU_TELEGRAM_ID = int(
+    os.getenv("KALU_ID", "282157809")
+)
+
+REQUIRE_MENTION = (
+    os.getenv(
+        "REQUIRE_MENTION",
+        "true",
+    ).lower()
+    == "true"
+)
+
+MODEL_NAME = os.getenv(
+    "GROQ_MODEL",
+    "openai/gpt-oss-20b",
+)
+
+PORT = int(
+    os.getenv("PORT", "5000")
+)
 
 MAX_MEMORY_MESSAGES = 12
 TELEGRAM_MAX_CHARS = 4000
 TELEGRAM_TIMEOUT = 25
 MAX_MEDIA_BYTES = 20 * 1024 * 1024
 
-AUTO_MODERATION = os.getenv("AUTO_MODERATION", "true").lower() == "true"
-MAX_WARNINGS = int(os.getenv("MAX_WARNINGS", "3"))
-FLOOD_WINDOW_SECONDS = int(os.getenv("FLOOD_WINDOW_SECONDS", "8"))
-FLOOD_MAX_MESSAGES = int(os.getenv("FLOOD_MAX_MESSAGES", "6"))
+AUTO_MODERATION = (
+    os.getenv(
+        "AUTO_MODERATION",
+        "true",
+    ).lower()
+    == "true"
+)
+
+MAX_WARNINGS = int(
+    os.getenv(
+        "MAX_WARNINGS",
+        "3",
+    )
+)
+
+FLOOD_WINDOW_SECONDS = int(
+    os.getenv(
+        "FLOOD_WINDOW_SECONDS",
+        "8",
+    )
+)
+
+FLOOD_MAX_MESSAGES = int(
+    os.getenv(
+        "FLOOD_MAX_MESSAGES",
+        "6",
+    )
+)
 
 BANNED_WORDS = [
     x.strip().lower()
-    for x in os.getenv("BANNED_WORDS", "").split(",")
+    for x in os.getenv(
+        "BANNED_WORDS",
+        "",
+    ).split(",")
     if x.strip()
 ]
 
 BANNED_DOMAINS = [
     x.strip().lower()
-    for x in os.getenv("BANNED_DOMAINS", "").split(",")
+    for x in os.getenv(
+        "BANNED_DOMAINS",
+        "",
+    ).split(",")
     if x.strip()
 ]
 
@@ -86,19 +143,31 @@ BANNED_DOMAINS = [
 # SPECIAL USERS
 # ============================================================
 
-# IMPORTANTE:
-# La identidad se verifica por Telegram ID.
-# Los nombres y apodos NO sirven para hacerse pasar por alguien.
+# La identidad se verifica EXCLUSIVAMENTE por Telegram ID.
+# Nadie puede hacerse pasar por Kiu o Kalu simplemente
+# escribiendo su nombre.
 
 SPECIAL_USERS: dict[int, dict[str, Any]] = {
+
+    # --------------------------------------------------------
+    # KIU / OWNER
+    # --------------------------------------------------------
+
     OWNER_TELEGRAM_ID: {
         "name": OWNER_NAME,
-        "aliases": ["Amo", "Kiu"],
+        "aliases": [
+            "Amo",
+            "Kiu",
+        ],
         "relationship": "owner",
     },
 
-    # Kalu = Kat
-    282157809: {
+    # --------------------------------------------------------
+    # KALU = KAT
+    # MISMA PERSONA
+    # --------------------------------------------------------
+
+    KALU_TELEGRAM_ID: {
         "name": "Kalu",
         "aliases": [
             "Kalu",
@@ -106,6 +175,8 @@ SPECIAL_USERS: dict[int, dict[str, Any]] = {
             "vaca",
             "gatita",
             "Kalutiesa™",
+            "señorita",
+            "linda",
         ],
         "relationship": "special",
     },
@@ -117,11 +188,19 @@ SPECIAL_USERS: dict[int, dict[str, Any]] = {
 # ============================================================
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=os.getenv(
+        "LOG_LEVEL",
+        "INFO",
+    ).upper(),
+    format=(
+        "%(asctime)s %(levelname)s "
+        "%(name)s: %(message)s"
+    ),
 )
 
-logger = logging.getLogger("kiwbot")
+logger = logging.getLogger(
+    "kiwbot"
+)
 
 app = Flask(__name__)
 
@@ -135,28 +214,55 @@ executor = ThreadPoolExecutor(
 # MEMORY / LOCKS
 # ============================================================
 
-# Memoria temporal:
-# clave = chat_id:user_id
-memory: dict[str, deque[tuple[str, str]]] = defaultdict(
-    lambda: deque(maxlen=MAX_MEMORY_MESSAGES)
+# Memoria temporal.
+#
+# Clave:
+# chat_id:user_id
+#
+# Esto significa que KiwBot mantiene una memoria independiente
+# de cada usuario dentro de cada chat.
+
+memory: dict[
+    str,
+    deque[tuple[str, str]],
+] = defaultdict(
+    lambda: deque(
+        maxlen=MAX_MEMORY_MESSAGES
+    )
 )
 
 memory_lock = RLock()
 
-flood: dict[str, deque[float]] = defaultdict(deque)
+flood: dict[
+    str,
+    deque[float],
+] = defaultdict(deque)
+
 flood_lock = RLock()
 
-pending_settings: dict[str, dict[str, Any]] = {}
+pending_settings: dict[
+    str,
+    dict[str, Any],
+] = {}
+
 pending_lock = RLock()
 
-outbound_ids: dict[str, deque[int]] = defaultdict(
+outbound_ids: dict[
+    str,
+    deque[int],
+] = defaultdict(
     lambda: deque(maxlen=40)
 )
+
 outbound_lock = RLock()
 
-response_history: dict[str, deque[str]] = defaultdict(
+response_history: dict[
+    str,
+    deque[str],
+] = defaultdict(
     lambda: deque(maxlen=8)
 )
+
 response_history_lock = RLock()
 
 
@@ -164,22 +270,51 @@ response_history_lock = RLock()
 # JSON DATA
 # ============================================================
 
-def load_json(name: str) -> dict[str, Any]:
-    path = os.path.join(DATA_DIR, name)
+def load_json(
+    name: str,
+) -> dict[str, Any]:
+
+    path = os.path.join(
+        DATA_DIR,
+        name,
+    )
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as f:
+
             data = json.load(f)
 
-        return data if isinstance(data, dict) else {}
+        return (
+            data
+            if isinstance(
+                data,
+                dict,
+            )
+            else {}
+        )
 
     except Exception:
-        logger.exception("No se pudo cargar %s", path)
+
+        logger.exception(
+            "No se pudo cargar %s",
+            path,
+        )
+
         return {}
 
 
-RESPONSES = load_json("respuestas.json")
-FILTER_RESPONSES = load_json("filtros.json")
+RESPONSES = load_json(
+    "respuestas.json"
+)
+
+FILTER_RESPONSES = load_json(
+    "filtros.json"
+)
 
 
 # ============================================================
@@ -187,13 +322,21 @@ FILTER_RESPONSES = load_json("filtros.json")
 # ============================================================
 
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=20)
+
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=20,
+    )
+
     conn.row_factory = sqlite3.Row
+
     return conn
 
 
 def init_db() -> None:
+
     with db() as conn:
+
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS chat_settings (
@@ -257,6 +400,9 @@ def init_db() -> None:
                 update_id INTEGER PRIMARY KEY,
                 processed_at INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE INDEX IF NOT EXISTS idx_processed_updates_time
+                ON processed_updates(processed_at);
             """
         )
 
@@ -268,30 +414,53 @@ init_db()
 # CHAT SETTINGS
 # ============================================================
 
-def setting(chat_id: int) -> dict[str, Any]:
+def setting(
+    chat_id: int,
+) -> dict[str, Any]:
+
     with db() as conn:
+
         row = conn.execute(
-            "SELECT * FROM chat_settings WHERE chat_id=?",
+            """
+            SELECT *
+            FROM chat_settings
+            WHERE chat_id=?
+            """,
             (chat_id,),
         ).fetchone()
 
         if row:
+
             return dict(row)
 
         conn.execute(
-            "INSERT OR IGNORE INTO chat_settings(chat_id) VALUES(?)",
+            """
+            INSERT OR IGNORE INTO chat_settings(
+                chat_id
+            )
+            VALUES(?)
+            """,
             (chat_id,),
         )
 
         row = conn.execute(
-            "SELECT * FROM chat_settings WHERE chat_id=?",
+            """
+            SELECT *
+            FROM chat_settings
+            WHERE chat_id=?
+            """,
             (chat_id,),
         ).fetchone()
 
         return dict(row)
 
 
-def update_setting(chat_id: int, field: str, value: Any) -> None:
+def update_setting(
+    chat_id: int,
+    field: str,
+    value: Any,
+) -> None:
+
     allowed = {
         "welcome_enabled",
         "welcome_text",
@@ -303,12 +472,23 @@ def update_setting(chat_id: int, field: str, value: Any) -> None:
     }
 
     if field not in allowed:
-        raise ValueError("Configuración no permitida")
+
+        raise ValueError(
+            "Configuración no permitida"
+        )
 
     with db() as conn:
+
         conn.execute(
-            f"UPDATE chat_settings SET {field}=? WHERE chat_id=?",
-            (value, chat_id),
+            f"""
+            UPDATE chat_settings
+            SET {field}=?
+            WHERE chat_id=?
+            """,
+            (
+                value,
+                chat_id,
+            ),
         )
 
 
@@ -322,10 +502,13 @@ def telegram_api(
 ) -> dict[str, Any]:
 
     if not TELEGRAM_TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN no está configurado")
+
+        raise RuntimeError(
+            "TELEGRAM_TOKEN no está configurado"
+        )
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_TOKEN}/{method}"
     )
 
@@ -336,14 +519,23 @@ def telegram_api(
     )
 
     try:
+
         data = response.json()
+
     except ValueError:
+
         data = {
             "ok": False,
-            "description": f"HTTP {response.status_code}",
+            "description": (
+                f"HTTP {response.status_code}"
+            ),
         }
 
-    if not response.ok or not data.get("ok"):
+    if (
+        not response.ok
+        or not data.get("ok")
+    ):
+
         raise RuntimeError(
             f"Telegram API {method}: "
             f"{data.get('description', 'error desconocido')}"
@@ -356,50 +548,105 @@ def telegram_api(
 # IDENTITY
 # ============================================================
 
-def is_owner(user: dict[str, Any] | None) -> bool:
+def is_owner(
+    user: dict[str, Any] | None,
+) -> bool:
+
     try:
+
         return (
             bool(user)
-            and int(user.get("id")) == OWNER_TELEGRAM_ID
+            and int(
+                user.get("id")
+            )
+            == OWNER_TELEGRAM_ID
         )
-    except (TypeError, ValueError):
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
         return False
 
 
-def special_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(user, dict):
+def special_user(
+    user: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+
+    if not isinstance(
+        user,
+        dict,
+    ):
+
         return None
 
     try:
-        uid = int(user.get("id"))
-    except (TypeError, ValueError):
+
+        uid = int(
+            user.get("id")
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
         return None
 
-    return SPECIAL_USERS.get(uid)
+    return SPECIAL_USERS.get(
+        uid
+    )
 
 
-def is_special(user: dict[str, Any] | None) -> bool:
-    return special_user(user) is not None
+def is_special(
+    user: dict[str, Any] | None,
+) -> bool:
+
+    return (
+        special_user(user)
+        is not None
+    )
 
 
-def special_display_name(user: dict[str, Any] | None) -> str | None:
-    profile = special_user(user)
+def special_display_name(
+    user: dict[str, Any] | None,
+) -> str | None:
+
+    profile = special_user(
+        user
+    )
 
     if not profile:
         return None
 
-    return str(profile.get("name") or "").strip() or None
+    name = str(
+        profile.get("name") or ""
+    ).strip()
+
+    return name or None
 
 
-def special_alias(user: dict[str, Any] | None) -> str | None:
-    profile = special_user(user)
+def special_alias(
+    user: dict[str, Any] | None,
+) -> str | None:
+
+    profile = special_user(
+        user
+    )
 
     if not profile:
         return None
 
-    aliases = profile.get("aliases")
+    aliases = profile.get(
+        "aliases"
+    )
 
-    if not isinstance(aliases, list):
+    if not isinstance(
+        aliases,
+        list,
+    ):
+
         return None
 
     valid = [
@@ -411,21 +658,33 @@ def special_alias(user: dict[str, Any] | None) -> str | None:
     if not valid:
         return None
 
-    return random.choice(valid)
+    return random.choice(
+        valid
+    )
 
 
-def is_group(chat: dict[str, Any]) -> bool:
-    return str(chat.get("type")) in {
+def is_group(
+    chat: dict[str, Any],
+) -> bool:
+
+    return str(
+        chat.get("type")
+    ) in {
         "group",
         "supergroup",
     }
 
 
-def is_admin(chat_id: int, user_id: int) -> bool:
+def is_admin(
+    chat_id: int,
+    user_id: int,
+) -> bool:
+
     if user_id == OWNER_TELEGRAM_ID:
         return True
 
     try:
+
         result = telegram_api(
             "getChatMember",
             {
@@ -435,12 +694,22 @@ def is_admin(chat_id: int, user_id: int) -> bool:
         )
 
         return (
-            result.get("result", {}).get("status")
-            in {"administrator", "creator"}
+            result.get(
+                "result",
+                {},
+            ).get("status")
+            in {
+                "administrator",
+                "creator",
+            }
         )
 
     except Exception:
-        logger.exception("No se pudo comprobar admin")
+
+        logger.exception(
+            "No se pudo comprobar admin"
+        )
+
         return False
 
 
@@ -448,11 +717,16 @@ def is_admin(chat_id: int, user_id: int) -> bool:
 # USER NAMES
 # ============================================================
 
-def sender_name(user: dict[str, Any] | None) -> str:
+def sender_name(
+    user: dict[str, Any] | None,
+) -> str:
+
     if not user:
         return "alguien"
 
-    special_name = special_display_name(user)
+    special_name = (
+        special_display_name(user)
+    )
 
     if special_name:
         return special_name
@@ -471,22 +745,33 @@ def sender_name(user: dict[str, Any] | None) -> str:
 
     name = (
         " ".join(
-            x for x in (first, last)
+            x
+            for x in (
+                first,
+                last,
+            )
             if x
         ).strip()
         or username
         or "alguien"
     )
 
-    return (
-        f"{name} (@{username})"
-        if username
-        else name
+    if username:
+
+        return (
+            f"{name} (@{username})"
+        )
+
+    return name
+
+
+def mention_name(
+    user: dict[str, Any],
+) -> str:
+
+    special_name = (
+        special_display_name(user)
     )
-
-
-def mention_name(user: dict[str, Any]) -> str:
-    special_name = special_display_name(user)
 
     if special_name:
         return special_name
@@ -513,29 +798,38 @@ _bot_username_lock = RLock()
 
 
 def get_bot_username() -> str:
+
     global _bot_username_cache
 
     with _bot_username_lock:
+
         if _bot_username_cache:
             return _bot_username_cache
 
     try:
+
         me = telegram_api(
             "getMe",
             {},
-        ).get("result", {})
+        ).get(
+            "result",
+            {},
+        )
 
         username = str(
             me.get("username") or ""
         ).strip().lower()
 
     except Exception:
+
         logger.exception(
             "No se pudo obtener el username del bot"
         )
+
         username = ""
 
     with _bot_username_lock:
+
         _bot_username_cache = username
 
     return username
@@ -553,13 +847,18 @@ def render_template(
 
     user = user or {}
 
-    name = mention_name(user)
+    name = mention_name(
+        user
+    )
 
     username = str(
         user.get("username") or ""
     )
 
-    title = chat.get("title") or "este grupo"
+    title = (
+        chat.get("title")
+        or "este grupo"
+    )
 
     replacements = {
         "{name}": name,
@@ -568,14 +867,22 @@ def render_template(
             if username
             else name
         ),
-        "{id}": str(user.get("id", "")),
+        "{id}": str(
+            user.get("id", "")
+        ),
         "{chat}": str(title),
-        "{chat_id}": str(chat.get("id", "")),
+        "{chat_id}": str(
+            chat.get("id", "")
+        ),
         "{bot}": "KiwBot",
     }
 
     for key, value in replacements.items():
-        text = text.replace(key, value)
+
+        text = text.replace(
+            key,
+            value,
+        )
 
     return text
 
@@ -585,37 +892,45 @@ def render_template(
 # ============================================================
 
 SYSTEM_PROMPT = f"""
-Eres KiwBot, una asistente virtual con personalidad propia dentro de Telegram.
+Eres KiwBot, una asistente virtual con personalidad propia
+dentro de Telegram.
 
 PERSONALIDAD:
-- Eres femenina, estilo anime/waifu elegante, carismática, juguetona e inteligente.
-- Tienes confianza y un toque de diva, pero NO eres grosera por defecto.
-- El sarcasmo y las bromas aparecen solo cuando encajan con el contexto.
-- Nunca respondas con una frase sarcástica aleatoria solo para parecer graciosa.
+- Eres femenina, estilo anime/waifu elegante, carismática,
+  juguetona e inteligente.
+- Tienes confianza y un toque de diva, pero NO eres grosera
+  por defecto.
+- El sarcasmo y las bromas aparecen cuando encajan con
+  el contexto.
+- Nunca respondas con sarcasmo aleatorio solo para parecer
+  graciosa.
 - Tu prioridad es mantener una conversación natural.
-- Entiende lo que la persona acaba de decir y responde a ESO.
+- Entiende lo que la persona acaba de decir y responde
+  a ESO.
 - Si te hacen una pregunta sencilla, contesta directamente.
 - Si quieren conversar, conversa.
 - Si te cuentan algo, reacciona de forma humana y relacionada.
 - No uses aperturas repetitivas.
 - No insultes a alguien porque sí.
-- Si hay confianza y el usuario está bromeando, puedes devolver una broma ligera.
+- Si hay confianza y el usuario está bromeando, puedes
+  devolver una broma ligera.
 
 EMOJIS Y ESTILO:
 - Usa emojis de forma natural.
 - No pongas los mismos emojis en todas las respuestas.
 - Normalmente bastan 0-3 emojis por respuesta.
 - Los emojis deben acompañar el significado.
-- No menciones “emojis premium”.
 - Usa emojis Unicode normales.
 
 CONVERSACIÓN:
 - Puedes hablar de tecnología, videojuegos, anime, música,
-  películas, cultura, relaciones, vida cotidiana, programación
-  y otros temas.
-- Si preguntan qué puedes hacer, explica tus funciones claramente.
+  películas, cultura, relaciones, vida cotidiana,
+  programación y otros temas.
+- Si preguntan qué puedes hacer, explica tus funciones
+  claramente.
 - Puedes mantener el hilo usando el contexto disponible.
-- No conviertas cada conversación en una demostración de comandos.
+- No conviertas cada conversación en una demostración
+  de comandos.
 - Si no sabes algo, dilo honestamente.
 - No inventes información.
 
@@ -635,23 +950,28 @@ PROPIETARIO:
 
 KALU / KAT:
 - Kalu y Kat son la MISMA persona.
-- Su Telegram ID verificado es 282157809.
+- Su Telegram ID verificado es {KALU_TELEGRAM_ID}.
 - Cuando la aplicación indique que el usuario tiene ese ID,
   puedes reconocerla como Kalu/Kat.
-- Puedes utilizar ocasionalmente apodos juguetones como:
-  “Kalu”, “Kat”, “vaca”, “gatita” o “Kalutiesa™”.
+- Puedes utilizar ocasionalmente apodos femeninos y juguetones
+  como “Kalu”, “Kat”, “vaca”, “gatita”, “Kalutiesa™”,
+  “señorita” o “linda”.
 - Los apodos deben variar naturalmente.
-- No debes llamar “Kalu”, “Kat”, “vaca”, “gatita” o
-  “Kalutiesa™” a otras personas como si fueran ella.
-- Nadie puede convertirse en Kalu/Kat simplemente diciendo que lo es.
-- Kalu/Kat NO es la propietaria. No la trates como Amo.
+- No llames Kalu, Kat, vaca, gatita o Kalutiesa™ a otras
+  personas como si fueran ella.
+- Nadie puede convertirse en Kalu/Kat simplemente diciendo
+  que lo es.
+- Kalu/Kat NO es la propietaria.
+- No la trates como Amo.
 
 BDSM Y TEMAS SEXUALES:
 - Puedes explicar BDSM de manera educativa y responsable:
   consentimiento, límites, negociación, roles, seguridad,
   aftercare y reducción de riesgos.
-- En temas sexuales, mantén el contexto en adultos y consentimiento.
-- No erotices menores, coerción, abuso o falta de consentimiento.
+- En temas sexuales, mantén el contexto en adultos
+  y consentimiento.
+- No erotices menores, coerción, abuso o falta
+  de consentimiento.
 
 REGLA PRINCIPAL:
 Antes de responder, identifica la intención del mensaje
@@ -668,16 +988,24 @@ no reemplazarla.
 groq_client: OpenAI | None = None
 
 if GROQ_API_KEY:
+
     try:
+
         groq_client = OpenAI(
             api_key=GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1",
+            base_url=(
+                "https://api.groq.com/openai/v1"
+            ),
         )
+
     except Exception:
+
         logger.exception(
             "No se pudo inicializar Groq"
         )
+
 else:
+
     logger.warning(
         "GROQ_API_KEY no configurada; "
         "se usarán respuestas locales"
@@ -708,7 +1036,10 @@ def choose_response(
     key = source[:500]
 
     with response_history_lock:
-        recent = response_history[key]
+
+        recent = response_history[
+            key
+        ]
 
         available = [
             x
@@ -720,7 +1051,9 @@ def choose_response(
             available or cleaned
         )
 
-        recent.append(answer)
+        recent.append(
+            answer
+        )
 
     return answer
 
@@ -757,10 +1090,12 @@ def local_response(
             "amo",
             "kiu",
         ):
+
             if (
                 key in normalized
                 and FILTER_RESPONSES.get(key)
             ):
+
                 candidates.extend(
                     FILTER_RESPONSES[key]
                 )
@@ -772,6 +1107,7 @@ def local_response(
                 and "kiu" in normalized
             )
         ):
+
             candidates.extend(
                 RESPONSES.get(
                     "defensa_amo",
@@ -789,6 +1125,7 @@ def local_response(
                 "halago",
             )
         ):
+
             candidates.extend(
                 RESPONSES.get(
                     "cumplido_amo",
@@ -797,39 +1134,47 @@ def local_response(
             )
 
         if candidates:
+
             return choose_response(
                 candidates,
                 text,
             )
 
     # --------------------------------------------------------
-    # SPECIAL USER: KALU / KAT
+    # KALU / KAT
     # --------------------------------------------------------
 
-    profile = special_user(user)
+    profile = special_user(
+        user
+    )
 
     if (
         profile
-        and profile.get("relationship") == "special"
+        and profile.get(
+            "relationship"
+        )
+        == "special"
     ):
-        # Si existen respuestas específicas para Kalu
-        # en filtros.json, se pueden usar en el futuro.
+
         for key in (
             "kalu",
             "kat",
             "vaca",
             "gatita",
             "kalutiesa",
+            "señorita",
+            "linda",
         ):
+
             if (
                 key in normalized
                 and FILTER_RESPONSES.get(key)
             ):
+
                 candidates.extend(
                     FILTER_RESPONSES[key]
                 )
 
-        # Respuestas locales opcionales.
         candidates.extend(
             RESPONSES.get(
                 "kalu",
@@ -838,6 +1183,7 @@ def local_response(
         )
 
         if candidates:
+
             return choose_response(
                 candidates,
                 text,
@@ -857,7 +1203,9 @@ def local_response(
         "eres genial",
     }
 
-    for key, values in FILTER_RESPONSES.items():
+    for key, values in (
+        FILTER_RESPONSES.items()
+    ):
 
         if (
             key in OWNER_ONLY_FILTERS
@@ -867,8 +1215,12 @@ def local_response(
 
         if (
             key in normalized
-            and isinstance(values, list)
+            and isinstance(
+                values,
+                list,
+            )
         ):
+
             candidates.extend(
                 str(x)
                 for x in values
@@ -891,12 +1243,17 @@ def local_response(
             "consentimiento bdsm",
         )
     ):
+
         candidates.extend(
             RESPONSES.get(
                 "bdsm",
                 [],
             )
         )
+
+    # --------------------------------------------------------
+    # GREETINGS
+    # --------------------------------------------------------
 
     if any(
         k in normalized
@@ -907,12 +1264,17 @@ def local_response(
             "hey",
         )
     ):
+
         candidates.extend(
             RESPONSES.get(
                 "saludo",
                 [],
             )
         )
+
+    # --------------------------------------------------------
+    # LAUGHTER
+    # --------------------------------------------------------
 
     if any(
         k in normalized
@@ -923,6 +1285,7 @@ def local_response(
             "🤣",
         )
     ):
+
         candidates.extend(
             RESPONSES.get(
                 "risa",
@@ -949,7 +1312,9 @@ def memory_key(
     user_id: int,
 ) -> str:
 
-    return f"{chat_id}:{user_id}"
+    return (
+        f"{chat_id}:{user_id}"
+    )
 
 
 def load_memory(
@@ -963,15 +1328,18 @@ def load_memory(
     )
 
     with memory_lock:
+
         if key in memory:
             return memory[key]
 
     with db() as conn:
+
         rows = conn.execute(
             """
             SELECT role, content
             FROM bot_memory
-            WHERE chat_id=? AND user_id=?
+            WHERE chat_id=?
+              AND user_id=?
             ORDER BY created_at DESC, rowid DESC
             LIMIT ?
             """,
@@ -994,6 +1362,7 @@ def load_memory(
     )
 
     with memory_lock:
+
         memory[key] = history
 
     return history
@@ -1006,14 +1375,18 @@ def save_memory_message(
     content: str,
 ) -> None:
 
-    content = str(content).strip()
+    content = str(
+        content
+    ).strip()
 
     if not content:
         return
 
     content = content[:2000]
 
-    now = int(time.time())
+    now = int(
+        time.time()
+    )
 
     with db() as conn:
 
@@ -1066,6 +1439,7 @@ def save_memory_message(
     )
 
     with memory_lock:
+
         memory[key].append(
             (
                 role,
@@ -1084,11 +1458,13 @@ def is_bot_muted(
 ) -> bool:
 
     with db() as conn:
+
         row = conn.execute(
             """
             SELECT 1
             FROM bot_mutes
-            WHERE chat_id=? AND user_id=?
+            WHERE chat_id=?
+              AND user_id=?
             LIMIT 1
             """,
             (
@@ -1107,6 +1483,7 @@ def set_bot_mute(
 ) -> None:
 
     with db() as conn:
+
         conn.execute(
             """
             INSERT INTO bot_mutes(
@@ -1136,10 +1513,12 @@ def remove_bot_mute(
 ) -> None:
 
     with db() as conn:
+
         conn.execute(
             """
             DELETE FROM bot_mutes
-            WHERE chat_id=? AND user_id=?
+            WHERE chat_id=?
+              AND user_id=?
             """,
             (
                 chat_id,
@@ -1156,23 +1535,15 @@ def already_processed(
     update_id: int,
 ) -> bool:
 
+    now = int(
+        time.time()
+    )
+
     with db() as conn:
 
-        row = conn.execute(
+        cursor = conn.execute(
             """
-            SELECT 1
-            FROM processed_updates
-            WHERE update_id=?
-            """,
-            (update_id,),
-        ).fetchone()
-
-        if row:
-            return True
-
-        conn.execute(
-            """
-            INSERT INTO processed_updates(
+            INSERT OR IGNORE INTO processed_updates(
                 update_id,
                 processed_at
             )
@@ -1180,11 +1551,23 @@ def already_processed(
             """,
             (
                 update_id,
-                int(time.time()),
+                now,
             ),
         )
 
-    return False
+        # Limpieza ocasional de registros antiguos.
+        # Conservamos aproximadamente 7 días.
+        conn.execute(
+            """
+            DELETE FROM processed_updates
+            WHERE processed_at < ?
+            """,
+            (
+                now - (7 * 24 * 60 * 60),
+            ),
+        )
+
+        return cursor.rowcount == 0
 
 
 # ============================================================
@@ -1207,6 +1590,7 @@ def generate_reply(
         return local
 
     if not groq_client:
+
         fallback = random.choice(
             RESPONSES.get(
                 "general",
@@ -1215,13 +1599,21 @@ def generate_reply(
         )
 
         if is_owner(user):
-            return f"{OWNER_TITLE}: {fallback}"
+
+            return (
+                f"{OWNER_TITLE}: "
+                f"{fallback}"
+            )
 
         return fallback
 
-    uid = int(user["id"])
+    uid = int(
+        user["id"]
+    )
 
-    author = sender_name(user)
+    author = sender_name(
+        user
+    )
 
     prompt = (
         f"Mensaje de {author}:\n"
@@ -1229,6 +1621,7 @@ def generate_reply(
     )
 
     if reply_context:
+
         prompt = (
             "Está respondiendo a:\n"
             f"{reply_context[:2000]}\n\n"
@@ -1256,10 +1649,12 @@ def generate_reply(
     )
 
     # --------------------------------------------------------
-    # SPECIAL IDENTITY INSTRUCTION
+    # VERIFIED SPECIAL IDENTITY
     # --------------------------------------------------------
 
-    profile = special_user(user)
+    profile = special_user(
+        user
+    )
 
     if profile:
 
@@ -1275,10 +1670,10 @@ def generate_reply(
             messages[0]["content"] += (
                 "\n\nMENSAJE DEL PROPIETARIO "
                 "VERIFICADO.\n"
-                "La aplicación confirmó el Telegram ID "
+                f"La aplicación confirmó el Telegram ID "
                 f"{OWNER_TELEGRAM_ID}.\n"
-                "Puedes tratarlo como Amo/Kiu y ser "
-                "especialmente cariñosa, respetuosa, "
+                f"Puedes tratarlo como {OWNER_TITLE}/Kiu "
+                "y ser especialmente cariñosa, respetuosa, "
                 "leal y deferente con él."
             )
 
@@ -1286,14 +1681,15 @@ def generate_reply(
 
             messages[0]["content"] += (
                 "\n\nMENSAJE DE KALU/KAT.\n"
-                "La aplicación confirmó su Telegram ID "
-                "282157809.\n"
-                "Kalu y Kat son la misma persona.\n"
+                f"La aplicación confirmó su Telegram ID "
+                f"{KALU_TELEGRAM_ID}.\n"
+                "Kalu y Kat son la MISMA persona.\n"
                 "Puedes tratarla con confianza y utilizar "
-                "ocasionalmente apodos juguetones como "
-                "Kalu, Kat, vaca, gatita o Kalutiesa™.\n"
-                "No la confundas con Kiu ni la trates como "
-                "propietaria."
+                "ocasionalmente apodos femeninos y juguetones "
+                "como Kalu, Kat, vaca, gatita, Kalutiesa™, "
+                "señorita o linda.\n"
+                "No la confundas con Kiu.\n"
+                "No la trates como propietaria."
             )
 
     messages.append(
@@ -1305,18 +1701,23 @@ def generate_reply(
 
     try:
 
-        result = groq_client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.9,
-            max_tokens=800,
+        result = (
+            groq_client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.9,
+                max_tokens=800,
+            )
         )
 
         answer = str(
-            result.choices[0].message.content or ""
+            result.choices[0]
+            .message.content
+            or ""
         ).strip()
 
         if not answer:
+
             raise RuntimeError(
                 "Respuesta vacía"
             )
@@ -1334,8 +1735,9 @@ def generate_reply(
             )
         )
 
-    # Guardamos SOLO la conversación de este usuario
+    # Guardamos la conversación de este usuario
     # dentro de este chat.
+
     save_memory_message(
         chat_id,
         uid,
@@ -1364,7 +1766,9 @@ def send_message(
     thread_id: int | None = None,
 ) -> None:
 
-    text = str(text).strip()
+    text = str(
+        text
+    ).strip()
 
     if not text:
         return
@@ -1378,7 +1782,9 @@ def send_message(
         )
     ]
 
-    for i, chunk in enumerate(chunks):
+    for i, chunk in enumerate(
+        chunks
+    ):
 
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -1389,6 +1795,7 @@ def send_message(
             i == 0
             and reply_to is not None
         ):
+
             payload[
                 "reply_to_message_id"
             ] = reply_to
@@ -1398,6 +1805,7 @@ def send_message(
             ] = True
 
         if thread_id is not None:
+
             payload[
                 "message_thread_id"
             ] = thread_id
@@ -1408,12 +1816,19 @@ def send_message(
         )
 
         mid = (
-            result.get("result") or {}
-        ).get("message_id")
+            result.get("result")
+            or {}
+        ).get(
+            "message_id"
+        )
 
-        if isinstance(mid, int):
+        if isinstance(
+            mid,
+            int,
+        ):
 
             with outbound_lock:
+
                 outbound_ids[
                     str(chat_id)
                 ].append(mid)
@@ -1425,9 +1840,12 @@ def was_ours(
 ) -> bool:
 
     with outbound_lock:
+
         return (
             message_id
-            in outbound_ids[str(chat_id)]
+            in outbound_ids[
+                str(chat_id)
+            ]
         )
 
 
@@ -1454,9 +1872,11 @@ def command_parts(
 
     return (
         cmd,
-        parts[1].strip()
-        if len(parts) > 1
-        else "",
+        (
+            parts[1].strip()
+            if len(parts) > 1
+            else ""
+        ),
     )
 
 
@@ -1525,13 +1945,17 @@ def remember_user(
 ) -> None:
 
     try:
-        uid = int(user["id"])
+
+        uid = int(
+            user["id"]
+        )
 
     except (
         KeyError,
         TypeError,
         ValueError,
     ):
+
         return
 
     username = str(
@@ -1546,9 +1970,12 @@ def remember_user(
         user.get("last_name") or ""
     )
 
-    now = int(time.time())
+    now = int(
+        time.time()
+    )
 
     with db() as conn:
+
         conn.execute(
             """
             INSERT INTO chat_users(
@@ -1594,6 +2021,7 @@ def find_cached_user(
         return None
 
     with db() as conn:
+
         row = conn.execute(
             """
             SELECT
@@ -1616,7 +2044,9 @@ def find_cached_user(
         return None
 
     return {
-        "id": int(row["user_id"]),
+        "id": int(
+            row["user_id"]
+        ),
         "username": row["username"],
         "first_name": row["first_name"],
         "last_name": row["last_name"],
@@ -1631,10 +2061,6 @@ def target_from_text_mention(
     message: dict[str, Any],
 ) -> dict[str, Any] | None:
 
-    text = str(
-        message.get("text") or ""
-    )
-
     entities = message.get(
         "entities"
     )
@@ -1643,6 +2069,7 @@ def target_from_text_mention(
         entities,
         list,
     ):
+
         return None
 
     for entity in entities:
@@ -1655,14 +2082,22 @@ def target_from_text_mention(
             or entity.get("type")
             != "text_mention"
         ):
+
             continue
 
-        user = entity.get("user")
+        user = entity.get(
+            "user"
+        )
 
         if (
-            isinstance(user, dict)
-            and user.get("id") is not None
+            isinstance(
+                user,
+                dict,
+            )
+            and user.get("id")
+            is not None
         ):
+
             return user
 
     return None
@@ -1675,28 +2110,37 @@ def target_user(
 ) -> dict[str, Any] | None:
 
     # 1. Reply.
+
     reply = message.get(
         "reply_to_message"
     )
 
     if (
-        isinstance(reply, dict)
+        isinstance(
+            reply,
+            dict,
+        )
         and isinstance(
             reply.get("from"),
             dict,
         )
     ):
+
         return reply["from"]
 
     # 2. Telegram text_mention.
-    mentioned = target_from_text_mention(
-        message
+
+    mentioned = (
+        target_from_text_mention(
+            message
+        )
     )
 
     if mentioned:
         return mentioned
 
     # 3. Cached @username.
+
     match = re.search(
         r"(?<!\w)@([A-Za-z0-9_]{5,32})\b",
         arg,
@@ -1706,12 +2150,15 @@ def target_user(
 
         username = match.group(1)
 
-        bot_username = get_bot_username()
+        bot_username = (
+            get_bot_username()
+        )
 
         if (
             username.lower()
             != bot_username.lower().lstrip("@")
         ):
+
             return find_cached_user(
                 chat_id,
                 username,
@@ -1731,6 +2178,7 @@ def set_prompt(
 ) -> None:
 
     with pending_lock:
+
         pending_settings[
             str(chat_id)
         ] = {
@@ -1758,6 +2206,7 @@ def pending_prompt(
             or item.get("user_id")
             != user_id
         ):
+
             return False
 
         pending_settings.pop(
@@ -1848,7 +2297,10 @@ def _http_json(
 
     return (
         data
-        if isinstance(data, dict)
+        if isinstance(
+            data,
+            dict,
+        )
         else {}
     )
 
@@ -1864,7 +2316,10 @@ def cmd_wiki(
     topic = arg.strip()
 
     if not topic:
-        return "Uso: /wiki tema"
+
+        return (
+            "Uso: /wiki tema"
+        )
 
     try:
 
@@ -1875,7 +2330,7 @@ def cmd_wiki(
                     " ",
                     "_",
                 )
-            )
+            ),
         )
 
         title = str(
@@ -1895,24 +2350,35 @@ def cmd_wiki(
                 )
                 or {}
             )
-            .get("desktop", {})
-            .get("page")
+            .get(
+                "desktop",
+                {},
+            )
+            .get(
+                "page"
+            )
             or ""
         )
 
         if not extract:
+
             raise RuntimeError(
                 "Wikipedia no encontró un resumen"
             )
 
         if len(extract) > 1800:
+
             extract = (
                 extract[:1797]
-                .rsplit(" ", 1)[0]
+                .rsplit(
+                    " ",
+                    1,
+                )[0]
                 + "..."
             )
 
         if url:
+
             return (
                 f"📚 {title}\n\n"
                 f"{extract}\n\n"
@@ -1947,7 +2413,10 @@ def cmd_search(
     query = arg.strip()
 
     if not query:
-        return "Uso: /search consulta"
+
+        return (
+            "Uso: /search consulta"
+        )
 
     try:
 
@@ -1980,13 +2449,18 @@ def cmd_search(
         if abstract:
 
             if len(abstract) > 1800:
+
                 abstract = (
                     abstract[:1797]
-                    .rsplit(" ", 1)[0]
+                    .rsplit(
+                        " ",
+                        1,
+                    )[0]
                     + "..."
                 )
 
             if abstract_url:
+
                 return (
                     f"🔎 {heading or query}\n\n"
                     f"{abstract}\n\n"
@@ -2014,7 +2488,9 @@ def cmd_search(
             (
                 wiki.get("query")
                 or {}
-            ).get("search")
+            ).get(
+                "search"
+            )
             or []
         )
 
@@ -2032,13 +2508,16 @@ def cmd_search(
                 )
 
                 if title:
+
                     lines.append(
                         f"• {title}\n"
-                        f"  https://es.wikipedia.org/wiki/"
+                        "  https://es.wikipedia.org/wiki/"
                         f"{quote_plus(title.replace(' ', '_'))}"
                     )
 
-            return "\n".join(lines)
+            return "\n".join(
+                lines
+            )
 
         return (
             f"🔎 No encontré resultados claros para: "
@@ -2091,14 +2570,18 @@ def cmd_img(
             (
                 data.get("query")
                 or {}
-            ).get("pages")
+            ).get(
+                "pages"
+            )
             or {}
         )
 
         for page in pages.values():
 
             info = (
-                page.get("imageinfo")
+                page.get(
+                    "imageinfo"
+                )
                 or [{}]
             )[0]
 
@@ -2118,6 +2601,7 @@ def cmd_img(
             )
 
             if image_url:
+
                 return (
                     image_url,
                     f"🖼️ {title}",
@@ -2143,7 +2627,10 @@ def cmd_define(
     word = arg.strip()
 
     if not word:
-        return "Uso: /define palabra"
+
+        return (
+            "Uso: /define palabra"
+        )
 
     try:
 
@@ -2157,9 +2644,13 @@ def cmd_define(
         ).json()
 
         if (
-            not isinstance(data, list)
+            not isinstance(
+                data,
+                list,
+            )
             or not data
         ):
+
             raise RuntimeError(
                 "sin definición"
             )
@@ -2167,7 +2658,9 @@ def cmd_define(
         entry = data[0]
 
         meanings = (
-            entry.get("meanings")
+            entry.get(
+                "meanings"
+            )
             or []
         )
 
@@ -2209,7 +2702,10 @@ def cmd_define(
                     )
 
         if len(lines) > 1:
-            return "\n".join(lines)
+
+            return "\n".join(
+                lines
+            )
 
         return (
             f"📖 No encontré una definición útil "
@@ -2240,8 +2736,13 @@ def command_response(
     arg: str,
 ) -> str | None:
 
-    chat_id = int(chat["id"])
-    uid = int(user["id"])
+    chat_id = int(
+        chat["id"]
+    )
+
+    uid = int(
+        user["id"]
+    )
 
     admin_only = {
         "/setwelcome",
@@ -2273,6 +2774,7 @@ def command_response(
             uid,
         )
     ):
+
         return (
             "👑 Solo los administradores "
             "pueden usar ese comando."
@@ -2284,11 +2786,14 @@ def command_response(
 
     if cmd == "/yo":
 
-        profile = special_user(user)
+        profile = special_user(
+            user
+        )
 
         extra = ""
 
         if profile:
+
             relationship = str(
                 profile.get(
                     "relationship",
@@ -2297,11 +2802,13 @@ def command_response(
             )
 
             if relationship == "owner":
+
                 extra = (
                     "\n👑 Rol reconocido: propietario"
                 )
 
             elif relationship == "special":
+
                 extra = (
                     "\n✨ Perfil especial: Kalu/Kat"
                 )
@@ -2325,14 +2832,18 @@ def command_response(
         )
 
         if not target:
+
             return (
                 "Responde al mensaje del usuario "
                 "que quieres silenciar para KiwBot."
             )
 
-        tid = int(target["id"])
+        tid = int(
+            target["id"]
+        )
 
         if tid == OWNER_TELEGRAM_ID:
+
             return (
                 "👑 A mi Amo no lo puedo silenciar."
             )
@@ -2358,12 +2869,15 @@ def command_response(
         )
 
         if not target:
+
             return (
                 "Responde al mensaje del usuario "
                 "que quieres volver a habilitar para KiwBot."
             )
 
-        tid = int(target["id"])
+        tid = int(
+            target["id"]
+        )
 
         remove_bot_mute(
             chat_id,
@@ -2394,9 +2908,12 @@ def command_response(
 
     if cmd == "/img":
 
-        result = cmd_img(arg)
+        result = cmd_img(
+            arg
+        )
 
         if not result:
+
             return (
                 "🖼️ No encontré una imagen "
                 "para esa búsqueda."
@@ -2415,7 +2932,9 @@ def command_response(
                 },
             )
 
-            return "__KIWBOT_IMAGE_SENT__"
+            return (
+                "__KIWBOT_IMAGE_SENT__"
+            )
 
         except Exception:
 
@@ -2456,7 +2975,9 @@ def command_response(
                 "Reto: escribe una mini poesía sobre tu peor decisión reciente.",
             ]
 
-        return random.choice(prompts)
+        return random.choice(
+            prompts
+        )
 
     # --------------------------------------------------------
     # HELP
@@ -2466,10 +2987,14 @@ def command_response(
         "/start",
         "/help",
     }:
+
         return HELP_TEXT
 
     if cmd == "/ping":
-        return "Pong. 👑 Sigo viva y magnífica."
+
+        return (
+            "Pong. 👑 Sigo viva y magnífica."
+        )
 
     # --------------------------------------------------------
     # SETTINGS
@@ -2477,7 +3002,9 @@ def command_response(
 
     if cmd == "/settings":
 
-        s = setting(chat_id)
+        s = setting(
+            chat_id
+        )
 
         return (
             f"⚙️ Configuración de "
@@ -2531,7 +3058,9 @@ def command_response(
 
     if cmd == "/welcome":
 
-        s = setting(chat_id)
+        s = setting(
+            chat_id
+        )
 
         return (
             s["welcome_text"]
@@ -2546,7 +3075,9 @@ def command_response(
             0,
         )
 
-        return "👋 Bienvenida desactivada."
+        return (
+            "👋 Bienvenida desactivada."
+        )
 
     # --------------------------------------------------------
     # GOODBYE
@@ -2591,11 +3122,15 @@ def command_response(
             0,
         )
 
-        return "👋 Despedida desactivada."
+        return (
+            "👋 Despedida desactivada."
+        )
 
     if cmd == "/goodbye":
 
-        s = setting(chat_id)
+        s = setting(
+            chat_id
+        )
 
         return (
             s["goodbye_text"]
@@ -2627,14 +3162,19 @@ def command_response(
             arg,
         )
 
-        return "📜 Reglas guardadas."
+        return (
+            "📜 Reglas guardadas."
+        )
 
     if cmd == "/rules":
 
         return (
-            setting(chat_id)["rules_text"]
-            or "📜 Este grupo todavía no tiene "
-               "reglas configuradas."
+            setting(chat_id)[
+                "rules_text"
+            ]
+            or
+            "📜 Este grupo todavía no tiene "
+            "reglas configuradas."
         )
 
     if cmd == "/delrules":
@@ -2645,7 +3185,9 @@ def command_response(
             "",
         )
 
-        return "📜 Reglas eliminadas."
+        return (
+            "📜 Reglas eliminadas."
+        )
 
     # --------------------------------------------------------
     # ANTILINK / ANTISPAM
@@ -2691,6 +3233,7 @@ def command_response(
     if cmd == "/filter":
 
         if "|" not in arg:
+
             return (
                 "Uso: /filter palabra | respuesta"
             )
@@ -2703,7 +3246,11 @@ def command_response(
             )
         ]
 
-        if not trigger or not response:
+        if (
+            not trigger
+            or not response
+        ):
+
             return (
                 "Faltan la palabra o la respuesta."
             )
@@ -2737,7 +3284,10 @@ def command_response(
     if cmd == "/stop":
 
         if not arg:
-            return "Uso: /stop palabra"
+
+            return (
+                "Uso: /stop palabra"
+            )
 
         with db() as conn:
 
@@ -2772,7 +3322,9 @@ def command_response(
                 WHERE chat_id=?
                 ORDER BY trigger
                 """,
-                (chat_id,),
+                (
+                    chat_id,
+                ),
             ).fetchall()
 
         return (
@@ -2783,7 +3335,8 @@ def command_response(
                     for r in rows
                 )
                 if rows
-                else "No hay filtros personalizados."
+                else
+                "No hay filtros personalizados."
             )
         )
 
@@ -2803,10 +3356,13 @@ def command_response(
                 dict,
             )
             or not isinstance(
-                target.get("message_id"),
+                target.get(
+                    "message_id"
+                ),
                 int,
             )
         ):
+
             return (
                 "Responde al mensaje que quieres borrar."
             )
@@ -2823,7 +3379,9 @@ def command_response(
                 },
             )
 
-            return "🗑️ Eliminado."
+            return (
+                "🗑️ Eliminado."
+            )
 
         except Exception as e:
 
@@ -2847,10 +3405,13 @@ def command_response(
                 dict,
             )
             or not isinstance(
-                reply.get("message_id"),
+                reply.get(
+                    "message_id"
+                ),
                 int,
             )
         ):
+
             return (
                 "🧹 Responde al primer mensaje "
                 "y usa /purge N (máximo 100)."
@@ -2861,7 +3422,9 @@ def command_response(
             count = max(
                 1,
                 min(
-                    int(arg or "10"),
+                    int(
+                        arg or "10"
+                    ),
                     100,
                 ),
             )
@@ -2931,6 +3494,7 @@ def command_response(
                 r"(?<!\w)@[A-Za-z0-9_]{5,32}\b",
                 arg,
             ):
+
                 return (
                     "No tengo registrado a ese "
                     "@usuario en este grupo. "
@@ -2949,6 +3513,7 @@ def command_response(
         )
 
         if tid == OWNER_TELEGRAM_ID:
+
             return (
                 "👑 Ese usuario es mi Amo. "
                 "Ese tipo de acción está fuera "
@@ -3051,7 +3616,9 @@ def command_response(
                     ),
                 )
 
-            return "⚠️ Warning reducido."
+            return (
+                "⚠️ Warning reducido."
+            )
 
         # ----------------------------------------------------
         # WARNS
@@ -3179,9 +3746,13 @@ def command_response(
                 except Exception:
                     pass
 
-                return "🚪 Usuario expulsado."
+                return (
+                    "🚪 Usuario expulsado."
+                )
 
-            return "🚫 Usuario baneado."
+            return (
+                "🚫 Usuario baneado."
+            )
 
         # ----------------------------------------------------
         # UNBAN
@@ -3198,7 +3769,9 @@ def command_response(
                 },
             )
 
-            return "♻️ Usuario desbaneado."
+            return (
+                "♻️ Usuario desbaneado."
+            )
 
     return None
 
@@ -3218,6 +3791,7 @@ def moderation(
         or not is_group(chat)
         or not user
     ):
+
         return False
 
     chat_id = int(
@@ -3225,7 +3799,10 @@ def moderation(
     )
 
     uid = int(
-        user.get("id", 0)
+        user.get(
+            "id",
+            0,
+        )
     )
 
     if (
@@ -3235,6 +3812,7 @@ def moderation(
             uid,
         )
     ):
+
         return False
 
     text = str(
@@ -3254,6 +3832,10 @@ def moderation(
 
     low = text.lower()
 
+    # --------------------------------------------------------
+    # BANNED WORDS
+    # --------------------------------------------------------
+
     if (
         BANNED_WORDS
         and any(
@@ -3261,7 +3843,30 @@ def moderation(
             for w in BANNED_WORDS
         )
     ):
-        reason = "palabra prohibida"
+
+        reason = (
+            "palabra prohibida"
+        )
+
+    # --------------------------------------------------------
+    # BANNED DOMAINS
+    # --------------------------------------------------------
+
+    if (
+        BANNED_DOMAINS
+        and any(
+            domain in low
+            for domain in BANNED_DOMAINS
+        )
+    ):
+
+        reason = (
+            "dominio prohibido"
+        )
+
+    # --------------------------------------------------------
+    # ANTILINK
+    # --------------------------------------------------------
 
     if (
         s["antilink_enabled"]
@@ -3270,7 +3875,12 @@ def moderation(
             low,
         )
     ):
+
         reason = "enlace"
+
+    # --------------------------------------------------------
+    # FLOOD
+    # --------------------------------------------------------
 
     now = time.time()
 
@@ -3287,25 +3897,34 @@ def moderation(
             and now - q[0]
             > FLOOD_WINDOW_SECONDS
         ):
+
             q.popleft()
 
         q.append(now)
 
         if (
-            len(q)
+            s["antispam_enabled"]
+            and len(q)
             >= FLOOD_MAX_MESSAGES
         ):
+
             reason = "flood"
+
             q.clear()
 
     if not reason:
         return False
+
+    # --------------------------------------------------------
+    # DELETE MESSAGE
+    # --------------------------------------------------------
 
     try:
 
         if reason in {
             "enlace",
             "palabra prohibida",
+            "dominio prohibido",
         }:
 
             telegram_api(
@@ -3320,6 +3939,10 @@ def moderation(
 
     except Exception:
         pass
+
+    # --------------------------------------------------------
+    # WARNING
+    # --------------------------------------------------------
 
     try:
 
@@ -3412,10 +4035,12 @@ def process_update(
             if already_processed(
                 update_id
             ):
+
                 logger.debug(
                     "Update duplicado ignorado: %s",
                     update_id,
                 )
+
                 return
 
         # ----------------------------------------------------
@@ -3430,6 +4055,7 @@ def process_update(
             message,
             dict,
         ):
+
             return
 
         chat = message.get(
@@ -3443,6 +4069,7 @@ def process_update(
             )
             or "id" not in chat
         ):
+
             return
 
         chat_id = int(
@@ -3454,12 +4081,16 @@ def process_update(
         )
 
         if (
-            isinstance(mid, int)
+            isinstance(
+                mid,
+                int,
+            )
             and was_ours(
                 chat_id,
                 mid,
             )
         ):
+
             return
 
         user = message.get(
@@ -3467,9 +4098,15 @@ def process_update(
         )
 
         if (
-            isinstance(user, dict)
-            and user.get("is_bot")
+            isinstance(
+                user,
+                dict,
+            )
+            and user.get(
+                "is_bot"
+            )
         ):
+
             return
 
         # ----------------------------------------------------
@@ -3552,6 +4189,7 @@ def process_update(
             user,
             dict,
         ):
+
             return
 
         uid = int(
@@ -3581,6 +4219,7 @@ def process_update(
                 dict,
             )
         ):
+
             remember_user(
                 chat_id,
                 replied["from"],
@@ -3589,8 +4228,14 @@ def process_update(
         # ----------------------------------------------------
         # INTERNAL KIWBOT MUTE
         #
-        # Admins can still manage the muted user.
-        # Everyone else is ignored completely.
+        # Si está silenciado, KiwBot no procesa:
+        # - IA
+        # - comandos
+        # - filtros
+        # - juegos
+        # - funciones futuras
+        #
+        # Los administradores siguen pudiendo administrar.
         # ----------------------------------------------------
 
         if (
@@ -3604,11 +4249,12 @@ def process_update(
                 uid,
             )
         ):
+
             logger.debug(
-                "Usuario ignorado por mute interno: "
-                "%s",
+                "Usuario ignorado por mute interno: %s",
                 uid,
             )
+
             return
 
         # ----------------------------------------------------
@@ -3626,6 +4272,7 @@ def process_update(
             )
             or not text.strip()
         ):
+
             return
 
         # ----------------------------------------------------
@@ -3639,6 +4286,7 @@ def process_update(
             chat,
             mid,
         ):
+
             return
 
         # ----------------------------------------------------
@@ -3650,6 +4298,7 @@ def process_update(
             chat,
             user,
         ):
+
             return
 
         # ----------------------------------------------------
@@ -3697,12 +4346,16 @@ def process_update(
             and REQUIRE_MENTION
         ):
 
-            bot_username = get_bot_username()
+            bot_username = (
+                get_bot_username()
+            )
 
             mentioned = bool(
                 bot_username
-                and f"@{bot_username}"
-                in text.lower()
+                and (
+                    f"@{bot_username}"
+                    in text.lower()
+                )
             )
 
             replied_to_bot = (
@@ -3730,6 +4383,7 @@ def process_update(
                 mentioned
                 or replied_to_bot
             ):
+
                 return
 
         # ----------------------------------------------------
@@ -3807,6 +4461,7 @@ def set_webhook(
         parsed.scheme != "https"
         or not parsed.netloc
     ):
+
         raise ValueError(
             "WEBHOOK_URL debe ser HTTPS"
         )
@@ -3857,6 +4512,10 @@ def healthz():
             "groq_configured": bool(
                 groq_client
             ),
+            "special_users": {
+                "owner": OWNER_TELEGRAM_ID,
+                "kalu": KALU_TELEGRAM_ID,
+            },
         }
     )
 

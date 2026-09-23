@@ -1020,13 +1020,20 @@ def answer_structured_fact(chat_id, speaker_id, text):
             return f"El dato que tengo de mi Amo sobre {key} es: {value}."
         return f"Todavía no tengo guardado {key} de mi Amo Kiu."
 
+    # Preguntas sobre favoritos del Amo, aunque no lleven "cuál es".
+    if re.search(r"\banime\s+favorito\s+de\s+tu\s+amo\b", q):
+        value = get_user_fact(OWNER_TELEGRAM_ID, "anime favorito")
+        if value:
+            return f"El anime favorito de mi Amo Kiu es {value}."
+        return "Todavía no tengo guardado el anime favorito de mi Amo Kiu."
+
     # Preguntas personales.
     if re.search(r"\b(a que equipo|que equipo|equipo.*voy)\b", q):
         value = get_user_fact(speaker_id, "equipo")
         if value:
             return f"Le vas al {value}, Amo." if is_owner(speaker_id) else f"Le vas al {value}."
 
-    if re.search(r"\b(mi\s+anime\s+favorito|anime\s+favorito|sabes.*anime|cual.*anime|que.*anime)\b", q):
+    if re.search(r"\b(mi\s+anime\s+favorito|anime\s+favorito|sabes.*anime|cual.*anime|que\s+anime.*favorito|que.*anime)\b", q):
         value = get_user_fact(speaker_id, "anime favorito")
         if value:
             return f"Tu anime favorito es {value}, Amo." if is_owner(speaker_id) else f"Tu anime favorito es {value}."
@@ -2003,33 +2010,46 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
     def pick(key):
         return _local_pick(bank, key, owner)
 
-    # Seguimientos breves: usa la conversación inmediata para completar un dato.
+    # Seguimientos breves: SOLO completan una pregunta anterior realmente incompleta.
+    # Nunca usamos una afirmación anterior ("mi anime favorito es Gintama") como
+    # si estuviera esperando respuesta, porque eso contaminaba la memoria.
     recent_for_context = get_memory(chat_id, user_id)
     last_user_text = ""
     for item in reversed(recent_for_context):
         if item.get("role") == "user":
-            last_user_text = item.get("content", "")
+            last_user_text = str(item.get("content", "") or "").strip()
             break
 
-    # Si el mensaje anterior dejó una pregunta personal incompleta, una respuesta
-    # corta puede completar el atributo. Ej.: "mi anime favorito" -> "Gintama".
-    if text and len(text.split()) <= 6:
+    if text and len(text.split()) <= 6 and last_user_text:
         prev = _norm_local(last_user_text)
+        current_is_question = "?" in text or bool(re.match(
+            r"^(que|cual|quien|donde|cuando|como|por que|porque|a que)\b", n
+        ))
+        prev_has_value = bool(re.search(r"\b(es|son)\s+\S+", prev))
         pending_key = None
-        if re.search(r"\b(mi\s+)?anime\s+favorito\b", prev):
-            pending_key = "anime favorito"
-        elif re.search(r"\b(mi\s+)?color(?:es)?\s+favorit", prev):
-            pending_key = "color favorito"
-        elif re.search(r"\b(mi\s+)?banda\s+favorit", prev):
-            pending_key = "banda favorita"
-        elif re.search(r"\b(mi\s+)?juego\s+favorit", prev):
-            pending_key = "juego favorito"
-        elif re.search(r"\b(mi\s+)?genero\b", prev):
-            pending_key = "genero"
 
-        if pending_key and not re.search(r"\b(no se|nose|no sé)\b", n):
+        # Solo frases tipo "mi anime favorito?" / "¿cuál es mi color favorito?"
+        # pueden abrir un hueco. Las afirmaciones NO.
+        if not prev_has_value:
+            if re.search(r"\b(?:mi\s+)?anime\s+favorito\b", prev):
+                pending_key = "anime favorito"
+            elif re.search(r"\b(?:mi\s+)?color(?:es)?\s+favorit", prev):
+                pending_key = "color favorito"
+            elif re.search(r"\b(?:mi\s+)?banda\s+favorit", prev):
+                pending_key = "banda favorita"
+            elif re.search(r"\b(?:mi\s+)?juego\s+favorit", prev):
+                pending_key = "juego favorito"
+            elif re.search(r"\b(?:mi\s+)?genero\b", prev):
+                pending_key = "genero"
+
+        if pending_key and not current_is_question and not re.search(r"\b(no se|nose|no sé)\b", n):
             value = re.sub(r"^es\s+", "", text, flags=re.IGNORECASE).strip(" .!?")
-            if value:
+            # No convertir frases conversacionales en datos personales.
+            conversational = bool(re.search(
+                r"\b(buena niña|que haces|te quiero|jaj|gracias|perfecto|hola|quien|cual|que)\b",
+                _norm_local(value)
+            ))
+            if value and not conversational:
                 save_user_fact(user_id, pending_key, value)
                 auto = f"Su {pending_key} es {value}"
                 add_long_term_memory("user", user_id, auto)
@@ -2038,19 +2058,11 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
                 add_memory(chat_id, user_id, "assistant", answer)
                 return answer
 
-    if re.match(r"^es\s+.+", n) and re.search(r"\b(mi\s+)?anime\s+favorito\b", _norm_local(last_user_text)):
-        value = re.sub(r"^es\s+", "", text, flags=re.IGNORECASE).strip(" .!?")
-        if value:
-            auto = f"Su anime favorito/a es {value}"
-            if add_long_term_memory("user", user_id, auto):
-                answer = automatic_memory_ack(auto, user_id)
-                add_memory(chat_id, user_id, "user", text)
-                add_memory(chat_id, user_id, "assistant", answer)
-                return answer
-
     # Primero consulta hechos estructurados; luego la memoria textual antigua.
     structured_answer = answer_structured_fact(chat_id, user_id, text)
-    remembered_answer = structured_answer or answer_from_long_term_memory(chat_id, user_id, text)
+    remembered_answer = structured_answer
+    if not remembered_answer:
+        remembered_answer = answer_from_long_term_memory(chat_id, user_id, text)
 
     # -----------------------------------------------------
     # IDENTIDAD / GÉNERO DEL AMO

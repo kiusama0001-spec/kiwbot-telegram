@@ -2945,10 +2945,8 @@ def character_card(row):
     extra = ""
     if row["name"].lower() == "one winged angel":
         blades_on = bool(row["secret_blades_active"])
-        extra = (
-            "\n🗡️🗡️ Habilidad secreta: Espadas del Ángel"
-            f" — {'ACTIVAS' if blades_on else 'selladas'}"
-        )
+        if blades_on:
+            extra = "\n🗡️🗡️ Estado especial: Doble Espada — ACTIVO"
 
     return (
         f"🧙 Personaje: {row['name']}\n"
@@ -3248,12 +3246,18 @@ def process_command(
             return True
 
         persistent = os.path.abspath(DB_PATH).startswith("/var/data/")
-        send_message(
-            chat_id,
+        status_text = (
             "🗄️ ESTADO DE DATOS\n\n"
             f"Base persistente: {'SÍ' if persistent else 'NO'}\n"
             f"Modo: {'Render Persistent Disk' if persistent else 'almacenamiento local temporal'}"
         )
+        if not persistent:
+            status_text += (
+                "\n\n⚠️ El código ya está preparado para persistencia. "
+                "Falta montar un Persistent Disk en Render y configurar "
+                "DATABASE_PATH con la ruta del disco."
+            )
+        send_message(chat_id, status_text)
         return True
 
     if command == "/personajes":
@@ -3266,9 +3270,8 @@ def process_command(
         lines = ["🧙 TUS PERSONAJES", ""]
         for row in rows:
             active = " ⭐ ACTIVO" if row["is_active"] else ""
-            secret = " 🔒 SECRETO" if row["name"].lower() == "one winged angel" else ""
             lines.append(
-                f"• {row['name']} — {row['class_name']} — Nv. {row['level']}{active}{secret}"
+                f"• {row['name']} — {row['class_name']} — Nv. {row['level']}{active}"
             )
         send_message(chat_id, "\n".join(lines))
         return True
@@ -3294,8 +3297,8 @@ def process_command(
 
     if command in ("/espadas", "/doble_espada"):
         user = message.get("from", {})
-        if not is_owner(user):
-            send_message(chat_id, "No reconoces el llamado de esas espadas.")
+        if not is_owner(user.get("id")):
+            send_message(chat_id, "No puedes usar ese comando.")
             return True
 
         ok, error = toggle_secret_blades(user.get("id"), activate=True)
@@ -3313,8 +3316,8 @@ def process_command(
 
     if command in ("/guardar_espadas", "/sellar_espadas"):
         user = message.get("from", {})
-        if not is_owner(user):
-            send_message(chat_id, "Esas espadas no responden a ti.")
+        if not is_owner(user.get("id")):
+            send_message(chat_id, "No puedes usar ese comando.")
             return True
 
         ok, error = toggle_secret_blades(user.get("id"), activate=False)

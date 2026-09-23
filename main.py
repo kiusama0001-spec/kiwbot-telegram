@@ -304,6 +304,16 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_facts (
+                owner_id INTEGER NOT NULL,
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(owner_id, fact_key)
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -864,7 +874,7 @@ def extract_explicit_memory(
     ).strip()
 
     patterns = [
-        r"^(?:recuerda|recuerdame|recuérdame)\s+(?:que\s+)?(.+)$",
+        r"^(?:recuerda|recurda|recorda|recuérdame|recuerdame)\s+(?:que\s+)?(.+)$",
         r"^(?:guarda|guárdate|anota|apunta)\s+(?:que\s+)?(.+)$",
         r"^(?:no olvides|no olvides que)\s+(.+)$"
     ]
@@ -879,6 +889,161 @@ def extract_explicit_memory(
     return None
 
 
+
+
+def save_user_fact(owner_id, fact_key, fact_value):
+    """Guarda/actualiza un atributo estructurado de una persona."""
+    fact_key = _norm_local(fact_key).strip()
+    fact_value = re.sub(r"\s+", " ", str(fact_value or "")).strip(" .!?")
+    if not fact_key or not fact_value or len(fact_value) > 300:
+        return False
+    with db_lock:
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO user_facts (owner_id, fact_key, fact_value, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(owner_id, fact_key)
+            DO UPDATE SET fact_value=excluded.fact_value, updated_at=excluded.updated_at
+        """, (int(owner_id), fact_key, fact_value, int(time.time())))
+        conn.commit()
+        conn.close()
+    return True
+
+
+def get_user_fact(owner_id, fact_key):
+    fact_key = _norm_local(fact_key).strip()
+    with db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT fact_value FROM user_facts WHERE owner_id=? AND fact_key=?",
+            (int(owner_id), fact_key)
+        ).fetchone()
+        conn.close()
+    return row["fact_value"] if row else None
+
+
+def canonical_fact_key(raw):
+    k = _norm_local(raw)
+    aliases = {
+        "anime": "anime favorito",
+        "anime favorito": "anime favorito",
+        "animé favorito": "anime favorito",
+        "equipo": "equipo",
+        "equipo de futbol": "equipo",
+        "equipo de fútbol": "equipo",
+        "equipo favorito": "equipo",
+        "genero": "genero",
+        "género": "genero",
+        "sexo": "genero",
+        "color": "color favorito",
+        "color favorito": "color favorito",
+        "colores favoritos": "color favorito",
+        "musica favorita": "musica favorita",
+        "música favorita": "musica favorita",
+        "banda favorita": "banda favorita",
+        "juego favorito": "juego favorito",
+        "serie favorita": "serie favorita",
+        "pelicula favorita": "pelicula favorita",
+        "película favorita": "pelicula favorita",
+        "comida favorita": "comida favorita",
+    }
+    return aliases.get(k, k)
+
+
+def extract_structured_fact(text, speaker_id):
+    """Entiende hechos tipo 'mi X es Y', 'soy hombre' y 'el X de tu amo es Y'."""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw or raw.startswith("/") or "?" in raw:
+        return None
+    low = _norm_local(raw)
+
+    # El hablante describe al Amo en tercera persona.
+    if is_owner(speaker_id):
+        target_id = OWNER_TELEGRAM_ID
+    else:
+        target_id = int(speaker_id)
+
+    m = re.match(r"^(?:el|la|los|las)\s+(.+?)\s+de\s+tu\s+amo\s+es\s+(.+)$", raw, re.I)
+    if m:
+        return OWNER_TELEGRAM_ID, canonical_fact_key(m.group(1)), m.group(2).strip(" .!?")
+
+    m = re.match(r"^(?:el|la|los|las)\s+(.+?)\s+de\s+tu\s+amo\s+son\s+(.+)$", raw, re.I)
+    if m:
+        return OWNER_TELEGRAM_ID, canonical_fact_key(m.group(1)), m.group(2).strip(" .!?")
+
+    m = re.match(r"^mi\s+(.+?)\s+es\s+(.+)$", raw, re.I)
+    if m:
+        return target_id, canonical_fact_key(m.group(1)), m.group(2).strip(" .!?")
+
+    m = re.match(r"^mis\s+(.+?)\s+son\s+(.+)$", raw, re.I)
+    if m:
+        return target_id, canonical_fact_key(m.group(1)), m.group(2).strip(" .!?")
+
+    m = re.match(r"^soy\s+(?:de\s+genero\s+|genero\s+)?(masculino|maculino|hombre|femenino|mujer)$", low, re.I)
+    if m:
+        value = m.group(1)
+        if value in ("hombre", "masculino", "maculino"):
+            value = "masculino"
+        elif value in ("mujer", "femenino"):
+            value = "femenino"
+        return target_id, "genero", value
+
+    m = re.match(r"^(?:tu\s+amo|kiu)\s+es\s+(?:de\s+genero\s+)?(hombre|masculino|maculino|mujer|femenino)$", low, re.I)
+    if m:
+        value = "masculino" if m.group(1) in ("hombre", "masculino") else "femenino"
+        return OWNER_TELEGRAM_ID, "genero", value
+
+    # Formas ya usadas por Kiu.
+    m = re.match(r"^(?:yo\s+)?le\s+voy\s+(?:al|a la|a)\s+(.+)$", raw, re.I)
+    if m:
+        return target_id, "equipo", m.group(1).strip(" .!?")
+
+    return None
+
+
+def answer_structured_fact(chat_id, speaker_id, text):
+    """Responde atributos propios o del Amo sin Groq."""
+    q = _norm_local(text)
+
+    # Preguntas sobre el Amo.
+    if re.search(r"\b(que|cual)\s+genero\s+es\s+tu\s+amo\b|\btu\s+amo\s+es\s+(hombre|mujer)\b", q):
+        value = get_user_fact(OWNER_TELEGRAM_ID, "genero")
+        if value:
+            return f"Mi Amo Kiu es de género {value}."
+        return "Todavía no tengo guardado ese dato de mi Amo Kiu."
+
+    m = re.search(r"\b(?:cual|que)\s+es\s+(?:el|la|los|las)?\s*(.+?)\s+de\s+tu\s+amo\b", q)
+    if m:
+        key = canonical_fact_key(m.group(1))
+        value = get_user_fact(OWNER_TELEGRAM_ID, key)
+        if value:
+            return f"El dato que tengo de mi Amo sobre {key} es: {value}."
+        return f"Todavía no tengo guardado {key} de mi Amo Kiu."
+
+    # Preguntas personales.
+    if re.search(r"\b(a que equipo|que equipo|equipo.*voy)\b", q):
+        value = get_user_fact(speaker_id, "equipo")
+        if value:
+            return f"Le vas al {value}, Amo." if is_owner(speaker_id) else f"Le vas al {value}."
+
+    if re.search(r"\b(mi\s+anime\s+favorito|anime\s+favorito|sabes.*anime|cual.*anime|que.*anime)\b", q):
+        value = get_user_fact(speaker_id, "anime favorito")
+        if value:
+            return f"Tu anime favorito es {value}, Amo." if is_owner(speaker_id) else f"Tu anime favorito es {value}."
+
+    if re.search(r"\b(cual|que)\s+es\s+mi\s+genero\b|\bque\s+genero\s+soy\b", q):
+        value = get_user_fact(speaker_id, "genero")
+        if value:
+            return f"Tu género es {value}, Amo." if is_owner(speaker_id) else f"Tu género es {value}."
+
+    m = re.search(r"\b(?:cual|que)\s+es\s+mi\s+(.+?)(?:\?|$)", q)
+    if m:
+        key = canonical_fact_key(m.group(1))
+        value = get_user_fact(speaker_id, key)
+        if value:
+            return f"Tu {key} es {value}, Amo." if is_owner(speaker_id) else f"Tu {key} es {value}."
+
+    return None
 
 def extract_automatic_memory(text, user_id):
     """Extrae datos personales explícitos sin necesitar /recuerda."""
@@ -1014,6 +1179,7 @@ def automatic_memory_ack(memory, user_id):
 
 def seed_initial_memories():
     """Inicializa recuerdos base sin duplicarlos."""
+    save_user_fact(OWNER_TELEGRAM_ID, "genero", "masculino")
     for memory in INITIAL_KIU_MEMORIES:
         add_long_term_memory(
             "user",
@@ -1845,6 +2011,33 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
             last_user_text = item.get("content", "")
             break
 
+    # Si el mensaje anterior dejó una pregunta personal incompleta, una respuesta
+    # corta puede completar el atributo. Ej.: "mi anime favorito" -> "Gintama".
+    if text and len(text.split()) <= 6:
+        prev = _norm_local(last_user_text)
+        pending_key = None
+        if re.search(r"\b(mi\s+)?anime\s+favorito\b", prev):
+            pending_key = "anime favorito"
+        elif re.search(r"\b(mi\s+)?color(?:es)?\s+favorit", prev):
+            pending_key = "color favorito"
+        elif re.search(r"\b(mi\s+)?banda\s+favorit", prev):
+            pending_key = "banda favorita"
+        elif re.search(r"\b(mi\s+)?juego\s+favorit", prev):
+            pending_key = "juego favorito"
+        elif re.search(r"\b(mi\s+)?genero\b", prev):
+            pending_key = "genero"
+
+        if pending_key and not re.search(r"\b(no se|nose|no sé)\b", n):
+            value = re.sub(r"^es\s+", "", text, flags=re.IGNORECASE).strip(" .!?")
+            if value:
+                save_user_fact(user_id, pending_key, value)
+                auto = f"Su {pending_key} es {value}"
+                add_long_term_memory("user", user_id, auto)
+                answer = automatic_memory_ack(auto, user_id)
+                add_memory(chat_id, user_id, "user", text)
+                add_memory(chat_id, user_id, "assistant", answer)
+                return answer
+
     if re.match(r"^es\s+.+", n) and re.search(r"\b(mi\s+)?anime\s+favorito\b", _norm_local(last_user_text)):
         value = re.sub(r"^es\s+", "", text, flags=re.IGNORECASE).strip(" .!?")
         if value:
@@ -1855,13 +2048,25 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
                 add_memory(chat_id, user_id, "assistant", answer)
                 return answer
 
-    # Antes de caer en categorías genéricas, intenta responder desde memoria.
-    remembered_answer = answer_from_long_term_memory(chat_id, user_id, text)
+    # Primero consulta hechos estructurados; luego la memoria textual antigua.
+    structured_answer = answer_structured_fact(chat_id, user_id, text)
+    remembered_answer = structured_answer or answer_from_long_term_memory(chat_id, user_id, text)
+
+    # -----------------------------------------------------
+    # IDENTIDAD / GÉNERO DEL AMO
+    # Esto es identidad fija, no depende de que una memoria haya sido guardada.
+    # -----------------------------------------------------
+    if re.search(r"\b(que|cual)\s+genero\s+(?:es|tiene)\s+tu\s+amo\b", n) or \
+       re.search(r"\btu\s+amo\s+es\s+(?:hombre|mujer|masculino|femenino)\b", n):
+        answer = "Mi Amo Kiu es hombre, de género masculino."
+
+    elif owner and re.search(r"\bsoy\s+(?:hombre|masculino)\s+o\s+(?:mujer|femenino)\b", n):
+        answer = "Usted es hombre, Amo Kiu. Género masculino."
 
     # -----------------------------------------------------
     # IDENTIDAD FIJA
     # -----------------------------------------------------
-    if owner and re.search(r"\b(sabes|recuerdas|reconoces)\s+que\s+soy\s+tu\s+(amo|dueño)\b", n):
+    elif owner and re.search(r"\b(sabes|recuerdas|reconoces)\s+que\s+soy\s+tu\s+(amo|dueño)\b", n):
         answer = random.choice([
             "Claro que lo sé, Amo Kiu.",
             "Sí, Amo. A usted sí lo reconozco perfectamente.",
@@ -3336,7 +3541,19 @@ def process_update(
         # MEMORIA AUTOMÁTICA EXPLÍCITA
         # =================================================
 
-        # Memoria automática: aprende hechos personales claros sin /recuerda.
+        # Memoria estructurada automática: también entiende "recuerda/recurda ...".
+        fact_text = re.sub(
+            r"^(?:recuerda|recurda|recorda|recuérdame|recuerdame)\s+(?:que\s+)?",
+            "",
+            text,
+            flags=re.IGNORECASE
+        ).strip()
+        structured_fact = extract_structured_fact(fact_text, user_id)
+        if structured_fact:
+            fact_owner, fact_key, fact_value = structured_fact
+            save_user_fact(fact_owner, fact_key, fact_value)
+
+        # Memoria automática textual (compatibilidad con recuerdos anteriores).
         auto_memory = extract_automatic_memory(text, user_id)
         preference_memory = extract_preference_memory(text) if is_owner(user_id) else ""
         if preference_memory:

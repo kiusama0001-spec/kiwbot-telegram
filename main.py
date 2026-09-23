@@ -893,7 +893,7 @@ def extract_explicit_memory(
 
 def save_user_fact(owner_id, fact_key, fact_value):
     """Guarda/actualiza un atributo estructurado de una persona."""
-    fact_key = _norm_local(fact_key).strip()
+    fact_key = str(fact_key or "").strip().lower()
     fact_value = re.sub(r"\s+", " ", str(fact_value or "")).strip(" .!?")
     if not fact_key or not fact_value or len(fact_value) > 300:
         return False
@@ -911,7 +911,7 @@ def save_user_fact(owner_id, fact_key, fact_value):
 
 
 def get_user_fact(owner_id, fact_key):
-    fact_key = _norm_local(fact_key).strip()
+    fact_key = str(fact_key or "").strip().lower()
     with db_lock:
         conn = get_db()
         row = conn.execute(

@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 import json
 import logging
@@ -1679,6 +1680,27 @@ def seed_initial_memories():
 
 seed_initial_memories()
 
+# Contexto local del update para grupos con Temas/Topics.
+# Así cualquier respuesta del bot vuelve al mismo tema donde se ejecutó el comando.
+_telegram_topic_ctx = threading.local()
+
+def set_current_message_thread_id(thread_id=None):
+    _telegram_topic_ctx.message_thread_id = thread_id
+
+def get_current_message_thread_id():
+    return getattr(_telegram_topic_ctx, "message_thread_id", None)
+
+def apply_current_topic(data):
+    if not isinstance(data, dict):
+        return data
+    payload = dict(data)
+    thread_id = get_current_message_thread_id()
+    # Telegram solo acepta message_thread_id en métodos que envían contenido al chat.
+    if thread_id is not None and payload.get("chat_id") is not None:
+        payload.setdefault("message_thread_id", int(thread_id))
+    return payload
+
+
 # =========================================================
 # TELEGRAM HELPERS
 # =========================================================
@@ -1693,9 +1715,11 @@ def telegram(
 
     try:
 
+        payload = apply_current_topic(data or {})
+
         response = TELEGRAM_SESSION.post(
             f"{TELEGRAM_API}/{method}",
-            json=data or {},
+            json=payload,
             timeout=TELEGRAM_TIMEOUT
         )
 
@@ -3559,7 +3583,7 @@ def send_one_winged_angel_finisher(chat_id):
         with gif_path.open("rb") as fh:
             resp=TELEGRAM_SESSION.post(
                 f"{TELEGRAM_API}/sendAnimation",
-                data={"chat_id":str(chat_id),"caption":caption},
+                data=apply_current_topic({"chat_id":str(chat_id),"caption":caption}),
                 files={"animation":("one_winged_angel.mp4",fh,"video/mp4")},
                 timeout=TELEGRAM_TIMEOUT
             )
@@ -5492,6 +5516,8 @@ def process_update(
 
         callback_query = update.get("callback_query")
         if callback_query:
+            callback_message = callback_query.get("message") or {}
+            set_current_message_thread_id(callback_message.get("message_thread_id"))
             handle_rpg_callback(callback_query)
             return
 
@@ -5501,6 +5527,10 @@ def process_update(
 
         if not message:
             return
+
+        # En grupos con temas, Telegram incluye message_thread_id.
+        # Todas las respuestas de este update heredarán ese mismo tema.
+        set_current_message_thread_id(message.get("message_thread_id"))
 
         chat = message.get(
             "chat",

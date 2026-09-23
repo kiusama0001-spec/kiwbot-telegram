@@ -354,6 +354,30 @@ def init_db():
             ON kiwon_transactions(user_id, created_at DESC)
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS characters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                class_name TEXT NOT NULL,
+                level INTEGER NOT NULL DEFAULT 1,
+                exp INTEGER NOT NULL DEFAULT 0,
+                hp INTEGER NOT NULL DEFAULT 100,
+                max_hp INTEGER NOT NULL DEFAULT 100,
+                atk INTEGER NOT NULL DEFAULT 10,
+                defense INTEGER NOT NULL DEFAULT 5,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(user_id, name)
+            )
+        """)
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_characters_user
+            ON characters(user_id, is_active DESC, id ASC)
+        """)
+
         conn.commit()
         conn.close()
 
@@ -2759,6 +2783,153 @@ def kiwon_ranking(chat_id, limit=10):
     return rows
 
 
+
+# =========================================================
+# RPG — JUGADOR Y PERSONAJES
+# =========================================================
+
+RPG_CLASSES = {
+    "guerrero": {"hp": 120, "atk": 14, "defense": 8},
+    "mago": {"hp": 85, "atk": 18, "defense": 4},
+    "picaro": {"hp": 95, "atk": 16, "defense": 5},
+    "pícaro": {"hp": 95, "atk": 16, "defense": 5},
+    "paladin": {"hp": 130, "atk": 11, "defense": 10},
+    "paladín": {"hp": 130, "atk": 11, "defense": 10},
+    "arquero": {"hp": 100, "atk": 15, "defense": 6},
+}
+
+RPG_CLASS_LABELS = {
+    "guerrero": "Guerrero",
+    "mago": "Mago",
+    "picaro": "Pícaro",
+    "pícaro": "Pícaro",
+    "paladin": "Paladín",
+    "paladín": "Paladín",
+    "arquero": "Arquero",
+}
+
+
+def normalize_rpg_class(value):
+    value = str(value or "").strip().lower()
+    return RPG_CLASS_LABELS.get(value)
+
+
+def get_rpg_class_stats(class_label):
+    key = str(class_label or "").strip().lower()
+    # etiquetas acentuadas también están contempladas
+    return RPG_CLASSES.get(key, {"hp": 100, "atk": 10, "defense": 5})
+
+
+def create_character(user_id, name, class_name):
+    user_id = int(user_id)
+    name = re.sub(r"\s+", " ", str(name or "")).strip()
+    class_label = normalize_rpg_class(class_name)
+
+    if not name or len(name) < 2 or len(name) > 24:
+        return False, "El nombre debe tener entre 2 y 24 caracteres."
+    if not re.match(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 _-]+$", name):
+        return False, "El nombre solo puede usar letras, números, espacios, guion o guion bajo."
+    if not class_label:
+        return False, "Clase no válida. Usa: Guerrero, Mago, Pícaro, Paladín o Arquero."
+
+    stats = get_rpg_class_stats(class_label)
+    now = int(time.time())
+
+    with db_lock:
+        conn = get_db()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM characters WHERE user_id=?",
+                (user_id,)
+            ).fetchone()["n"]
+            if int(count) >= 10:
+                conn.close()
+                return False, "Ya tienes el máximo de 10 personajes."
+
+            active = 1 if int(count) == 0 else 0
+
+            conn.execute("""
+                INSERT INTO characters
+                (user_id, name, class_name, level, exp, hp, max_hp, atk, defense,
+                 is_active, created_at, updated_at)
+                VALUES (?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id, name, class_label,
+                stats["hp"], stats["hp"], stats["atk"], stats["defense"],
+                active, now, now
+            ))
+            conn.commit()
+            conn.close()
+            return True, active
+        except sqlite3.IntegrityError:
+            conn.close()
+            return False, "Ya tienes un personaje con ese nombre."
+
+
+def get_active_character(user_id):
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("""
+            SELECT * FROM characters
+            WHERE user_id=? AND is_active=1
+            ORDER BY id ASC LIMIT 1
+        """, (int(user_id),)).fetchone()
+        conn.close()
+    return row
+
+
+def get_characters(user_id):
+    with db_lock:
+        conn = get_db()
+        rows = conn.execute("""
+            SELECT * FROM characters
+            WHERE user_id=?
+            ORDER BY is_active DESC, level DESC, id ASC
+        """, (int(user_id),)).fetchall()
+        conn.close()
+    return rows
+
+
+def set_active_character(user_id, name):
+    user_id = int(user_id)
+    name = re.sub(r"\s+", " ", str(name or "")).strip()
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("""
+            SELECT id, name FROM characters
+            WHERE user_id=? AND LOWER(name)=LOWER(?)
+            LIMIT 1
+        """, (user_id, name)).fetchone()
+        if not row:
+            conn.close()
+            return False, None
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE characters SET is_active=0, updated_at=? WHERE user_id=?",
+            (int(time.time()), user_id)
+        )
+        conn.execute(
+            "UPDATE characters SET is_active=1, updated_at=? WHERE id=?",
+            (int(time.time()), int(row["id"]))
+        )
+        conn.commit()
+        conn.close()
+        return True, row["name"]
+
+
+def character_card(row):
+    if not row:
+        return "Sin personaje activo."
+    return (
+        f"🧙 Personaje: {row['name']}\n"
+        f"⚔️ Clase: {row['class_name']}\n"
+        f"⭐ Nivel: {row['level']} | EXP: {row['exp']}\n"
+        f"❤️ HP: {row['hp']}/{row['max_hp']}\n"
+        f"🗡️ ATK: {row['atk']} | 🛡️ DEF: {row['defense']}"
+    )
+
+
 # =========================================================
 # COMANDOS
 # =========================================================
@@ -2910,15 +3081,105 @@ def process_command(
     if command == "/perfil":
         user = message.get("from", {})
         ensure_player(user)
-        balance = get_kiwons(user.get("id"))
+        user_id = user.get("id")
+        balance = get_kiwons(user_id)
+        character = get_active_character(user_id)
+
+        if character:
+            rpg_text = (
+                f"Personaje actual: {character['name']}\n"
+                f"Clase: {character['class_name']}\n"
+                f"Nivel: {character['level']} | EXP: {character['exp']}\n"
+                f"HP: {character['hp']}/{character['max_hp']} | "
+                f"ATK: {character['atk']} | DEF: {character['defense']}"
+            )
+        else:
+            rpg_text = "Personaje actual: ninguno\nUsa /crear_personaje Nombre Clase"
+
         send_message(
             chat_id,
             "👤 PERFIL DE JUGADOR\n\n"
             f"Jugador: {player_display_name(user)}\n"
-            f"Kiwons: {balance:,} KW\n"
-            "Personaje actual: todavía no creado\n"
-            "RPG: próximamente"
+            f"Kiwons: {balance:,} KW\n\n"
+            f"{rpg_text}"
         )
+        return True
+
+    if command in ("/crear_personaje", "/crearpersonaje"):
+        user = message.get("from", {})
+        ensure_player(user)
+
+        parts = text.split()
+        if len(parts) < 3:
+            send_message(
+                chat_id,
+                "Uso: /crear_personaje Nombre Clase\n"
+                "Clases: Guerrero, Mago, Pícaro, Paladín, Arquero\n"
+                "Ejemplo: /crear_personaje Kael Guerrero"
+            )
+            return True
+
+        class_input = parts[-1]
+        name = " ".join(parts[1:-1]).strip()
+        ok, result = create_character(user.get("id"), name, class_input)
+
+        if not ok:
+            send_message(chat_id, result)
+            return True
+
+        active_text = "\nQuedó seleccionado como tu personaje activo." if result else ""
+        char = get_active_character(user.get("id")) if result else None
+        send_message(
+            chat_id,
+            f"✨ Personaje creado: {name}\n"
+            f"Clase: {normalize_rpg_class(class_input)}"
+            f"{active_text}"
+            + (f"\n\n{character_card(char)}" if char else "")
+        )
+        return True
+
+    if command == "/personajes":
+        user_id = message.get("from", {}).get("id")
+        rows = get_characters(user_id)
+        if not rows:
+            send_message(chat_id, "Todavía no tienes personajes. Usa /crear_personaje Nombre Clase")
+            return True
+
+        lines = ["🧙 TUS PERSONAJES", ""]
+        for row in rows:
+            active = " ⭐ ACTIVO" if row["is_active"] else ""
+            lines.append(
+                f"• {row['name']} — {row['class_name']} — Nv. {row['level']}{active}"
+            )
+        send_message(chat_id, "\n".join(lines))
+        return True
+
+    if command in ("/usar_personaje", "/usarpersonaje"):
+        name = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+        if not name:
+            send_message(chat_id, "Uso: /usar_personaje Nombre")
+            return True
+
+        user_id = message.get("from", {}).get("id")
+        ok, selected = set_active_character(user_id, name)
+        if not ok:
+            send_message(chat_id, "No encontré un personaje tuyo con ese nombre.")
+            return True
+
+        char = get_active_character(user_id)
+        send_message(
+            chat_id,
+            f"⭐ Ahora tu personaje activo es {selected}.\n\n{character_card(char)}"
+        )
+        return True
+
+    if command in ("/personaje", "/pj"):
+        user_id = message.get("from", {}).get("id")
+        char = get_active_character(user_id)
+        if not char:
+            send_message(chat_id, "No tienes un personaje activo. Usa /crear_personaje Nombre Clase")
+            return True
+        send_message(chat_id, character_card(char))
         return True
 
     if command in ("/transferir", "/pagar"):
@@ -3541,6 +3802,12 @@ Kiwons:
 /saldo
 /transferir
 /ranking
+
+RPG:
+/crear_personaje Nombre Clase
+/personajes
+/usar_personaje Nombre
+/personaje
 
 Administración de Kiwons:
 /darr

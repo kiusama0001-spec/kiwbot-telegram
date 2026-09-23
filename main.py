@@ -3096,6 +3096,10 @@ RPG_CLASSES = {
     "paladin": {"hp": 130, "atk": 11, "defense": 10},
     "paladín": {"hp": 130, "atk": 11, "defense": 10},
     "arquero": {"hp": 100, "atk": 15, "defense": 6},
+    # Clase secreta exclusiva de Kiu. La clave con espacio coincide con
+    # get_rpg_class_stats("The Cleaner") -> "the cleaner".
+    "the cleaner": {"hp": 130, "atk": 18, "defense": 9},
+    "the_cleaner": {"hp": 130, "atk": 18, "defense": 9},
 }
 
 RPG_CLASS_LABELS = {
@@ -3106,6 +3110,8 @@ RPG_CLASS_LABELS = {
     "paladin": "Paladín",
     "paladín": "Paladín",
     "arquero": "Arquero",
+    "the cleaner": "The Cleaner",
+    "the_cleaner": "The Cleaner",
 }
 
 

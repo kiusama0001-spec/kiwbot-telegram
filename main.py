@@ -3537,27 +3537,43 @@ def rpg_creator_link(chat_id):
     username=get_bot_identity().get("username","")
     return f"https://t.me/{username}?startapp={rpg_creator_start_param(chat_id)}" if username else None
 
-def creator_launch_keyboard(chat_id):
-    link=rpg_creator_link(chat_id)
-    return {"inline_keyboard":[[{"text":"⚔️ CREAR MI PERSONAJE","url":link}]]} if link else None
+def creator_pc_link(chat_id):
+    username=get_bot_identity().get("username","")
+    return f"https://t.me/{username}?start=rpgcreate_{rpg_creator_start_param(chat_id)}" if username else None
 
-def creator_keyboard():
-    return {"inline_keyboard":[
+def creator_launch_keyboard(chat_id):
+    app_link=rpg_creator_link(chat_id)
+    pc_link=creator_pc_link(chat_id)
+    if not app_link: return None
+    rows=[[{"text":"📱 ABRIR CREADOR","url":app_link}]]
+    if pc_link: rows.append([{"text":"💻 CREAR DESDE PC","url":pc_link}])
+    return {"inline_keyboard":rows}
+
+def creator_keyboard(user_id=None):
+    rows=[
         [{"text":"⚔️ Guerrero","callback_data":"rpg_class:guerrero"},{"text":"🔮 Mago","callback_data":"rpg_class:mago"}],
         [{"text":"🗡️ Pícaro","callback_data":"rpg_class:picaro"},{"text":"🛡️ Paladín","callback_data":"rpg_class:paladin"}],
         [{"text":"🏹 Arquero","callback_data":"rpg_class:arquero"}],
-        [{"text":"❌ Cancelar","callback_data":"rpg_create_cancel"}],
-    ]}
+    ]
+    if user_id is not None and is_owner(user_id):
+        rows.append([{"text":"🪽 The Cleaner","callback_data":"rpg_class:the_cleaner"}])
+    rows.append([{"text":"❌ Cancelar","callback_data":"rpg_create_cancel"}])
+    return {"inline_keyboard":rows}
 
-def send_character_creator(chat_id, user_id):
-    _character_creation_sessions[int(user_id)]={"stage":"class","chat_id":int(chat_id),"expires":time.time()+600}
-    return send_message(chat_id,"🧙 CREACIÓN DE PERSONAJE\n\nElige una clase para ver sus estadísticas, especialidad y estilo antes de decidir.",reply_markup=creator_keyboard())
+def send_character_creator(chat_id, user_id, origin_chat_id=None):
+    _character_creation_sessions[int(user_id)]={"stage":"class","chat_id":int(chat_id),"origin_chat_id":int(origin_chat_id) if origin_chat_id is not None else int(chat_id),"expires":time.time()+600}
+    return send_message(chat_id,"🧙 CREACIÓN DE PERSONAJE\n\nElige una clase para ver sus estadísticas, especialidad y estilo antes de decidir.",reply_markup=creator_keyboard(user_id))
 
 def class_preview(chat_id, user_id, key):
-    info=RPG_CLASS_INFO.get(key)
-    if not info: return
+    if key=="the_cleaner":
+        if not is_owner(user_id): return
+        info={"label":"The Cleaner","emoji":"🪽","ability":"Clase exclusiva de Kiu","desc":"Dominio, resistencia y precisión. El nombre del personaje lo eliges tú."}
+    else:
+        info=RPG_CLASS_INFO.get(key)
+        if not info: return
     stats=get_rpg_class_stats(info["label"])
-    _character_creation_sessions[int(user_id)]={"stage":"preview","chat_id":int(chat_id),"class_key":key,"expires":time.time()+600}
+    prev=_character_creation_sessions.get(int(user_id)) or {}
+    _character_creation_sessions[int(user_id)]={"stage":"preview","chat_id":int(chat_id),"origin_chat_id":prev.get("origin_chat_id",int(chat_id)),"class_key":key,"expires":time.time()+600}
     send_message(chat_id,f"{info['emoji']} {info['label'].upper()}\n\n❤️ HP: {stats['hp']}\n🗡️ ATK: {stats['atk']}\n🛡️ DEF: {stats['defense']}\n\n✨ Especialidad: {info['ability']}\n{info['desc']}",reply_markup={"inline_keyboard":[[{"text":f"✅ Elegir {info['label']}","callback_data":f"rpg_choose:{key}"}],[{"text":"◀️ Ver otras clases","callback_data":"rpg_create_back"}]]})
 
 def handle_character_name_message(message, text):
@@ -3571,7 +3587,7 @@ def handle_character_name_message(message, text):
     if text.startswith("/"): return False
     if not name or len(name)<2 or len(name)>24 or not re.match(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 _-]+$",name):
         send_message(chat_id,"Ese nombre no es válido. Usa entre 2 y 24 caracteres: letras, números, espacios, - o _."); return True
-    key=st["class_key"]; info=RPG_CLASS_INFO[key]; stats=get_rpg_class_stats(info["label"])
+    key=st["class_key"]; info=({"label":"The Cleaner","emoji":"🪽"} if key=="the_cleaner" else RPG_CLASS_INFO[key]); stats=get_rpg_class_stats(info["label"])
     st.update({"stage":"confirm","name":name,"expires":time.time()+600}); _character_creation_sessions[int(uid)]=st
     send_message(chat_id,f"✨ ¿Crear este personaje?\n\n🧙 {name}\n{info['emoji']} {info['label']}\n❤️ {stats['hp']} HP · 🗡️ {stats['atk']} ATK · 🛡️ {stats['defense']} DEF",reply_markup={"inline_keyboard":[[{"text":"✅ Crear personaje","callback_data":"rpg_create_confirm"}],[{"text":"↩️ Cambiar clase","callback_data":"rpg_create_back"},{"text":"❌ Cancelar","callback_data":"rpg_create_cancel"}]]})
     return True
@@ -3840,20 +3856,37 @@ def handle_rpg_callback(query):
         class_preview(chat_id,uid,data.split(":",1)[1]); return True
     if data.startswith("rpg_choose:"):
         key=data.split(":",1)[1]
-        if key not in RPG_CLASS_INFO: return True
-        _character_creation_sessions[int(uid)]={"stage":"name","chat_id":int(chat_id),"class_key":key,"expires":time.time()+600}
-        send_message(chat_id,f"✏️ Elegiste {RPG_CLASS_INFO[key]['label']}.\nAhora escribe el nombre de tu personaje."); return True
+        if key=="the_cleaner":
+            if not is_owner(uid): return True
+            label="The Cleaner"
+        else:
+            if key not in RPG_CLASS_INFO: return True
+            label=RPG_CLASS_INFO[key]["label"]
+        prev=_character_creation_sessions.get(int(uid)) or {}
+        _character_creation_sessions[int(uid)]={"stage":"name","chat_id":int(chat_id),"origin_chat_id":prev.get("origin_chat_id",int(chat_id)),"class_key":key,"expires":time.time()+600}
+        send_message(chat_id,f"✏️ Elegiste {label}.\nAhora escribe el nombre de tu personaje."); return True
     if data=="rpg_create_back":
-        send_character_creator(chat_id,uid); return True
+        prev=_character_creation_sessions.get(int(uid)) or {}
+        send_character_creator(chat_id,uid,origin_chat_id=prev.get("origin_chat_id",chat_id)); return True
     if data=="rpg_create_cancel":
         _character_creation_sessions.pop(int(uid),None); send_message(chat_id,"Creación cancelada."); return True
     if data=="rpg_create_confirm":
         st=_character_creation_sessions.get(int(uid)) or {}
         if st.get("stage")!="confirm" or st.get("expires",0)<time.time(): send_message(chat_id,"La creación expiró. Usa /crear_personaje."); return True
-        info=RPG_CLASS_INFO[st["class_key"]]; ok,result=create_character(uid,st["name"],info["label"]); _character_creation_sessions.pop(int(uid),None)
+        key=st["class_key"]
+        if key=="the_cleaner":
+            if not is_owner(uid): send_message(chat_id,"Esa clase no está disponible para tu cuenta."); return True
+            info={"label":"The Cleaner","emoji":"🪽"}; ok,result=create_owner_character(uid,st["name"])
+        else:
+            info=RPG_CLASS_INFO[key]; ok,result=create_character(uid,st["name"],info["label"])
+        origin_chat_id=st.get("origin_chat_id",chat_id); _character_creation_sessions.pop(int(uid),None)
         if not ok: send_message(chat_id,result); return True
         char=get_active_character(uid)
-        send_message(chat_id,f"✨ Personaje creado: {st['name']}\nClase: {info['label']}"+(f"\n\n{character_card(char)}" if char and char['name'].lower()==st['name'].lower() else "\n\nPuedes seleccionarlo desde /personajes.")); return True
+        send_message(chat_id,f"✨ Personaje creado: {st['name']}\nClase: {info['label']}"+(f"\n\n{character_card(char)}" if char and char['name'].lower()==st['name'].lower() else "\n\nPuedes seleccionarlo desde /personajes."))
+        if int(origin_chat_id)!=int(chat_id):
+            u=(query.get("from") or {}); username=u.get("username"); mention=("@"+username) if username else (u.get("first_name") or "Jugador")
+            send_message(origin_chat_id,f"✨ UN NUEVO AVENTURERO HA LLEGADO\n\n{info.get('emoji','🧙')} {info['label']} {mention}\n{st['name']} — Nivel 1\n\nBienvenido al Mundo {current_rpg_world()}.")
+        return True
     if data.startswith("rpg_item:"):
         show_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
     if data.startswith("rpg_equip:"):
@@ -3950,6 +3983,26 @@ def process_command(
         text
     )
 
+
+    # -----------------------------------------------------
+    # KIWRPG PC FALLBACK /START
+    # -----------------------------------------------------
+    if command == "/start":
+        parts=str(text or "").strip().split(maxsplit=1)
+        if len(parts)>1 and parts[1].startswith("rpgcreate_create_"):
+            raw=parts[1][len("rpgcreate_"):]
+            origin_chat_id=None
+            try:
+                if raw.startswith("create_n"): origin_chat_id=-int(raw[8:])
+                elif raw.startswith("create_p"): origin_chat_id=int(raw[8:])
+            except Exception: origin_chat_id=None
+            user=message.get("from",{})
+            if chat.get("type")!="private":
+                send_message(chat_id,"Abre este enlace en el chat privado de KiwBot para crear tu personaje.")
+                return True
+            ensure_player(user)
+            send_character_creator(chat_id,user.get("id"),origin_chat_id=origin_chat_id or chat_id)
+            return True
 
     # -----------------------------------------------------
     # PING

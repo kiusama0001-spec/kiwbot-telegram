@@ -897,7 +897,7 @@ def extract_automatic_memory(text, user_id):
          lambda m: f"Le va a {m.group(1).strip(' .!?')}"),
         (r"^(?:mi\s+)?equipo\s+(?:favorito|preferido)\s+(?:es|es el|es la)\s+(.+)$",
          lambda m: f"Su equipo favorito es {m.group(1).strip(' .!?')}"),
-        (r"^mi\s+(anime|serie|pelicula|película|juego|cancion|canción|banda|artista)\s+(?:favorit[oa]|preferid[oa])\s+es\s+(.+)$",
+        (r"^mi\s+(anime|animé|serie|pelicula|película|juego|cancion|canción|banda|artista)\s+(?:favorit[oa]|preferid[oa])\s+es\s+(.+)$",
          lambda m: f"Su {m.group(1)} favorito/a es {m.group(2).strip(' .!?')}"),
         (r"^mi\s+(.+?)\s+favorit[oa]\s+es\s+(.+)$",
          lambda m: f"Su {m.group(1).strip()} favorito/a es {m.group(2).strip(' .!?')}"),
@@ -945,20 +945,21 @@ def answer_from_long_term_memory(chat_id, user_id, question):
     if not personal:
         return None
 
-    # Consultas frecuentes con respuesta natural.
+    # Equipo de fútbol.
     if re.search(r"\b(a que equipo|que equipo|equipo.*voy|equipo.*favorito)\b", q):
         for mem in personal:
-            m = _norm_local(mem)
-            hit = re.search(r"(?:le va a|equipo favorito es)\s+(.+)", m)
-            if hit:
-                team = hit.group(1).strip(" .")
+            m = re.search(r"(?:le va a|equipo favorito es)\s+(.+)", mem, flags=re.IGNORECASE)
+            if m:
+                team = m.group(1).strip(" .")
                 return f"Le vas al {team}, Amo." if is_owner(user_id) else f"Le vas al {team}."
 
-    if re.search(r"\b(anime.*favorit|cual.*anime|que anime)\b", q):
+    # Anime favorito, incluyendo preguntas cortas como "¿Mi anime favorito?"
+    if re.search(r"\b(mi\s+anime\s+favorito|anime\s+favorito|cual.*anime|que.*anime)\b", q):
         for mem in personal:
-            m = re.search(r"(?:su )?anime favorito/a? es (.+)", mem, flags=re.IGNORECASE)
+            m = re.search(r"(?:su\s+)?anim[eé]\s+favorito(?:/a)?\s+es\s+(.+)", mem, flags=re.IGNORECASE)
             if m:
-                return f"Tu anime favorito es {m.group(1).strip(' .')}, Amo." if is_owner(user_id) else f"Tu anime favorito es {m.group(1).strip(' .')}."
+                fav = m.group(1).strip(" .")
+                return f"Tu anime favorito es {fav}, Amo." if is_owner(user_id) else f"Tu anime favorito es {fav}."
 
     # Búsqueda general por coincidencia de palabras.
     q_tokens = _memory_tokens(question)
@@ -971,12 +972,12 @@ def answer_from_long_term_memory(chat_id, user_id, question):
             best_score = score
             best = mem
 
-    if best and best_score >= 1 and re.search(r"\b(mi|me|yo|mio|mía|gusta|favorit|prefiero|voy)\b", q):
-        prefix = "Recuerdo que " if not is_owner(user_id) else "Recuerdo que, Amo, "
-        return prefix + best.rstrip(".") + "."
+    if best and best_score >= 1 and re.search(r"\b(mi|me|yo|mio|mia|gusta|favorit|prefiero|voy)\b", q):
+        if is_owner(user_id):
+            return "Recuerdo esto de usted, Amo: " + best.rstrip(".") + "."
+        return "Recuerdo esto de ti: " + best.rstrip(".") + "."
 
     return None
-
 
 def automatic_memory_ack(memory, user_id):
     """Respuesta breve cuando KiwBot aprende algo automáticamente."""
@@ -1819,13 +1820,39 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
     def pick(key):
         return _local_pick(bank, key, owner)
 
+    # Seguimientos breves: usa la conversación inmediata para completar un dato.
+    recent_for_context = get_memory(chat_id, user_id)
+    last_user_text = ""
+    for item in reversed(recent_for_context):
+        if item.get("role") == "user":
+            last_user_text = item.get("content", "")
+            break
+
+    if re.match(r"^es\s+.+", n) and re.search(r"\b(mi\s+)?anime\s+favorito\b", _norm_local(last_user_text)):
+        value = re.sub(r"^es\s+", "", text, flags=re.IGNORECASE).strip(" .!?")
+        if value:
+            auto = f"Su anime favorito/a es {value}"
+            if add_long_term_memory("user", user_id, auto):
+                answer = automatic_memory_ack(auto, user_id)
+                add_memory(chat_id, user_id, "user", text)
+                add_memory(chat_id, user_id, "assistant", answer)
+                return answer
+
     # Antes de caer en categorías genéricas, intenta responder desde memoria.
     remembered_answer = answer_from_long_term_memory(chat_id, user_id, text)
 
     # -----------------------------------------------------
     # IDENTIDAD FIJA
     # -----------------------------------------------------
-    if re.search(r"\b(quien|quién)\s+es\s+tu\s+(amo|dueño)\b", n) or \
+    if owner and re.search(r"\b(sabes|recuerdas|reconoces)\s+que\s+soy\s+tu\s+(amo|dueño)\b", n):
+        answer = random.choice([
+            "Claro que lo sé, Amo Kiu.",
+            "Sí, Amo. A usted sí lo reconozco perfectamente.",
+            "Por supuesto, Kiu. Usted es mi Amo.",
+            "Sí, Amo. Esa parte no se me olvida."
+        ])
+
+    elif re.search(r"\b(quien|quién)\s+es\s+tu\s+(amo|dueño)\b", n) or \
        re.search(r"\bcomo\s+se\s+llama\s+tu\s+(amo|dueño)\b", n):
         answer = pick("quien_amo") if bank.get("quien_amo") else "Mi Amo es Kiu."
 
@@ -3297,11 +3324,11 @@ def process_update(
         preference_memory = extract_preference_memory(text) if is_owner(user_id) else ""
         if preference_memory:
             if add_long_term_memory("user", user_id, preference_memory):
-                send_message(chat_id, automatic_memory_ack(preference_memory, user_id), message_id)
+                send_message(chat_id, automatic_memory_ack(preference_memory, user_id), message.get("message_id"))
                 return
         elif auto_memory:
             if add_long_term_memory("user", user_id, auto_memory):
-                send_message(chat_id, automatic_memory_ack(auto_memory, user_id), message_id)
+                send_message(chat_id, automatic_memory_ack(auto_memory, user_id), message.get("message_id"))
                 return
 
         explicit_memory = extract_explicit_memory(text)

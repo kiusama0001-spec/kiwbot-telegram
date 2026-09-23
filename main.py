@@ -753,13 +753,12 @@ def add_long_term_memory(
             FROM long_term_memory
             WHERE scope = ?
               AND owner_id = ?
-              AND ((chat_id IS NULL AND ? IS NULL) OR chat_id = ?)
+              AND chat_id IS NOT DISTINCT FROM ?
               AND LOWER(memory) = LOWER(?)
             LIMIT 1
         """, (
             scope,
             owner_id,
-            chat_value,
             chat_value,
             memory
         )).fetchone()
@@ -791,22 +790,20 @@ def add_long_term_memory(
                 FROM long_term_memory
                 WHERE scope = ?
                   AND owner_id = ?
-                  AND ((chat_id IS NULL AND ? IS NULL) OR chat_id = ?)
+                  AND chat_id IS NOT DISTINCT FROM ?
                 ORDER BY updated_at DESC
                 LIMIT ?
             )
             AND scope = ?
             AND owner_id = ?
-            AND ((chat_id IS NULL AND ? IS NULL) OR chat_id = ?)
+            AND chat_id IS NOT DISTINCT FROM ?
         """, (
             scope,
             owner_id,
             chat_value,
-            chat_value,
             MAX_LONG_TERM_MEMORIES,
             scope,
             owner_id,
-            chat_value,
             chat_value
         ))
 

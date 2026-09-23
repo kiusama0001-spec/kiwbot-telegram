@@ -879,6 +879,121 @@ def extract_explicit_memory(
     return None
 
 
+
+def extract_automatic_memory(text, user_id):
+    """Extrae datos personales explícitos sin necesitar /recuerda."""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw or raw.startswith("/"):
+        return None
+
+    low = _norm_local(raw) if "_norm_local" in globals() else raw.lower()
+
+    # No guardar preguntas como hechos.
+    if "?" in raw or re.match(r"^(que|qué|quien|quién|como|cómo|cuando|cuándo|donde|dónde|por que|por qué)\b", low):
+        return None
+
+    patterns = [
+        (r"^(?:yo\s+)?le\s+voy\s+(?:al|a la)\s+(.+)$",
+         lambda m: f"Le va a {m.group(1).strip(' .!?')}"),
+        (r"^(?:mi\s+)?equipo\s+(?:favorito|preferido)\s+(?:es|es el|es la)\s+(.+)$",
+         lambda m: f"Su equipo favorito es {m.group(1).strip(' .!?')}"),
+        (r"^mi\s+(anime|serie|pelicula|película|juego|cancion|canción|banda|artista)\s+(?:favorit[oa]|preferid[oa])\s+es\s+(.+)$",
+         lambda m: f"Su {m.group(1)} favorito/a es {m.group(2).strip(' .!?')}"),
+        (r"^mi\s+(.+?)\s+favorit[oa]\s+es\s+(.+)$",
+         lambda m: f"Su {m.group(1).strip()} favorito/a es {m.group(2).strip(' .!?')}"),
+        (r"^(?:me\s+llamo|mi\s+nombre\s+es)\s+(.+)$",
+         lambda m: f"Su nombre es {m.group(1).strip(' .!?')}"),
+        (r"^(?:soy\s+de|vivo\s+en)\s+(.+)$",
+         lambda m: f"Vive/es de {m.group(1).strip(' .!?')}"),
+        (r"^me\s+gusta[n]?\s+(.+)$",
+         lambda m: f"Le gusta {m.group(1).strip(' .!?')}"),
+        (r"^no\s+me\s+gusta[n]?\s+(.+)$",
+         lambda m: f"No le gusta {m.group(1).strip(' .!?')}"),
+        (r"^(?:prefiero|mi\s+preferencia\s+es)\s+(.+)$",
+         lambda m: f"Prefiere {m.group(1).strip(' .!?')}"),
+    ]
+
+    for pattern, builder in patterns:
+        match = re.match(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            memory = builder(match)
+            if 4 <= len(memory) <= 300:
+                return memory
+
+    return None
+
+
+def _memory_tokens(text):
+    """Palabras útiles para comparar una pregunta con recuerdos."""
+    text = _norm_local(text)
+    stop = {
+        "a","al","algo","de","del","el","ella","en","es","la","las","le","les",
+        "lo","los","me","mi","mis","que","qué","quien","quién","soy","su","sus",
+        "te","tu","tus","un","una","y","yo","voy","cual","cuál","favorito","favorita"
+    }
+    return {
+        w for w in re.findall(r"[a-záéíóúñ0-9]+", text)
+        if len(w) > 2 and w not in stop
+    }
+
+
+def answer_from_long_term_memory(chat_id, user_id, question):
+    """Busca respuestas personales en memoria permanente sin usar Groq."""
+    q = _norm_local(question)
+    memories = get_long_term_memories(user_id, chat_id)
+    personal = [m["memory"] for m in memories if m["scope"] in ("user", "chat")]
+    if not personal:
+        return None
+
+    # Consultas frecuentes con respuesta natural.
+    if re.search(r"\b(a que equipo|que equipo|equipo.*voy|equipo.*favorito)\b", q):
+        for mem in personal:
+            m = _norm_local(mem)
+            hit = re.search(r"(?:le va a|equipo favorito es)\s+(.+)", m)
+            if hit:
+                team = hit.group(1).strip(" .")
+                return f"Le vas al {team}, Amo." if is_owner(user_id) else f"Le vas al {team}."
+
+    if re.search(r"\b(anime.*favorit|cual.*anime|que anime)\b", q):
+        for mem in personal:
+            m = re.search(r"(?:su )?anime favorito/a? es (.+)", mem, flags=re.IGNORECASE)
+            if m:
+                return f"Tu anime favorito es {m.group(1).strip(' .')}, Amo." if is_owner(user_id) else f"Tu anime favorito es {m.group(1).strip(' .')}."
+
+    # Búsqueda general por coincidencia de palabras.
+    q_tokens = _memory_tokens(question)
+    best = None
+    best_score = 0
+    for mem in personal:
+        mt = _memory_tokens(mem)
+        score = len(q_tokens & mt)
+        if score > best_score:
+            best_score = score
+            best = mem
+
+    if best and best_score >= 1 and re.search(r"\b(mi|me|yo|mio|mía|gusta|favorit|prefiero|voy)\b", q):
+        prefix = "Recuerdo que " if not is_owner(user_id) else "Recuerdo que, Amo, "
+        return prefix + best.rstrip(".") + "."
+
+    return None
+
+
+def automatic_memory_ack(memory, user_id):
+    """Respuesta breve cuando KiwBot aprende algo automáticamente."""
+    if is_owner(user_id):
+        return random.choice([
+            "Lo recordaré, Amo.",
+            "Entendido, Amo. Me lo guardo.",
+            "Eso queda en mi memoria, Amo.",
+            "Anotado en mi cabecita digital, Amo. 😌"
+        ])
+    return random.choice([
+        "Lo recordaré.",
+        "Entendido. Me lo guardo.",
+        "Eso queda en mi memoria.",
+        "Anotado."
+    ])
+
 def seed_initial_memories():
     """Inicializa recuerdos base sin duplicarlos."""
     for memory in INITIAL_KIU_MEMORIES:
@@ -1675,6 +1790,14 @@ def _norm_local(text):
 
 def _local_pick(bank, key, owner=False):
     choices = list(bank.get(key) or bank.get("fallback") or ["Te escucho."])
+    if owner:
+        # Con Kiu evita insultos genéricos del catálogo.
+        clean = [
+            x for x in choices
+            if not re.search(r"\b(baboso|idiota|mortal|criatura|pendejo|tarado)\b", x, flags=re.IGNORECASE)
+        ]
+        if clean:
+            choices = clean
     answer = random.choice(choices)
     if owner:
         # Con Kiu mantiene respeto/submisión sin repetir "Amo" en cada frase.
@@ -1695,6 +1818,9 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
 
     def pick(key):
         return _local_pick(bank, key, owner)
+
+    # Antes de caer en categorías genéricas, intenta responder desde memoria.
+    remembered_answer = answer_from_long_term_memory(chat_id, user_id, text)
 
     # -----------------------------------------------------
     # IDENTIDAD FIJA
@@ -1743,6 +1869,9 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
             )
         else:
             answer = "Todavía no tengo recuerdos permanentes tuyos guardados, criatura."
+
+    elif remembered_answer:
+        answer = remembered_answer
 
     # -----------------------------------------------------
     # CONOCIMIENTO LOCAL / BDSM
@@ -3162,6 +3291,18 @@ def process_update(
         # =================================================
         # MEMORIA AUTOMÁTICA EXPLÍCITA
         # =================================================
+
+        # Memoria automática: aprende hechos personales claros sin /recuerda.
+        auto_memory = extract_automatic_memory(text, user_id)
+        preference_memory = extract_preference_memory(text) if is_owner(user_id) else ""
+        if preference_memory:
+            if add_long_term_memory("user", user_id, preference_memory):
+                send_message(chat_id, automatic_memory_ack(preference_memory, user_id), message_id)
+                return
+        elif auto_memory:
+            if add_long_term_memory("user", user_id, auto_memory):
+                send_message(chat_id, automatic_memory_ack(auto_memory, user_id), message_id)
+                return
 
         explicit_memory = extract_explicit_memory(text)
 

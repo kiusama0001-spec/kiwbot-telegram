@@ -557,6 +557,20 @@ def init_db():
             )
         """)
 
+        # KiwRPG V4: combate interactivo, habilidades, cooldown y recuperación.
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS defeated_until BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS ultimate_cd BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS defending BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS last_action TEXT DEFAULT ''")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_assets (
+                asset_key TEXT PRIMARY KEY,
+                telegram_file_id TEXT DEFAULT '',
+                updated_at BIGINT NOT NULL
+            )
+        """)
+
         # KiwRPG V2: mundos, salón histórico, drops e interacciones.
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_world_state (
@@ -625,6 +639,14 @@ def init_db():
             'pocion_menor', 'Poción menor', 'comun', 'consumible',
             'Restaura una pequeña parte de la vida.', now_seed
         ))
+
+        cur.execute("""INSERT INTO rpg_items
+            (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,heal_percent)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(item_key) DO UPDATE SET description=excluded.description, heal_percent=excluded.heal_percent
+        """, ('esencia_vital','Esencia Vital','comun','consumible',
+                'Reanima inmediatamente a un personaje derrotado con 50% de su HP máximo.',
+                0,0,0,None,1,now_seed,50))
 
         v2_items = [
             ('colmillo_ceniza','Colmillo de Ceniza','comun','material','Un colmillo aún tibio de una criatura de ceniza.',0,0,0,None,1),
@@ -1747,6 +1769,13 @@ def send_message(
         )
 
     return result
+
+
+def send_dice(chat_id, emoji="🎲", reply_to_message_id=None):
+    data = {"chat_id": chat_id, "emoji": emoji}
+    if reply_to_message_id:
+        data["reply_parameters"] = {"message_id": reply_to_message_id}
+    return telegram("sendDice", data)
 
 
 def send_photo(chat_id, photo, caption="", reply_to_message_id=None, reply_markup=None):
@@ -3309,7 +3338,7 @@ def ensure_owner_secret_character(user):
 
 
 # =========================================================
-# KIWRPG V1 — NÚCLEO DE COMBATE / DADO REAL
+# KIWRPG V4 — COMBATE INTERACTIVO / HABILIDADES / D6 TELEGRAM
 # =========================================================
 
 RPG_ENEMIES = [
@@ -3318,13 +3347,49 @@ RPG_ENEMIES = [
     {"key": "bandido_errante", "name": "Bandido Errante", "hp": 70, "atk": 15, "def": 6, "exp": 32, "kw": 24},
 ]
 
+RPG_DICE_MULT = {1: 0.0, 2: 1.00, 3: 1.10, 4: 1.20, 5: 1.35, 6: 1.60}
+
+# Dos técnicas normales + una fuerte por clase.
+# power está ajustado para que los stats base diferentes no conviertan una clase
+# en una victoria automática. Los efectos especiales dan identidad sin ignorar el d6.
+RPG_ABILITIES = {
+    "Guerrero": [
+        {"key":"corte_feroz","emoji":"⚔️","name":"Corte Feroz","power":1.00,"pen":0.00},
+        {"key":"embate","emoji":"💢","name":"Embate","power":1.08,"pen":0.22},
+        {"key":"furia_titan","emoji":"🔥","name":"Furia del Titán","power":1.42,"pen":0.10,"ultimate":True,"cooldown":4},
+    ],
+    "Mago": [
+        {"key":"proyectil_arcano","emoji":"🔮","name":"Proyectil Arcano","power":0.88,"pen":0.42},
+        {"key":"ruptura_arcana","emoji":"✨","name":"Ruptura Arcana","power":0.96,"pen":0.58},
+        {"key":"cataclismo_arcano","emoji":"☄️","name":"Cataclismo Arcano","power":1.28,"pen":0.65,"ultimate":True,"cooldown":4},
+    ],
+    "Pícaro": [
+        {"key":"punalada","emoji":"🗡️","name":"Puñalada","power":0.96,"pen":0.12},
+        {"key":"paso_sombrio","emoji":"🌑","name":"Paso Sombrío","power":1.00,"pen":0.18,"high_roll_bonus":0.18},
+        {"key":"ejecucion","emoji":"☠️","name":"Ejecución","power":1.34,"pen":0.25,"ultimate":True,"cooldown":4,"execute":True},
+    ],
+    "Paladín": [
+        {"key":"golpe_sagrado","emoji":"🛡️","name":"Golpe Sagrado","power":1.05,"pen":0.00},
+        {"key":"bendicion","emoji":"🌟","name":"Bendición","power":0.90,"pen":0.00,"heal_pct":0.08},
+        {"key":"juicio_divino","emoji":"⚜️","name":"Juicio Divino","power":1.25,"pen":0.12,"heal_pct":0.12,"ultimate":True,"cooldown":4},
+    ],
+    "Arquero": [
+        {"key":"disparo_preciso","emoji":"🏹","name":"Disparo Preciso","power":1.00,"pen":0.10},
+        {"key":"flecha_perforante","emoji":"🎯","name":"Flecha Perforante","power":1.02,"pen":0.55},
+        {"key":"lluvia_flechas","emoji":"🌧️","name":"Lluvia de Flechas","power":1.38,"pen":0.25,"ultimate":True,"cooldown":4},
+    ],
+    "The Cleaner": [
+        {"key":"v_trigger","emoji":"⚡","name":"V-Trigger","power":0.82,"pen":0.12},
+        {"key":"snap_dragon","emoji":"🐉","name":"Snap Dragon","power":0.88,"pen":0.20,"high_roll_bonus":0.10},
+        {"key":"one_winged_angel","emoji":"🪽","name":"One Winged Angel","power":1.22,"pen":0.28,"ultimate":True,"cooldown":5},
+    ],
+}
 
 def exp_needed(level):
     return max(100, int(level) * 100)
 
 
 def grant_rpg_exp(character_id, amount):
-    """Entrega EXP y procesa varios niveles si corresponde."""
     amount = max(0, int(amount))
     with db_lock:
         conn = get_db()
@@ -3352,12 +3417,76 @@ def grant_rpg_exp(character_id, amount):
             conn.rollback(); conn.close(); raise
 
 
+def rpg_abilities_for(class_name):
+    return RPG_ABILITIES.get(str(class_name or ""), RPG_ABILITIES["Guerrero"])
+
+
+def rpg_battle_keyboard(class_name, ultimate_cd=0):
+    a = rpg_abilities_for(class_name)
+    ult_text = f"{a[2]['emoji']} {a[2]['name']}" if int(ultimate_cd) <= 0 else f"⏳ {a[2]['name']} ({ultimate_cd})"
+    return {"inline_keyboard":[
+        [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"rpg_attack:{a[0]['key']}"},
+         {"text":f"{a[1]['emoji']} {a[1]['name']}","callback_data":f"rpg_attack:{a[1]['key']}"}],
+        [{"text":ult_text,"callback_data":f"rpg_attack:{a[2]['key']}"}],
+        [{"text":"🛡️ Defender","callback_data":"rpg_defend"},
+         {"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},
+         {"text":"🏃 Huir","callback_data":"rpg_flee"}]
+    ]}
+
+
+def _rpg_get_ability(class_name, key):
+    for a in rpg_abilities_for(class_name):
+        if a["key"] == key:
+            return a
+    return None
+
+
+def _rpg_auto_recover_if_ready(char):
+    if not char:
+        return char
+    until = int(char.get("defeated_until") or 0)
+    if int(char["hp"]) > 0 or until <= 0 or time.time() < until:
+        return char
+    eff = effective_character_stats(char)
+    with db_lock:
+        conn=get_db()
+        conn.execute("UPDATE characters SET hp=?, defeated_until=0, updated_at=? WHERE id=?",
+                     (int(eff["max_hp"]), int(time.time()), int(char["id"])))
+        conn.commit(); conn.close()
+    return get_active_character(char["user_id"])
+
+
+def _rpg_apply_defeat(conn, char):
+    # EXP ya representa el progreso dentro del nivel actual: jamás baja de nivel.
+    old_exp = int(char["exp"])
+    lost = int(round(old_exp * 0.20))
+    new_exp = max(0, old_exp - lost)
+    until = int(time.time()) + 300
+    conn.execute("UPDATE characters SET hp=0, exp=?, defeated_until=?, updated_at=? WHERE id=?",
+                 (new_exp, until, int(time.time()), int(char["id"])))
+    return lost, until
+
+
+def _rpg_enemy_damage(battle, eff, defending=False):
+    enemy_roll = random.randint(1,6)
+    if enemy_roll == 1:
+        return enemy_roll, 0
+    mult = RPG_DICE_MULT[enemy_roll]
+    raw = (int(battle["enemy_atk"]) * 0.72 * mult) - (eff["defense"] * 0.46)
+    dmg = max(1, int(round(raw)))
+    if defending:
+        dmg = max(0, int(round(dmg * 0.50)))
+    return enemy_roll, dmg
+
+
 def start_rpg_encounter(chat_id, user_id):
     char = get_active_character(user_id)
     if not char:
-        return False, "Necesitas un personaje activo. Usa /crear_personaje Nombre Clase."
+        return False, "Necesitas un personaje activo. Usa /crear_personaje."
+    char = _rpg_auto_recover_if_ready(char)
     if int(char["hp"]) <= 0:
-        return False, "Tu personaje está fuera de combate. El sistema de recuperación llegará en la siguiente fase."
+        remaining=max(1, int((int(char.get("defeated_until") or 0)-time.time()+59)//60))
+        return False, f"💀 {char['name']} está recuperándose.\n⏳ Podrás volver a combatir en aproximadamente {remaining} min.\n\nUna 🧪 Esencia Vital puede reanimarte antes."
 
     level = int(char["level"])
     base = random.choice(RPG_ENEMIES)
@@ -3371,22 +3500,23 @@ def start_rpg_encounter(chat_id, user_id):
         conn = get_db()
         conn.execute("""
             INSERT INTO rpg_battles
-            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,'awaiting_roll',?,?)
+            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,defending,last_action)
+            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,'')
             ON CONFLICT(chat_id,user_id) DO UPDATE SET
                 character_id=excluded.character_id, enemy_key=excluded.enemy_key,
                 enemy_name=excluded.enemy_name, enemy_hp=excluded.enemy_hp,
                 enemy_max_hp=excluded.enemy_max_hp, enemy_atk=excluded.enemy_atk,
-                enemy_def=excluded.enemy_def, state='awaiting_roll',
-                started_at=excluded.started_at, updated_at=excluded.updated_at
+                enemy_def=excluded.enemy_def, state='choosing_action',
+                started_at=excluded.started_at, updated_at=excluded.updated_at,
+                ultimate_cd=0, defending=0, last_action=''
         """, (int(chat_id),int(user_id),int(char["id"]),base["key"],base["name"],enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now))
         conn.commit(); conn.close()
+    eff=effective_character_stats(char)
     return True, (
         f"⚔️ ENCUENTRO — {base['name']}\n\n"
-        f"❤️ Enemigo: {enemy_hp}/{enemy_hp} HP\n"
-        f"🗡️ ATK {enemy_atk} | 🛡️ DEF {enemy_def}\n\n"
-        f"{char['name']}, envía el dado REAL de Telegram 🎲 para atacar.\n"
-        "Escribir un número no cuenta."
+        f"❤️ {char['name']}: {char['hp']}/{eff['max_hp']} HP\n"
+        f"❤️ {base['name']}: {enemy_hp}/{enemy_hp} HP\n\n"
+        "Elige una habilidad. KiwBot lanzará el 🎲 real de Telegram automáticamente."
     )
 
 
@@ -3399,91 +3529,202 @@ def cancel_rpg_encounter(chat_id, user_id):
     return changed
 
 
-def handle_rpg_dice(message):
-    """Consume exclusivamente un 🎲 real de Telegram si el jugador tiene combate activo."""
-    dice = message.get("dice") or {}
-    if dice.get("emoji") != "🎲":
-        return False
-    value = int(dice.get("value") or 0)
-    if value < 1 or value > 6:
-        return False
+def _rpg_asset_get(key):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT telegram_file_id FROM rpg_assets WHERE asset_key=?",(key,)).fetchone(); conn.close()
+    return (row["telegram_file_id"] if row else "") or ""
 
-    chat_id = message.get("chat", {}).get("id")
-    user = message.get("from", {})
-    user_id = user.get("id")
-    if not chat_id or not user_id:
-        return False
+
+def _rpg_asset_set(key, file_id):
+    if not file_id: return
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_assets(asset_key,telegram_file_id,updated_at) VALUES (?,?,?)
+                      ON CONFLICT(asset_key) DO UPDATE SET telegram_file_id=excluded.telegram_file_id,updated_at=excluded.updated_at""",
+                     (key,file_id,int(time.time())))
+        conn.commit(); conn.close()
+
+
+def send_one_winged_angel_finisher(chat_id):
+    caption = "🪽 ONE WINGED ANGEL\n\n☠️ ENEMIGO DERROTADO\n\n“Nadie escapa del One Winged Angel.”\n\n🪽 Kiu entró al combate. Todos los demás pueden irse a su casa."
+    cached=_rpg_asset_get("one_winged_angel_finisher")
+    if cached:
+        return send_animation(chat_id,cached,caption)
+    # El GIF va junto al main.py en Render. Tras el primer envío guardamos el file_id de Telegram.
+    gif_path = Path(__file__).with_name("one_winged_angel.gif")
+    if not gif_path.exists() or not TELEGRAM_API:
+        return send_message(chat_id,caption)
+    try:
+        with gif_path.open("rb") as fh:
+            resp=TELEGRAM_SESSION.post(
+                f"{TELEGRAM_API}/sendAnimation",
+                data={"chat_id":str(chat_id),"caption":caption},
+                files={"animation":("one_winged_angel.gif",fh,"image/gif")},
+                timeout=TELEGRAM_TIMEOUT
+            )
+        payload=resp.json() if resp.ok else {}
+        anim=((payload.get("result") or {}).get("animation") or {})
+        if anim.get("file_id"): _rpg_asset_set("one_winged_angel_finisher",anim["file_id"])
+        return payload
+    except Exception as e:
+        logger.exception("No pude enviar el finisher One Winged Angel: %s",e)
+        return send_message(chat_id,caption)
+
+
+def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
+    with db_lock:
+        conn=get_db()
+        battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? FOR UPDATE",
+                            (int(chat_id),int(user_id))).fetchone()
+        if not battle:
+            conn.rollback(); conn.close()
+            send_message(chat_id,"No tienes un encuentro activo.")
+            return True
+        char=conn.execute("SELECT * FROM characters WHERE id=? FOR UPDATE",(int(battle["character_id"]),)).fetchone()
+        if not char:
+            conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+            conn.commit(); conn.close(); return True
+        ability=_rpg_get_ability(char["class_name"],ability_key)
+        if not ability:
+            conn.rollback(); conn.close(); return True
+        if ability.get("ultimate") and int(battle.get("ultimate_cd") or 0)>0:
+            cd=int(battle["ultimate_cd"]); conn.rollback(); conn.close()
+            send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
+            return True
+        conn.rollback(); conn.close()
+
+    # Telegram genera el valor del d6. El botón solo inicia la tirada.
+    dice_result=send_dice(chat_id,"🎲",callback_message_id)
+    try:
+        roll=int((((dice_result or {}).get("result") or {}).get("dice") or {}).get("value"))
+    except Exception:
+        roll=random.randint(1,6)  # respaldo solo si Telegram no devuelve el valor; se registra en logs
+        logger.warning("Fallback RNG usado en combate porque sendDice no devolvió valor.")
 
     with db_lock:
         conn=get_db()
         try:
-            battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? FOR UPDATE", (int(chat_id),int(user_id))).fetchone()
-            if not battle or battle["state"] != "awaiting_roll":
-                conn.rollback(); conn.close()
-                return False
-            char=conn.execute("SELECT * FROM characters WHERE id=? FOR UPDATE", (int(battle["character_id"]),)).fetchone()
-            if not char:
-                conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?", (int(chat_id),int(user_id)))
-                conn.commit(); conn.close(); return True
-
+            battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? FOR UPDATE",
+                                (int(chat_id),int(user_id))).fetchone()
+            char=conn.execute("SELECT * FROM characters WHERE id=? FOR UPDATE",(int(battle["character_id"]),)).fetchone() if battle else None
+            if not battle or not char:
+                conn.rollback(); conn.close(); return True
+            ability=_rpg_get_ability(char["class_name"],ability_key)
             eff=effective_character_stats(char)
-            raw = (eff["atk"] * 0.65) + (value * 2.5) - (int(battle["enemy_def"]) * 0.45)
-            damage=max(1, int(round(raw)))
-            if value == 6:
-                damage=max(damage+1, int(round(damage*1.5)))
-            elif value == 1:
-                damage=max(1, int(round(damage*0.70)))
-            enemy_hp=max(0, int(battle["enemy_hp"]) - damage)
+            enemy_hp=int(battle["enemy_hp"])
+            enemy_def=int(battle["enemy_def"])
+            damage=0
+            heal=0
+            if roll != 1:
+                pen=float(ability.get("pen",0.0))
+                raw=(eff["atk"] * float(ability["power"]) * RPG_DICE_MULT[roll]) - (enemy_def * (1.0-pen) * 0.42)
+                damage=max(1,int(round(raw)))
+                if roll>=5 and ability.get("high_roll_bonus"):
+                    damage=max(1,int(round(damage*(1.0+float(ability["high_roll_bonus"])))))
+                if ability.get("execute") and enemy_hp <= int(battle["enemy_max_hp"])*0.35:
+                    damage=max(1,int(round(damage*1.18)))
+                if ability.get("heal_pct"):
+                    heal=max(1,int(round(eff["max_hp"]*float(ability["heal_pct"])*RPG_DICE_MULT[roll])))
+            enemy_hp=max(0,enemy_hp-damage)
 
-            if enemy_hp <= 0:
-                enemy_key=battle["enemy_key"]
-                base=next((x for x in RPG_ENEMIES if x["key"]==enemy_key), RPG_ENEMIES[0])
-                reward_exp=int(base["exp"] + max(0,int(char["level"])-1)*4)
-                reward_kw=int(base["kw"] + max(0,int(char["level"])-1)*3)
-                conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?", (int(chat_id),int(user_id)))
+            new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
+            if ability.get("ultimate"):
+                new_cd=int(ability.get("cooldown",4))
+
+            if enemy_hp<=0:
+                base=next((x for x in RPG_ENEMIES if x["key"]==battle["enemy_key"]),RPG_ENEMIES[0])
+                reward_exp=int(base["exp"]+max(0,int(char["level"])-1)*4)
+                reward_kw=int(base["kw"]+max(0,int(char["level"])-1)*3)
+                conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
-                newstats, levels=grant_rpg_exp(char["id"],reward_exp)
-                crit="💥 CRÍTICO.\n" if value==6 else ""
-                level_text=(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels != 1 else ''}! Ahora eres nivel {newstats['level']}." if levels else "")
+                newstats,levels=grant_rpg_exp(char["id"],reward_exp)
+                if ability_key=="one_winged_angel" and char["class_name"]=="The Cleaner":
+                    send_one_winged_angel_finisher(chat_id)
+                crit="💥 CRÍTICO\n" if roll==6 else ""
                 send_message(chat_id,
-                    f"🎲 {value}\n{crit}⚔️ {char['name']} causa {damage} de daño.\n\n"
-                    f"☠️ {battle['enemy_name']} ha sido derrotado.\n"
-                    f"⭐ +{reward_exp} EXP\n🪙 +{reward_kw} KW{level_text}",
-                    reply_to_message_id=message.get("message_id"))
-                drop=roll_rpg_drop(user_id, int(char["id"]), battle["enemy_key"])
-                if drop:
-                    announce_rpg_drop(chat_id, user, drop)
+                    f"{ability['emoji']} {char['name']} usa {ability['name']}\n"
+                    f"🎲 {roll}\n{crit}"
+                    f"⚔️ {damage} de daño.\n\n☠️ {battle['enemy_name']} ha sido derrotado.\n"
+                    f"⭐ +{reward_exp} EXP\n🪙 +{reward_kw} KW"
+                    +(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels!=1 else ''}! Nivel {newstats['level']}." if levels else ""))
+                drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"])
+                if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
                 return True
 
-            enemy_roll=random.randint(1,6)
-            enemy_raw=(int(battle["enemy_atk"])*0.65)+(enemy_roll*2.0)-(eff["defense"]*0.50)
-            enemy_damage=max(1,int(round(enemy_raw)))
-            char_hp=max(0,int(char["hp"])-enemy_damage)
-            conn.execute("UPDATE rpg_battles SET enemy_hp=?, updated_at=? WHERE chat_id=? AND user_id=?", (enemy_hp,int(time.time()),int(chat_id),int(user_id)))
-            conn.execute("UPDATE characters SET hp=?, updated_at=? WHERE id=?", (char_hp,int(time.time()),int(char["id"])))
-            if char_hp <= 0:
-                conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?", (int(chat_id),int(user_id)))
+            # Curación de la propia habilidad antes de la respuesta enemiga.
+            char_hp=int(char["hp"])
+            if heal:
+                char_hp=min(eff["max_hp"],char_hp+heal)
+
+            enemy_roll,enemy_damage=_rpg_enemy_damage(battle,eff,False)
+            char_hp=max(0,char_hp-enemy_damage)
+            lost_exp=0
+            if char_hp<=0:
+                # Usa una copia actualizada del personaje para aplicar el 20% del EXP del nivel.
+                cdict=dict(char); cdict["hp"]=char_hp
+                lost_exp,_=_rpg_apply_defeat(conn,cdict)
+                conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+            else:
+                conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(char_hp,int(time.time()),int(char["id"])))
+                conn.execute("""UPDATE rpg_battles SET enemy_hp=?,ultimate_cd=?,last_action=?,state='choosing_action',updated_at=?
+                                WHERE chat_id=? AND user_id=?""",
+                             (enemy_hp,new_cd,ability_key,int(time.time()),int(chat_id),int(user_id)))
             conn.commit(); conn.close()
 
-            crit="💥 CRÍTICO.\n" if value==6 else ("💨 Golpe débil.\n" if value==1 else "")
-            if char_hp <= 0:
+            fail="❌ ¡FALLÓ!\n" if roll==1 else ("💥 ¡CRÍTICO!\n" if roll==6 else "")
+            heal_text=f"\n🌟 Recuperas {heal} HP." if heal else ""
+            if char_hp<=0:
                 send_message(chat_id,
-                    f"🎲 {value}\n{crit}⚔️ Causas {damage} de daño.\n"
-                    f"❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
-                    f"El enemigo responde y causa {enemy_damage}.\n💀 {char['name']} ha caído en combate.",
-                    reply_to_message_id=message.get("message_id"))
+                    f"{ability['emoji']} {char['name']} usa {ability['name']}\n🎲 {roll}\n{fail}"
+                    f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
+                    f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n\n"
+                    f"💀 {char['name']} ha sido derrotado.\n📉 -{lost_exp} EXP (20% de tu progreso del nivel)\n"
+                    "⏳ Recuperación: 5 minutos.\n🧪 Una Esencia Vital puede levantarte antes.")
             else:
                 send_message(chat_id,
-                    f"🎲 {value}\n{crit}⚔️ Causas {damage} de daño.\n"
-                    f"❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
+                    f"{ability['emoji']} {char['name']} usa {ability['name']}\n🎲 {roll}\n{fail}"
+                    f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
-                    f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\n"
-                    "Tu turno. Lanza 🎲 otra vez.",
-                    reply_to_message_id=message.get("message_id"))
+                    f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
+                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
+
+
+def rpg_defend_action(chat_id,user_id):
+    with db_lock:
+        conn=get_db()
+        try:
+            battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? FOR UPDATE",(int(chat_id),int(user_id))).fetchone()
+            char=conn.execute("SELECT * FROM characters WHERE id=? FOR UPDATE",(int(battle["character_id"]),)).fetchone() if battle else None
+            if not battle or not char:
+                conn.rollback(); conn.close(); send_message(chat_id,"No tienes un encuentro activo."); return True
+            eff=effective_character_stats(char)
+            enemy_roll,damage=_rpg_enemy_damage(battle,eff,True)
+            hp=max(0,int(char["hp"])-damage)
+            cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
+            if hp<=0:
+                cdict=dict(char); cdict["hp"]=hp
+                lost,_=_rpg_apply_defeat(conn,cdict)
+                conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+                conn.commit(); conn.close()
+                send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 5 minutos.")
+            else:
+                conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(hp,int(time.time()),int(char["id"])))
+                conn.execute("UPDATE rpg_battles SET ultimate_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,int(time.time()),int(chat_id),int(user_id)))
+                conn.commit(); conn.close()
+                send_message(chat_id,f"🛡️ DEFENSA\n\nEl enemigo tira 🎲 {enemy_roll}.\nRecibes {damage} de daño (50% reducido).\n❤️ {char['name']}: {hp}/{eff['max_hp']}",
+                             reply_markup=rpg_battle_keyboard(char["class_name"],cd))
+            return True
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def handle_rpg_dice(message):
+    # V4 usa botones que llaman sendDice. Un dado manual ya no consume el turno.
+    return False
 
 
 def rpg_inventory_text(user_id):
@@ -3678,6 +3919,11 @@ def use_inventory_item(chat_id,user_id,inventory_id):
     heal=int(row.get('heal_percent') or 0)
     if heal<=0: return send_message(chat_id,"Ese objeto no se puede usar de esa forma.")
     eff=effective_character_stats(char); maxhp=eff['max_hp']; current=int(char['hp'])
+    is_revive = row.get('item_key') == 'esencia_vital'
+    if is_revive and current > 0:
+        return send_message(chat_id,"🧪 La Esencia Vital solo se usa cuando tu personaje está derrotado.")
+    if (not is_revive) and current<=0:
+        return send_message(chat_id,"💀 Estás derrotado. Necesitas una Esencia Vital o esperar la recuperación.")
     if current>=maxhp: return send_message(chat_id,"❤️ Ya tienes la vida completa.")
     amount=max(1,round(maxhp*heal/100)); newhp=min(maxhp,current+amount); restored=newhp-current
     with db_lock:
@@ -3685,7 +3931,7 @@ def use_inventory_item(chat_id,user_id,inventory_id):
         try:
             if int(row['quantity'])>1: conn.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),))
             else: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),))
-            conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(newhp,int(time.time()),int(char['id']))); conn.commit(); conn.close()
+            conn.execute("UPDATE characters SET hp=?,defeated_until=0,updated_at=? WHERE id=?",(newhp,int(time.time()),int(char['id']))); conn.commit(); conn.close()
         except Exception: conn.rollback(); conn.close(); raise
     send_message(chat_id,f"🧪 Usaste {row['name']}.\n❤️ +{restored} HP → {newhp}/{maxhp}")
 
@@ -3846,6 +4092,14 @@ def send_reset_panel(chat_id):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("rpg_attack:"):
+        return resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
+    if data=="rpg_defend":
+        return rpg_defend_action(chat_id,uid)
+    if data=="rpg_flee":
+        if cancel_rpg_encounter(chat_id,uid): send_message(chat_id,"🏃 Has abandonado el encuentro. No hay recompensa ni penalización.")
+        else: send_message(chat_id,"No tienes un encuentro activo.")
+        return True
     if data=="rpg_show_equipment":
         send_message(chat_id,equipment_text(uid)); return True
     if data=="rpg_show_inventory":
@@ -4030,14 +4284,14 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V3\n\n"
+            "⚔️ KIWRPG — V4\n\n"
             "/encuentro — inicia un combate rápido\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — objetos con botones\n"
             "/equipo — equipo actual\n"
             "/personaje — muestra tu personaje\n"
             "/heroes — salón de eras anteriores\n\n"
-            "En combate debes usar el dado REAL 🎲 de Telegram. Los números escritos no cuentan."
+            "En combate elige tus movimientos con botones. KiwBot lanza el dado REAL 🎲 de Telegram automáticamente."
         )
         return True
 
@@ -4046,7 +4300,11 @@ def process_command(
         ensure_player(user)
         ensure_owner_secret_character(user)
         ok, result = start_rpg_encounter(chat_id, user.get("id"))
-        send_message(chat_id, result)
+        if ok:
+            char=get_active_character(user.get("id"))
+            send_message(chat_id, result, reply_markup=rpg_battle_keyboard(char["class_name"],0))
+        else:
+            send_message(chat_id, result)
         return True
 
     if command in ("/huir", "/cancelar_combate"):

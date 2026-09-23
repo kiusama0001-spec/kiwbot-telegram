@@ -1,5 +1,8 @@
 import json
 import logging
+import hashlib
+import hmac
+from urllib.parse import parse_qsl
 import os
 import random
 import re
@@ -3509,6 +3512,35 @@ RPG_CLASS_INFO = {
     "arquero": {"label":"Arquero","emoji":"🏹","desc":"Preciso y consistente. Premia las buenas tiradas.","ability":"Precisión"},
 }
 
+OWNER_RPG_CLASS = {"key":"the_cleaner","label":"The Cleaner","emoji":"🪽","hp":130,"atk":18,"defense":9,"desc":"Clase exclusiva de Kiu. One Winged Angel.","ability":"One Winged Angel"}
+
+def create_owner_character(user_id, name="One Winged Angel"):
+    if int(user_id) != int(OWNER_TELEGRAM_ID): return False, "Clase no disponible."
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            exists=conn.execute("SELECT id FROM characters WHERE user_id=? AND LOWER(name)=LOWER(?) LIMIT 1",(int(user_id),name)).fetchone()
+            if exists:
+                conn.execute("UPDATE characters SET is_active=CASE WHEN id=? THEN 1 ELSE 0 END WHERE user_id=?",(int(exists["id"]),int(user_id)))
+                conn.commit(); conn.close(); return True, True
+            conn.execute("UPDATE characters SET is_active=0 WHERE user_id=?",(int(user_id),))
+            conn.execute("INSERT INTO characters (user_id,name,class_name,level,exp,hp,max_hp,atk,defense,is_active,created_at,updated_at) VALUES (?,?,?,1,0,130,130,18,9,1,?,?)",(int(user_id),name,"The Cleaner",now,now))
+            conn.commit(); conn.close(); return True, True
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+def rpg_creator_start_param(chat_id):
+    cid=str(int(chat_id)); return "create_n"+cid[1:] if cid.startswith("-") else "create_p"+cid
+
+def rpg_creator_link(chat_id):
+    username=get_bot_identity().get("username","")
+    return f"https://t.me/{username}?startapp={rpg_creator_start_param(chat_id)}" if username else None
+
+def creator_launch_keyboard(chat_id):
+    link=rpg_creator_link(chat_id)
+    return {"inline_keyboard":[[{"text":"⚔️ CREAR MI PERSONAJE","url":link}]]} if link else None
+
 def creator_keyboard():
     return {"inline_keyboard":[
         [{"text":"⚔️ Guerrero","callback_data":"rpg_class:guerrero"},{"text":"🔮 Mago","callback_data":"rpg_class:mago"}],
@@ -4124,8 +4156,10 @@ def process_command(
     if command in ("/crear_personaje", "/crearpersonaje"):
         user = message.get("from", {})
         ensure_player(user)
-        # V3: creador visual; The Cleaner sigue siendo clase exclusiva de Kiu.
-        send_character_creator(chat_id, user.get("id"))
+        kb=creator_launch_keyboard(chat_id)
+        if not kb:
+            send_message(chat_id,"No pude abrir el creador ahora mismo. Revisa la configuración de la Mini App."); return True
+        send_message(chat_id,"🧙 CREA TU PERSONAJE\n\nTu aventura en KiwRPG está a punto de comenzar.\n\nElige tu clase, revisa sus estadísticas y crea al personaje que te representará en este mundo.\n\n👇 Haz clic aquí para comenzar la creación de tu personaje.",reply_markup=kb)
         return True
 
     if command == "/dbstatus":
@@ -4219,7 +4253,7 @@ def process_command(
         user_id = message.get("from", {}).get("id")
         char = get_active_character(user_id)
         if not char:
-            send_message(chat_id, "No tienes un personaje activo.", reply_markup={"inline_keyboard":[[{"text":"🧙 Crear personaje","callback_data":"rpg_create_back"}]]})
+            send_message(chat_id,"No tienes un personaje activo.\n\n👇 Haz clic aquí para comenzar la creación de tu personaje.",reply_markup=creator_launch_keyboard(chat_id))
             return True
         send_message(chat_id, character_card(char), reply_markup={"inline_keyboard":[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]})
         return True
@@ -5549,6 +5583,55 @@ def webhook():
         "ok": True
     })
 
+
+# =========================================================
+# KIWRPG MINI APP — CREADOR PRIVADO
+# =========================================================
+
+def validate_telegram_init_data(init_data, max_age=900):
+    if not init_data or not TELEGRAM_TOKEN: return None
+    try:
+        data=dict(parse_qsl(init_data, keep_blank_values=True)); received=data.pop("hash", "")
+        if not received: return None
+        check="\n".join(f"{k}={v}" for k,v in sorted(data.items()))
+        secret=hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+        expected=hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, received): return None
+        auth_date=int(data.get("auth_date","0") or 0)
+        if auth_date and abs(int(time.time())-auth_date)>max_age: return None
+        user=json.loads(data.get("user","{}"))
+        return {"user":user,"start_param":data.get("start_param","")} if user.get("id") else None
+    except Exception: return None
+
+@app.route("/rpg/create", methods=["GET"])
+def rpg_create_page():
+    html="""<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#0d0f14;color:#fff;margin:0;padding:20px}.wrap{max-width:680px;margin:auto}.hero{text-align:center;margin:10px 0 22px}.muted{color:#aeb6c5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#171b24;border:1px solid #2a3040;border-radius:16px;padding:16px;cursor:pointer}.card.sel{outline:2px solid #fff}.emoji{font-size:32px}.stats{font-size:14px;color:#dce2ed;margin-top:8px}.owner{border-color:#d6b85a}.name{width:100%;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #343b4b;background:#11151d;color:#fff;font-size:16px;margin:18px 0 10px}.btn{width:100%;padding:15px;border:0;border-radius:13px;font-weight:800;font-size:16px;cursor:pointer}.status{text-align:center;margin-top:12px;min-height:24px}@media(max-width:500px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><div class="hero"><h1>🧙 Crea tu personaje</h1><div class="muted">Elige una clase, revisa sus estadísticas y comienza tu aventura.</div></div><div id="classes" class="grid"></div><input id="name" class="name" maxlength="24" placeholder="Nombre de tu personaje"><button id="create" class="btn">✨ Crear personaje</button><div id="status" class="status"></div></div><script>
+const tg=window.Telegram.WebApp;tg.ready();tg.expand();const base=[{key:'guerrero',e:'⚔️',n:'Guerrero',hp:120,a:14,d:8,x:'Resistente y estable. Buen equilibrio entre ataque y defensa.'},{key:'mago',e:'🔮',n:'Mago',hp:85,a:18,d:4,x:'Gran daño y magia capaz de atravesar defensas, a cambio de resistencia.'},{key:'picaro',e:'🗡️',n:'Pícaro',hp:95,a:16,d:5,x:'Ágil y agresivo. Especialista en críticos y evasión.'},{key:'paladin',e:'🛡️',n:'Paladín',hp:130,a:11,d:10,x:'Defensa, bloqueo y recuperación.'},{key:'arquero',e:'🏹',n:'Arquero',hp:100,a:15,d:6,x:'Preciso y consistente. Premia las buenas tiradas.'}];let selected=null,classes=[...base];const uid=tg.initDataUnsafe?.user?.id;if(uid&&String(uid)==='OWNER_ID_PLACEHOLDER')classes.push({key:'the_cleaner',e:'🪽',n:'The Cleaner',hp:130,a:18,d:9,x:'Clase exclusiva de Kiu. One Winged Angel.',owner:true});const box=document.getElementById('classes');function draw(){box.innerHTML='';classes.forEach(c=>{let el=document.createElement('div');el.className='card'+(selected===c.key?' sel':'')+(c.owner?' owner':'');el.innerHTML=`<div class="emoji">${c.e}</div><h3>${c.n}</h3><div class="stats">❤️ ${c.hp} HP · 🗡️ ${c.a} ATK · 🛡️ ${c.d} DEF</div><p class="muted">${c.x}</p>`;el.onclick=()=>{selected=c.key;if(c.key==='the_cleaner')document.getElementById('name').value='One Winged Angel';draw()};box.appendChild(el)})}draw();document.getElementById('create').onclick=async()=>{const st=document.getElementById('status'),name=document.getElementById('name').value.trim();if(!selected){st.textContent='Elige una clase.';return}if(!name){st.textContent='Escribe el nombre de tu personaje.';return}st.textContent='Creando...';try{const r=await fetch('/rpg/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,class_key:selected,name})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1300)}}catch(e){st.textContent='No pude conectar con KiwBot.'}};if(!tg.initData)document.getElementById('status').textContent='Abre este creador desde KiwBot en Telegram.';</script></body></html>"""
+    return html.replace('OWNER_ID_PLACEHOLDER', str(OWNER_TELEGRAM_ID))
+
+@app.route("/rpg/api/create", methods=["POST"])
+def rpg_api_create():
+    body=request.get_json(silent=True) or {}; auth=validate_telegram_init_data(body.get("init_data",""))
+    if not auth: return jsonify({"ok":False,"message":"No pude verificar tu identidad de Telegram."}),403
+    user=auth["user"]; uid=int(user["id"]); key=str(body.get("class_key","")).strip().lower(); name=str(body.get("name","")).strip(); ensure_player(user)
+    if key=="the_cleaner":
+        if uid!=int(OWNER_TELEGRAM_ID): return jsonify({"ok":False,"message":"Esa clase no está disponible para tu cuenta."}),403
+        name="One Winged Angel"; ok,result=create_owner_character(uid,name); label="The Cleaner"
+    else:
+        info=RPG_CLASS_INFO.get(key)
+        if not info: return jsonify({"ok":False,"message":"Clase no válida."}),400
+        ok,result=create_character(uid,name,info["label"]); label=info["label"]
+    if not ok: return jsonify({"ok":False,"message":str(result)}),400
+    sp=auth.get("start_param",""); chat_id=None
+    try:
+        if sp.startswith("create_n"): chat_id=-int(sp[8:])
+        elif sp.startswith("create_p"): chat_id=int(sp[8:])
+    except Exception: chat_id=None
+    if chat_id:
+        username=user.get("username"); mention=("@"+username) if username else (user.get("first_name") or "Jugador"); emoji={"Guerrero":"⚔️","Mago":"🔮","Pícaro":"🗡️","Paladín":"🛡️","Arquero":"🏹","The Cleaner":"🪽"}.get(label,"🧙")
+        send_message(chat_id,f"✨ UN NUEVO AVENTURERO HA LLEGADO\n\n{emoji} {label} {mention}\n{name} — Nivel 1\n\nBienvenido al Mundo {current_rpg_world()}.")
+    return jsonify({"ok":True,"message":f"✨ {name} ha sido creado como {label}."})
 
 # =========================================================
 # HEALTH CHECK

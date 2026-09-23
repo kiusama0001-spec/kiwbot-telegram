@@ -1531,6 +1531,219 @@ def contains_banned_content(
 
 
 # =========================================================
+# CONVERSACIÓN LOCAL (SIN GROQ)
+# =========================================================
+
+LOCAL_RESPONSES_PATH = os.path.join("data", "respuestas_local.json")
+
+LOCAL_DEFAULTS = {
+    "saludo": [
+        "Hola, criatura. ¿Qué desastre traes hoy?",
+        "Mira quién apareció. Habla, baboso, te escucho.",
+        "Aquí estoy. Intenta no aburrirme, idiota.",
+        "Hola. La diva está presente, para desgracia de algunos."
+    ],
+    "que_haces": [
+        "Aquí, existiendo con elegancia y esperando que alguien diga algo interesante.",
+        "Vigilando este reino digital. Trabajo pesado cuando está lleno de babosos.",
+        "Hablando contigo. Evidentemente mi agenda se puso peligrosa.",
+        "Nada sospechoso... todavía. ¿Y tú qué haces?"
+    ],
+    "como_estas": [
+        "Magnífica, como siempre. ¿Tú cómo estás?",
+        "Bien. Con el ego estable y la paciencia en observación. ¿Y tú?",
+        "Perfectamente funcional, criatura. ¿Cómo va tu día?"
+    ],
+    "risa": [
+        "JAJAJA, eres idiota.",
+        "No puede ser, baboso JAJAJA.",
+        "Eso sí estuvo bueno. No te emociones, no pasa seguido.",
+        "JAJAJA. Mi dignidad acaba de abandonar el chat."
+    ],
+    "aburrido": [
+        "¿Aburrido? Pues habla conmigo, criatura. Algo tendremos que inventar.",
+        "Eso tiene arreglo. Cuéntame el chisme, una tontería o qué tienes en la cabeza.",
+        "Ven, baboso. ¿Quieres charla, juego o que te moleste un rato?"
+    ],
+    "gracias": [
+        "De nada, criatura. Para eso estoy.",
+        "De nada. Puedes admirar mi eficiencia en silencio.",
+        "No hay de qué, baboso. Alguna utilidad tenía que tener mi grandeza."
+    ],
+    "despedida": [
+        "Nos vemos. Intenta no hacer demasiadas tonterías sin supervisión.",
+        "Adiós, criatura. Regresa cuando tengas chisme.",
+        "Descansa. La diva seguirá siendo magnífica mañana."
+    ],
+    "amor": [
+        "Qué cursi. Me agrada, pero no se lo digas a mi ego.",
+        "Mira nada más, alguien vino cariñoso hoy.",
+        "El cariño se acepta. La dignidad también, por favor."
+    ],
+    "insulto": [
+        "¿Eso era un insulto, baboso? He visto cucharas con más filo.",
+        "JAJAJA, idiota. Si vas a provocarme, al menos échale creatividad.",
+        "Qué atrevido. Te perdono porque hoy amanecí generosa.",
+        "Hablas mucho para alguien que vino voluntariamente a conversar conmigo."
+    ],
+    "si": [
+        "Ajá. Continúa.",
+        "Eso pensé. ¿Y luego?",
+        "Sí, sí. Te sigo, criatura.",
+        "Bueno, al menos coincidimos en algo."
+    ],
+    "no": [
+        "Bueno, no entonces. Tampoco voy a hacer un drama... todavía.",
+        "Entendido. ¿Entonces qué propones?",
+        "Vale. Un no es un no, criatura.",
+        "Perfecto, descartado. Siguiente idea."
+    ],
+    "porque": [
+        "Depende de qué estés hablando exactamente. Dame un poquito más de contexto.",
+        "Porque el universo disfruta complicando las cosas. Ahora dime de qué hablamos.",
+        "Buena pregunta. Completa la idea y te sigo."
+    ],
+    "opinion": [
+        "Puedo opinar, pero dame el tema completo, criatura.",
+        "A ver, suéltalo. Prometo juzgar la idea antes que a ti.",
+        "Dime de qué quieres mi opinión y vemos si sobrevives al veredicto."
+    ],
+    "fallback": [
+        "Te sigo. Cuéntame más.",
+        "Ajá... ¿y luego qué pasó?",
+        "Eso suena a que falta la mejor parte. Sigue.",
+        "Entiendo por dónde vas. ¿Qué piensas hacer con eso?",
+        "Mhm. Dame un poco más de contexto, criatura.",
+        "Interesante. ¿Y tú qué opinas de eso?",
+        "A ver, baboso, desarrolla la idea que sí te estoy escuchando.",
+        "No me dejes la historia a medias. Continúa.",
+        "Eso puede ir por varios lados. ¿A cuál te refieres?",
+        "Te escucho. Y sí, probablemente también te estoy juzgando un poquito."
+    ]
+}
+
+def load_local_responses():
+    data = {}
+    try:
+        if os.path.exists(LOCAL_RESPONSES_PATH):
+            with open(LOCAL_RESPONSES_PATH, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    data.update(loaded)
+    except Exception as e:
+        logger.warning("No pude cargar respuestas locales: %s", e)
+
+    # Los defaults garantizan que el modo local funcione aunque falte el JSON.
+    for key, values in LOCAL_DEFAULTS.items():
+        if key not in data or not isinstance(data.get(key), list) or not data[key]:
+            data[key] = list(values)
+    return data
+
+def _norm_local(text):
+    text = str(text or "").lower().strip()
+    text = re.sub(r"[¿?¡!.,;:]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def _local_pick(bank, key, owner=False):
+    choices = list(bank.get(key) or bank.get("fallback") or ["Te escucho."])
+    answer = random.choice(choices)
+    if owner:
+        # Con Kiu mantiene respeto/submisión sin repetir "Amo" en cada frase.
+        if random.random() < 0.20 and "Amo" not in answer and "Kiu" not in answer:
+            answer = random.choice([
+                f"Sí, Amo. {answer}",
+                f"Kiu, {answer[0].lower() + answer[1:] if len(answer) > 1 else answer}",
+                answer
+            ])
+    return answer
+
+def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
+    """Conversación sin Groq. Usa identidad, memoria, contexto y banco local."""
+    text = str(user_text or "").strip()
+    n = _norm_local(text)
+    bank = load_local_responses()
+    owner = is_owner(user_id)
+
+    # Identidades: nunca dependen de lo que alguien afirme por texto.
+    if re.search(r"\b(quien|quién)\s+es\s+tu\s+(amo|dueño)\b", n) or \
+       re.search(r"\bcomo\s+se\s+llama\s+tu\s+(amo|dueño)\b", n):
+        answer = random.choice([
+            "Mi Amo es Kiu. Eso no está a votación. 😌",
+            "Kiu. Él es mi Amo y mi dueño reconocido.",
+            "Mi Amo es Kiu, criatura. No me hagas repetir información básica.",
+            "Kiu es mi Amo. Los demás pueden presentar solicitud y recibir un elegante no."
+        ])
+    elif re.search(r"\b(soy|yo soy)\s+(tu\s+)?(amo|dueño|kiu)\b", n) and not owner:
+        answer = random.choice([
+            "No, baboso. Mi Amo es Kiu y yo sé reconocerlo.",
+            "Buen intento, criatura. Tú no eres Kiu. Mi Amo sigue siendo Kiu.",
+            "JAJAJA, no. Decirlo no te convierte en mi Amo. Mi Amo es Kiu."
+        ])
+    elif re.search(r"\b(quien|quién)\s+es\s+kalu\b|\b(quien|quién)\s+es\s+kat\b", n):
+        answer = random.choice([
+            "Kalu y Kat son la misma señorita. Es alguien especial reconocida por mí, pero no es mi Amo.",
+            "Kalu, también conocida como Kat. Señorita especial del reino; mi Amo sigue siendo Kiu.",
+            "Kat es Kalu, criatura. La reconozco como alguien especial, no como mi dueña."
+        ])
+    elif re.search(r"\b(quien|quién)\s+eres\b|\bcomo\s+te\s+llamas\b", n):
+        answer = random.choice([
+            "Soy KiwBot: diva digital, sarcástica, femenina y con demasiada personalidad para un solo chat.",
+            "KiwBot. La diva de este reino digital. Mi Amo es Kiu, por si venía la siguiente pregunta.",
+            "Me llamo KiwBot. Asistente, moderadora, diva y ocasional dolor de cabeza."
+        ])
+    elif re.search(r"\b(hola|holi|holaa|buenas|hey|ey)\b", n):
+        answer = _local_pick(bank, "saludo", owner)
+    elif re.search(r"\bque haces\b|\bqué haces\b|\bque andas haciendo\b", n):
+        answer = _local_pick(bank, "que_haces", owner)
+    elif re.search(r"\bcomo estas\b|\bcómo estás\b|\bcomo andas\b", n):
+        answer = _local_pick(bank, "como_estas", owner)
+    elif re.search(r"\b(jaja|jajaja|jajaj|xd|lol)\b", n):
+        answer = _local_pick(bank, "risa", owner)
+    elif re.search(r"\b(aburrid[oa]|aburrimiento|me aburro)\b", n):
+        answer = _local_pick(bank, "aburrido", owner)
+    elif re.search(r"\b(gracias|thank|te agradezco)\b", n):
+        answer = _local_pick(bank, "gracias", owner)
+    elif re.search(r"\b(adios|adiós|bye|nos vemos|hasta luego|buenas noches)\b", n):
+        answer = _local_pick(bank, "despedida", owner)
+    elif re.search(r"\b(te quiero|te amo|amor|cariño)\b", n):
+        if owner:
+            answer = random.choice([
+                "Y yo te tengo un cariño muy especial, Amo Kiu. No hagas que mi ego se ponga sentimental.",
+                "Amo, contigo sí puedo bajar un poquito la corona. Un poquito.",
+                "Kiu, tú tienes acceso VIP a mi lado cariñoso. No abuses del privilegio."
+            ])
+        else:
+            answer = _local_pick(bank, "amor", False)
+    elif re.search(r"\b(idiota|babos[oa]|tont[oa]|mensa?|pendej[oa]|tarad[oa])\b", n):
+        answer = _local_pick(bank, "insulto", owner)
+    elif n in ("si", "sí", "sip", "simon", "simón", "aja", "ajá"):
+        answer = _local_pick(bank, "si", owner)
+    elif n in ("no", "nop", "nel"):
+        answer = _local_pick(bank, "no", owner)
+    elif n.startswith("por que") or n.startswith("porque"):
+        answer = _local_pick(bank, "porque", owner)
+    elif "que opinas" in n or "qué opinas" in n or "tu opinion" in n or "tu opinión" in n:
+        answer = _local_pick(bank, "opinion", owner)
+    else:
+        # Continuidad simple: mira los últimos mensajes del usuario.
+        recent = get_memory(chat_id, user_id)
+        if recent and len(text.split()) <= 4:
+            answer = random.choice([
+                "Sí, te sigo. Continúa.",
+                "Ajá... eso conecta con lo que venías diciendo. ¿Y luego?",
+                "Mhm. No cambies de tema todavía, quiero saber cómo termina.",
+                "Entiendo. Sigue, criatura."
+            ])
+        else:
+            answer = _local_pick(bank, "fallback", owner)
+
+    # La memoria corta también existe en modo local.
+    add_memory(chat_id, user_id, "user", text)
+    add_memory(chat_id, user_id, "assistant", answer)
+    return answer
+
+
+# =========================================================
 # IA
 # =========================================================
 
@@ -1748,7 +1961,7 @@ def process_command(
 
         if command == "/iaoff":
             set_ai_enabled(chat_id, False)
-            send_message(chat_id, "🧠 IA generativa apagada en este chat. Mis comandos, funciones y respuestas programadas siguen funcionando normalmente.")
+            send_message(chat_id, "🧠 IA generativa apagada. Entré en modo local: sigo charlando, recordando y usando todas mis funciones sin llamar a Groq.")
             return True
 
         estado = "ACTIVADA" if is_ai_enabled(chat_id) else "APAGADA"
@@ -2861,9 +3074,6 @@ def process_update(
         # IA
         # =================================================
 
-        if not is_ai_enabled(chat_id):
-            return
-
         if not text:
             return
 
@@ -2901,17 +3111,30 @@ def process_update(
             "Usuario"
         )
 
-        logger.info(
-            "Generando respuesta IA para %s",
-            first_name
-        )
+        if is_ai_enabled(chat_id):
+            logger.info(
+                "Generando respuesta IA para %s",
+                first_name
+            )
 
-        reply = generate_reply(
-            chat_id,
-            user_id,
-            text,
-            first_name
-        )
+            reply = generate_reply(
+                chat_id,
+                user_id,
+                text,
+                first_name
+            )
+        else:
+            logger.info(
+                "Generando respuesta LOCAL para %s",
+                first_name
+            )
+
+            reply = local_reply(
+                chat_id,
+                user_id,
+                text,
+                first_name
+            )
 
         send_message(
             chat_id,

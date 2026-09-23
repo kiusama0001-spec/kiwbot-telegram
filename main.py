@@ -378,6 +378,15 @@ def init_db():
             ON characters(user_id, is_active DESC, id ASC)
         """)
 
+        # Migración segura: estado de las espadas secretas.
+        character_columns = {
+            row["name"] for row in cur.execute("PRAGMA table_info(characters)").fetchall()
+        }
+        if "secret_blades_active" not in character_columns:
+            cur.execute(
+                "ALTER TABLE characters ADD COLUMN secret_blades_active INTEGER NOT NULL DEFAULT 0"
+            )
+
         conn.commit()
         conn.close()
 
@@ -2921,13 +2930,93 @@ def set_active_character(user_id, name):
 def character_card(row):
     if not row:
         return "Sin personaje activo."
+
+    extra = ""
+    if row["name"].lower() == "one winged angel":
+        blades_on = bool(row["secret_blades_active"])
+        extra = (
+            "\n🗡️🗡️ Habilidad secreta: Espadas del Ángel"
+            f" — {'ACTIVAS' if blades_on else 'selladas'}"
+        )
+
     return (
         f"🧙 Personaje: {row['name']}\n"
         f"⚔️ Clase: {row['class_name']}\n"
         f"⭐ Nivel: {row['level']} | EXP: {row['exp']}\n"
         f"❤️ HP: {row['hp']}/{row['max_hp']}\n"
         f"🗡️ ATK: {row['atk']} | 🛡️ DEF: {row['defense']}"
+        f"{extra}"
     )
+
+
+
+def toggle_secret_blades(user_id, activate=True):
+    """Activa/desactiva las dos espadas secretas de One Winged Angel."""
+    user_id = int(user_id)
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("""
+            SELECT * FROM characters
+            WHERE user_id=? AND is_active=1
+            LIMIT 1
+        """, (user_id,)).fetchone()
+
+        if not row or row["name"].lower() != "one winged angel":
+            conn.close()
+            return False, "Esta habilidad solo pertenece a One Winged Angel."
+
+        desired = 1 if activate else 0
+        if int(row["secret_blades_active"] or 0) == desired:
+            conn.close()
+            return False, (
+                "Las Espadas del Ángel ya están activas."
+                if activate else
+                "Las Espadas del Ángel ya están guardadas."
+            )
+
+        conn.execute("""
+            UPDATE characters
+            SET secret_blades_active=?, updated_at=?
+            WHERE id=?
+        """, (desired, int(time.time()), int(row["id"])))
+        conn.commit()
+        conn.close()
+        return True, None
+
+
+def ensure_owner_secret_character(user):
+    """Crea una sola vez el personaje secreto exclusivo de Kiu."""
+    if not user or not is_owner(user):
+        return
+
+    user_id = int(user.get("id"))
+    now = int(time.time())
+
+    with db_lock:
+        conn = get_db()
+        exists = conn.execute("""
+            SELECT id FROM characters
+            WHERE user_id=? AND LOWER(name)=LOWER(?)
+            LIMIT 1
+        """, (user_id, "One Winged Angel")).fetchone()
+
+        if not exists:
+            conn.execute("""
+                INSERT INTO characters
+                (user_id, name, class_name, level, exp, hp, max_hp, atk, defense,
+                 is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """, (
+                user_id,
+                "One Winged Angel",
+                "The Cleaner",
+                1, 0,
+                130, 130,
+                18, 9,
+                now, now
+            ))
+            conn.commit()
+        conn.close()
 
 
 # =========================================================
@@ -3071,6 +3160,7 @@ def process_command(
     if command in ("/saldo", "/kiwons"):
         user = message.get("from", {})
         ensure_player(user)
+        ensure_owner_secret_character(user)
         balance = get_kiwons(user.get("id"))
         send_message(
             chat_id,
@@ -3081,6 +3171,7 @@ def process_command(
     if command == "/perfil":
         user = message.get("from", {})
         ensure_player(user)
+        ensure_owner_secret_character(user)
         user_id = user.get("id")
         balance = get_kiwons(user_id)
         character = get_active_character(user_id)
@@ -3108,6 +3199,7 @@ def process_command(
     if command in ("/crear_personaje", "/crearpersonaje"):
         user = message.get("from", {})
         ensure_player(user)
+        ensure_owner_secret_character(user)
 
         parts = text.split()
         if len(parts) < 3:
@@ -3148,8 +3240,9 @@ def process_command(
         lines = ["🧙 TUS PERSONAJES", ""]
         for row in rows:
             active = " ⭐ ACTIVO" if row["is_active"] else ""
+            secret = " 🔒 SECRETO" if row["name"].lower() == "one winged angel" else ""
             lines.append(
-                f"• {row['name']} — {row['class_name']} — Nv. {row['level']}{active}"
+                f"• {row['name']} — {row['class_name']} — Nv. {row['level']}{active}{secret}"
             )
         send_message(chat_id, "\n".join(lines))
         return True
@@ -3173,6 +3266,43 @@ def process_command(
         )
         return True
 
+    if command in ("/espadas", "/doble_espada"):
+        user = message.get("from", {})
+        if not is_owner(user):
+            send_message(chat_id, "No reconoces el llamado de esas espadas.")
+            return True
+
+        ok, error = toggle_secret_blades(user.get("id"), activate=True)
+        if not ok:
+            send_message(chat_id, error)
+            return True
+
+        send_message(
+            chat_id,
+            "🗡️🗡️ Las Espadas del Ángel han despertado.\n"
+            "One Winged Angel entra en modo Doble Espada.\n"
+            "Bonificación de combate: +6 ATK mientras estén activas."
+        )
+        return True
+
+    if command in ("/guardar_espadas", "/sellar_espadas"):
+        user = message.get("from", {})
+        if not is_owner(user):
+            send_message(chat_id, "Esas espadas no responden a ti.")
+            return True
+
+        ok, error = toggle_secret_blades(user.get("id"), activate=False)
+        if not ok:
+            send_message(chat_id, error)
+            return True
+
+        send_message(
+            chat_id,
+            "🗡️ Las Espadas del Ángel vuelven a quedar selladas.\n"
+            "La bonificación de +6 ATK queda desactivada."
+        )
+        return True
+
     if command in ("/personaje", "/pj"):
         user_id = message.get("from", {}).get("id")
         char = get_active_character(user_id)
@@ -3185,6 +3315,7 @@ def process_command(
     if command in ("/transferir", "/pagar"):
         user = message.get("from", {})
         ensure_player(user)
+        ensure_owner_secret_character(user)
         target = resolve_target_for_economy(message, text)
         amount = parse_positive_amount(text)
 
@@ -4215,6 +4346,7 @@ def process_update(
 
         # Cuenta global de jugador. Jugador y personaje RPG son entidades separadas.
         ensure_player(user)
+        ensure_owner_secret_character(user)
 
         text = (
             message.get("text")

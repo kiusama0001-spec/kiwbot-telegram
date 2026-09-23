@@ -938,30 +938,49 @@ def _memory_tokens(text):
 
 
 def answer_from_long_term_memory(chat_id, user_id, question):
-    """Busca respuestas personales en memoria permanente sin usar Groq."""
+    """Responde preguntas personales usando memorias aunque estén redactadas de formas distintas."""
     q = _norm_local(question)
     memories = get_long_term_memories(user_id, chat_id)
-    personal = [m["memory"] for m in memories if m["scope"] in ("user", "chat")]
+    personal = [str(m["memory"]).strip() for m in memories if m["scope"] in ("user", "chat")]
     if not personal:
         return None
 
-    # Equipo de fútbol.
-    if re.search(r"\b(a que equipo|que equipo|equipo.*voy|equipo.*favorito)\b", q):
+    # EQUIPO: entiende memorias como:
+    # "Le va a Club América", "le voy al club america",
+    # "soy fan del Club América", "mi equipo favorito es..."
+    if re.search(r"\b(a que equipo|que equipo|equipo.*voy|equipo.*favorito|equipo.*gusta)\b", q):
         for mem in personal:
-            m = re.search(r"(?:le va a|equipo favorito es)\s+(.+)", mem, flags=re.IGNORECASE)
-            if m:
-                team = m.group(1).strip(" .")
-                return f"Le vas al {team}, Amo." if is_owner(user_id) else f"Le vas al {team}."
+            patterns = [
+                r"\ble\s+va\s+(?:al|a la|a)\s+(.+)",
+                r"\ble\s+va\s+a\s+(.+)",
+                r"\ble\s+voy\s+(?:al|a la|a)\s+(.+)",
+                r"\bvoy\s+(?:al|a la|a)\s+(.+)",
+                r"\b(?:soy\s+)?fan\s+(?:del|de la|de)\s+(.+)",
+                r"\b(?:su|mi)\s+equipo\s+(?:favorito|preferido)\s+es\s+(.+)",
+            ]
+            for pat in patterns:
+                m = re.search(pat, mem, flags=re.IGNORECASE)
+                if m:
+                    team = m.group(1).strip(" .!?")
+                    # Quita coletillas de memorias largas.
+                    team = re.split(r"\s+(?:y|pero)\s+", team, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+                    return f"Le vas al {team}, Amo." if is_owner(user_id) else f"Le vas al {team}."
 
-    # Anime favorito, incluyendo preguntas cortas como "¿Mi anime favorito?"
-    if re.search(r"\b(mi\s+anime\s+favorito|anime\s+favorito|cual.*anime|que.*anime)\b", q):
+    # ANIME: preguntas naturales y cortas.
+    if re.search(r"\b(mi\s+anime\s+favorito|anime\s+favorito|sabes.*anime|cual.*anime|que.*anime)\b", q):
         for mem in personal:
-            m = re.search(r"(?:su\s+)?anim[eé]\s+favorito(?:/a)?\s+es\s+(.+)", mem, flags=re.IGNORECASE)
-            if m:
-                fav = m.group(1).strip(" .")
-                return f"Tu anime favorito es {fav}, Amo." if is_owner(user_id) else f"Tu anime favorito es {fav}."
+            patterns = [
+                r"\b(?:su|mi)\s+anim[eé]\s+favorito(?:/a)?\s+es\s+(.+)",
+                r"\b(?:mi\s+)?anim[eé]\s+favorito\s+es\s+(.+)",
+            ]
+            for pat in patterns:
+                m = re.search(pat, mem, flags=re.IGNORECASE)
+                if m:
+                    fav = m.group(1).strip(" .!?")
+                    return f"Tu anime favorito es {fav}, Amo." if is_owner(user_id) else f"Tu anime favorito es {fav}."
+        return "Todavía no tengo guardado cuál es tu anime favorito, Amo." if is_owner(user_id) else "Todavía no tengo guardado cuál es tu anime favorito."
 
-    # Búsqueda general por coincidencia de palabras.
+    # Consulta general de gustos/preferencias.
     q_tokens = _memory_tokens(question)
     best = None
     best_score = 0
@@ -972,10 +991,8 @@ def answer_from_long_term_memory(chat_id, user_id, question):
             best_score = score
             best = mem
 
-    if best and best_score >= 1 and re.search(r"\b(mi|me|yo|mio|mia|gusta|favorit|prefiero|voy)\b", q):
-        if is_owner(user_id):
-            return "Recuerdo esto de usted, Amo: " + best.rstrip(".") + "."
-        return "Recuerdo esto de ti: " + best.rstrip(".") + "."
+    if best and best_score >= 1 and re.search(r"\b(mi|me|yo|mio|mia|gusta|favorit|prefiero|voy|sabes)\b", q):
+        return ("Recuerdo esto de usted, Amo: " if is_owner(user_id) else "Recuerdo esto de ti: ") + best.rstrip(".") + "."
 
     return None
 
@@ -3334,12 +3351,16 @@ def process_update(
         explicit_memory = extract_explicit_memory(text)
 
         if explicit_memory:
+            # Si la frase contiene un dato personal reconocible, la normalizamos.
+            # Ej.: "recuerda le voy al Club América" -> "Le va a Club América".
+            canonical_memory = extract_automatic_memory(explicit_memory, user_id) or explicit_memory
+
             # La memoria personal se asocia al ID real del usuario.
             # En el caso de Kiu queda disponible en todos los grupos.
             saved = add_long_term_memory(
                 "user",
                 user_id,
-                explicit_memory
+                canonical_memory
             )
 
             if saved:

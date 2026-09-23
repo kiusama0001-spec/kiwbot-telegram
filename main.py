@@ -5,6 +5,10 @@ import random
 import re
 import psycopg
 from psycopg.rows import dict_row
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError:
+    ConnectionPool = None
 import time
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -200,6 +204,40 @@ executor = ThreadPoolExecutor(
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 db_lock = RLock()
 
+# Pool de conexiones: evita abrir una conexión TLS nueva a Supabase en cada consulta.
+DB_POOL = None
+if DATABASE_URL and ConnectionPool is not None:
+    try:
+        DB_POOL = ConnectionPool(
+            conninfo=DATABASE_URL,
+            min_size=1,
+            max_size=8,
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
+        logger.info("Pool PostgreSQL inicializado.")
+    except Exception as e:
+        logger.warning("No se pudo iniciar el pool PostgreSQL; se usará conexión directa: %s", e)
+        DB_POOL = None
+
+# Cachés de datos muy consultados. La base sigue siendo la fuente de verdad.
+CACHE_TTL_SECONDS = 60
+ADMIN_CACHE_TTL_SECONDS = 45
+USER_TOUCH_TTL_SECONDS = 300
+_runtime_cache = {
+    "ai": {},
+    "mute": {},
+    "admins": {},
+    "users": {},
+}
+_cache_lock = RLock()
+
+TELEGRAM_SESSION = requests.Session()
+_bot_identity = {"loaded": False, "id": None, "username": ""}
+_bot_identity_lock = RLock()
+_processed_cleanup_at = 0
+_owner_secret_checked = False
+
 
 def _pg_sql(sql):
     """Compatibilidad mínima con las consultas antiguas de SQLite."""
@@ -229,8 +267,10 @@ class PgCursor:
 
 
 class PgConnection:
-    def __init__(self, conn):
+    def __init__(self, conn, pool=None):
         self._conn = conn
+        self._pool = pool
+        self._closed = False
 
     def execute(self, sql, params=None):
         cur = self._conn.cursor()
@@ -247,7 +287,13 @@ class PgConnection:
         self._conn.rollback()
 
     def close(self):
-        self._conn.close()
+        if self._closed:
+            return
+        self._closed = True
+        if self._pool is not None:
+            self._pool.putconn(self._conn)
+        else:
+            self._conn.close()
 
 
 def get_db():
@@ -256,6 +302,10 @@ def get_db():
             "DATABASE_URL no está configurada. Agrégala en Render con la URI "
             "Session pooler de Supabase."
         )
+
+    if DB_POOL is not None:
+        conn = DB_POOL.getconn(timeout=10)
+        return PgConnection(conn, DB_POOL)
 
     conn = psycopg.connect(
         DATABASE_URL,
@@ -698,15 +748,25 @@ def get_memory(
 
 
 def is_ai_enabled(chat_id):
-    """Indica si la IA está activa en este chat. Por defecto está activa."""
+    """Indica si la IA está activa. Cache corto para no consultar Supabase por cada mensaje."""
+    chat_id = int(chat_id)
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _runtime_cache["ai"].get(chat_id)
+        if cached and now - cached[1] < CACHE_TTL_SECONDS:
+            return cached[0]
+
     with db_lock:
         conn = get_db()
         row = conn.execute(
             "SELECT enabled FROM ai_settings WHERE chat_id = ?",
-            (int(chat_id),)
+            (chat_id,)
         ).fetchone()
         conn.close()
-    return True if row is None else bool(row["enabled"])
+    value = True if row is None else bool(row["enabled"])
+    with _cache_lock:
+        _runtime_cache["ai"][chat_id] = (value, now)
+    return value
 
 
 def set_ai_enabled(chat_id, enabled):
@@ -720,6 +780,8 @@ def set_ai_enabled(chat_id, enabled):
         """, (int(chat_id), 1 if enabled else 0))
         conn.commit()
         conn.close()
+    with _cache_lock:
+        _runtime_cache["ai"][int(chat_id)] = (bool(enabled), time.monotonic())
 
 
 def add_long_term_memory(
@@ -1454,7 +1516,7 @@ def telegram(
 
     try:
 
-        response = requests.post(
+        response = TELEGRAM_SESSION.post(
             f"{TELEGRAM_API}/{method}",
             json=data or {},
             timeout=TELEGRAM_TIMEOUT
@@ -1629,6 +1691,15 @@ def remember_user(
     if not user_id:
         return
 
+    cache_key = (int(chat_id), int(user_id))
+    now_mono = time.monotonic()
+    signature = (user.get("username", ""), user.get("first_name", ""), user.get("last_name", ""))
+    with _cache_lock:
+        cached = _runtime_cache["users"].get(cache_key)
+        if cached and cached[0] == signature and now_mono - cached[1] < USER_TOUCH_TTL_SECONDS:
+            return
+        _runtime_cache["users"][cache_key] = (signature, now_mono)
+
     with db_lock:
 
         conn = get_db()
@@ -1784,68 +1855,52 @@ def get_chat_member(
 
 
 def is_admin(message):
-
-    user = message.get(
-        "from",
-        {}
-    )
-
-    if is_owner(
-        user.get("id", 0)
-    ):
+    user = message.get("from", {})
+    user_id = int(user.get("id", 0) or 0)
+    if is_owner(user_id):
         return True
 
-    chat = message.get(
-        "chat",
-        {}
-    )
-
-    if chat.get(
-        "type"
-    ) == "private":
+    chat = message.get("chat", {})
+    if chat.get("type") == "private":
         return False
+    chat_id = int(chat.get("id", 0) or 0)
+    key = (chat_id, user_id)
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _runtime_cache["admins"].get(key)
+        if cached and now - cached[1] < ADMIN_CACHE_TTL_SECONDS:
+            return cached[0]
 
-    member = get_chat_member(
-        chat.get("id"),
-        user.get("id")
-    )
-
-    if not member:
-        return False
-
-    return member.get(
-        "status"
-    ) in (
-        "administrator",
-        "creator"
-    )
+    member = get_chat_member(chat_id, user_id)
+    value = bool(member and member.get("status") in ("administrator", "creator"))
+    with _cache_lock:
+        _runtime_cache["admins"][key] = (value, now)
+    return value
 
 
 # =========================================================
 # BOT MUTE INTERNO
 # =========================================================
 
-def is_bot_muted(
-    chat_id
-):
+def is_bot_muted(chat_id):
+    chat_id = int(chat_id)
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _runtime_cache["mute"].get(chat_id)
+        if cached and now - cached[1] < CACHE_TTL_SECONDS:
+            return cached[0]
 
     with db_lock:
-
         conn = get_db()
-
-        row = conn.execute("""
-            SELECT muted
-            FROM bot_mutes
-            WHERE chat_id = ?
-        """, (
-            chat_id,
-        )).fetchone()
-
+        row = conn.execute(
+            "SELECT muted FROM bot_mutes WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
         conn.close()
-
-    return bool(
-        row and row["muted"]
-    )
+    value = bool(row and row["muted"])
+    with _cache_lock:
+        _runtime_cache["mute"][chat_id] = (value, now)
+    return value
 
 
 def set_bot_mute(
@@ -1870,6 +1925,8 @@ def set_bot_mute(
 
         conn.commit()
         conn.close()
+    with _cache_lock:
+        _runtime_cache["mute"][int(chat_id)] = (bool(muted), time.monotonic())
 
 
 # =========================================================
@@ -1899,13 +1956,14 @@ def already_processed(
 
         inserted = cur.rowcount == 1
 
-        conn.execute("""
-            DELETE FROM processed_updates
-            WHERE processed_at < ?
-        """, (
-            int(time.time())
-            - 7 * 24 * 60 * 60,
-        ))
+        global _processed_cleanup_at
+        now_ts = int(time.time())
+        if now_ts - _processed_cleanup_at >= 3600:
+            conn.execute("""
+                DELETE FROM processed_updates
+                WHERE processed_at < ?
+            """, (now_ts - 7 * 24 * 60 * 60,))
+            _processed_cleanup_at = now_ts
 
         conn.commit()
         conn.close()
@@ -2616,6 +2674,13 @@ def ensure_player(user):
     user_id = int(user["id"])
     name = player_display_name(user)
     now = int(time.time())
+    cache_key = ("player", user_id)
+    now_mono = time.monotonic()
+    with _cache_lock:
+        cached = _runtime_cache["users"].get(cache_key)
+        if cached and cached[0] == name and now_mono - cached[1] < USER_TOUCH_TTL_SECONDS:
+            return None
+        _runtime_cache["users"][cache_key] = (name, now_mono)
 
     with db_lock:
         conn = get_db()
@@ -3201,7 +3266,10 @@ def process_command(
     if command in ("/saldo", "/kiwons"):
         user = message.get("from", {})
         ensure_player(user)
-        ensure_owner_secret_character(user)
+        global _owner_secret_checked
+        if is_owner(user_id) and not _owner_secret_checked:
+            ensure_owner_secret_character(user)
+            _owner_secret_checked = True
         balance = get_kiwons(user.get("id"))
         send_message(
             chat_id,
@@ -4202,138 +4270,60 @@ pero oficialmente estoy castigada por arrogante.
 
 
 # =========================================================
+# IDENTIDAD DEL BOT EN TELEGRAM (CACHEADA)
+# =========================================================
+
+def get_bot_identity():
+    """getMe cambia muy rara vez; se consulta una vez por proceso y se reutiliza."""
+    if _bot_identity["loaded"]:
+        return _bot_identity
+    with _bot_identity_lock:
+        if _bot_identity["loaded"]:
+            return _bot_identity
+        me = telegram("getMe")
+        if me and me.get("result"):
+            result = me["result"]
+            _bot_identity["id"] = result.get("id")
+            _bot_identity["username"] = result.get("username", "") or ""
+            _bot_identity["loaded"] = True
+    return _bot_identity
+
+
+# =========================================================
 # MENCIÓN AL BOT
 # =========================================================
 
-def bot_was_mentioned(
-    message
-):
-
-    text = message.get(
-        "text",
-        ""
-    )
-
-    entities = message.get(
-        "entities",
-        []
-    )
-
-    for entity in entities:
-
-        if entity.get(
-            "type"
-        ) == "mention":
-
-            username = text[
-                entity["offset"]:
-                entity["offset"]
-                + entity["length"]
-            ]
-
-            if username.lower().startswith("@"):
-
-                me = telegram(
-                    "getMe"
-                )
-
-                if me and me.get(
-                    "result"
-                ):
-
-                    bot_username = (
-                        me["result"]
-                        .get(
-                            "username",
-                            ""
-                        )
-                    )
-
-                    if (
-                        username.lower()
-                        ==
-                        f"@{bot_username}".lower()
-                    ):
-                        return True
-
+def bot_was_mentioned(message):
+    text = message.get("text", "")
+    username = get_bot_identity().get("username", "")
+    if not username:
+        return False
+    for entity in message.get("entities", []):
+        if entity.get("type") == "mention":
+            mention = text[entity["offset"]:entity["offset"] + entity["length"]]
+            if mention.lower() == f"@{username}".lower():
+                return True
     return False
 
 
-def is_reply_to_bot(
-    message
-):
-
-    reply = message.get(
-        "reply_to_message"
-    )
-
-    if not reply:
+def is_reply_to_bot(message):
+    reply = message.get("reply_to_message")
+    if not reply or not reply.get("from"):
         return False
-
-    bot_user = reply.get(
-        "from"
-    )
-
-    if not bot_user:
-        return False
-
-    # Verificamos que la respuesta sea realmente
-    # a KiwBot y no a cualquier otro bot.
-
-    me = telegram(
-        "getMe"
-    )
-
-    if not me or not me.get(
-        "result"
-    ):
-        return False
-
-    bot_id = me[
-        "result"
-    ].get(
-        "id"
-    )
-
-    return (
-        bot_user.get("id")
-        == bot_id
-    )
+    bot_id = get_bot_identity().get("id")
+    return bool(bot_id and reply["from"].get("id") == bot_id)
 
 
 # =========================================================
 # TEXTO LIMPIO
 # =========================================================
 
-def clean_bot_mention(
-    text
-):
-
+def clean_bot_mention(text):
     if not text:
         return ""
-
-    me = telegram(
-        "getMe"
-    )
-
-    if me and me.get(
-        "result"
-    ):
-
-        username = (
-            me["result"]
-            .get("username")
-        )
-
-        if username:
-
-            text = re.sub(
-                rf"@{re.escape(username)}",
-                "",
-                text,
-                flags=re.IGNORECASE
-            )
-
+    username = get_bot_identity().get("username", "")
+    if username:
+        text = re.sub(rf"@{re.escape(username)}", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 

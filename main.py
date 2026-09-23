@@ -291,6 +291,12 @@ class PgConnection:
             return
         self._closed = True
         if self._pool is not None:
+            # Incluso un SELECT abre una transacción en psycopg.
+            # Devuelve la conexión al pool siempre en estado limpio.
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
             self._pool.putconn(self._conn)
         else:
             self._conn.close()
@@ -3265,6 +3271,7 @@ def process_command(
 
     if command in ("/saldo", "/kiwons"):
         user = message.get("from", {})
+        user_id = user.get("id")
         ensure_player(user)
         global _owner_secret_checked
         if is_owner(user_id) and not _owner_secret_checked:

@@ -2694,22 +2694,35 @@ def transfer_kiwons(sender_id, receiver_id, amount, chat_id=None):
 
 
 def resolve_target_for_economy(message, text):
-    """Primero reply/text_mention/@username. Nunca confía en nombres para permisos."""
-    target = target_user(message)
-    if target:
-        return target
+    """Resuelve el destinatario de Kiwons por reply, text_mention o @username."""
 
-    parts = text.split()
-    for part in parts[1:]:
-        if part.startswith("@"):
-            cached = find_cached_user(message["chat"]["id"], part)
-            if cached:
-                return {
-                    "id": cached["user_id"],
-                    "username": cached["username"],
-                    "first_name": cached["first_name"],
-                    "last_name": cached["last_name"]
-                }
+    # 1) Responder/seleccionar un mensaje: es la forma más fiable.
+    reply = message.get("reply_to_message")
+    if reply:
+        reply_user = reply.get("from")
+        if reply_user and reply_user.get("id"):
+            return reply_user
+
+    # 2) Telegram text_mention: contiene el ID real aunque no haya @username.
+    for entity in message.get("entities", []):
+        if entity.get("type") == "text_mention":
+            mentioned = entity.get("user")
+            if mentioned and mentioned.get("id"):
+                return mentioned
+
+    # 3) @username: buscar en usuarios vistos en ESTE grupo.
+    match = re.search(r"@([A-Za-z0-9_]{3,})", str(text or ""))
+    if match:
+        username = match.group(1)
+        cached = find_cached_user(message["chat"]["id"], username)
+        if cached:
+            return {
+                "id": cached["user_id"],
+                "username": cached["username"],
+                "first_name": cached["first_name"],
+                "last_name": cached["last_name"]
+            }
+
     return None
 
 
@@ -2910,8 +2923,8 @@ def process_command(
         if not target or not target.get("id"):
             send_message(
                 chat_id,
-                "Responde al mensaje de la persona o menciona su @usuario.\n"
-                "Ejemplo: /transferir 500 @usuario"
+                "RESPONDE directamente al mensaje de la persona con /transferir 500.\n"
+                "También puedes usar /transferir 500 @usuario si KiwBot ya ha visto a ese usuario en el grupo."
             )
             return True
 
@@ -2939,7 +2952,7 @@ def process_command(
         )
         return True
 
-    if command in ("/darkiwons", "/darskiwons", "/addkiwons"):
+    if command in ("/darr", "/darkiwons", "/darskiwons", "/addkiwons"):
         if not is_admin(message):
             send_message(chat_id, "Solo un administrador puede entregar Kiwons.")
             return True
@@ -2949,8 +2962,8 @@ def process_command(
         if not target or not target.get("id") or not amount:
             send_message(
                 chat_id,
-                "Uso: responde a un usuario con /darkiwons 500\n"
-                "o usa /darkiwons 500 @usuario"
+                "Uso: RESPONDE directamente al mensaje del usuario con /darr 500.\n"
+                "También puedes usar /darr 500 @usuario si KiwBot ya ha visto a ese usuario en el grupo."
             )
             return True
 
@@ -2973,7 +2986,7 @@ def process_command(
         )
         return True
 
-    if command in ("/quitarkiwons", "/removekiwons"):
+    if command in ("/quitar", "/quitarkiwons", "/removekiwons"):
         if not is_admin(message):
             send_message(chat_id, "Solo un administrador puede retirar Kiwons.")
             return True
@@ -2983,8 +2996,8 @@ def process_command(
         if not target or not target.get("id") or not amount:
             send_message(
                 chat_id,
-                "Uso: responde a un usuario con /quitarkiwons 500\n"
-                "o usa /quitarkiwons 500 @usuario"
+                "Uso: RESPONDE directamente al mensaje del usuario con /quitar 500.\n"
+                "También puedes usar /quitar 500 @usuario si KiwBot ya ha visto a ese usuario en el grupo."
             )
             return True
 
@@ -3523,8 +3536,8 @@ Kiwons:
 /ranking
 
 Administración de Kiwons:
-/darkiwons
-/quitarkiwons
+/darr
+/quitar
 
 Durante /kiwmute sigo aquí...
 pero oficialmente estoy castigada por arrogante.

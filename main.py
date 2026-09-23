@@ -565,6 +565,21 @@ def init_db():
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS special_cd BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS defending BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS last_action TEXT DEFAULT ''")
+        # KiwRPG V5.1: rareza y contador mundial de encuentros.
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS encounter_rarity TEXT NOT NULL DEFAULT 'normal'")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS encounter_number BIGINT NOT NULL DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_encounter_stats (
+                world_id BIGINT PRIMARY KEY,
+                total_encounters BIGINT NOT NULL DEFAULT 0,
+                normal_count BIGINT NOT NULL DEFAULT 0,
+                uncommon_count BIGINT NOT NULL DEFAULT 0,
+                rare_count BIGINT NOT NULL DEFAULT 0,
+                ultra_count BIGINT NOT NULL DEFAULT 0,
+                legendary_count BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL
+            )
+        """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_assets (
@@ -3368,10 +3383,78 @@ def ensure_owner_secret_character(user):
 # =========================================================
 
 RPG_ENEMIES = [
-    {"key": "slime_sombra", "name": "Slime de Sombra", "hp": 54, "atk": 13, "def": 4, "exp": 24, "kw": 16},
-    {"key": "lobo_ceniza", "name": "Lobo de Ceniza", "hp": 62, "atk": 14, "def": 5, "exp": 28, "kw": 20},
-    {"key": "bandido_errante", "name": "Bandido Errante", "hp": 70, "atk": 15, "def": 6, "exp": 32, "kw": 24},
+    # Bestiario base V5.1. La rareza del encuentro se aplica después como variante.
+    {"key":"slime_sombra","name":"Slime de Sombra","hp":54,"atk":13,"def":4,"exp":24,"kw":16},
+    {"key":"lobo_ceniza","name":"Lobo de Ceniza","hp":62,"atk":14,"def":5,"exp":28,"kw":20},
+    {"key":"bandido_errante","name":"Bandido Errante","hp":70,"atk":15,"def":6,"exp":32,"kw":24},
+    {"key":"arana_umbria","name":"Araña Umbría","hp":58,"atk":15,"def":4,"exp":27,"kw":18},
+    {"key":"esqueleto_guardian","name":"Esqueleto Guardián","hp":68,"atk":13,"def":7,"exp":30,"kw":21},
+    {"key":"cuervo_maldito","name":"Cuervo Maldito","hp":55,"atk":16,"def":4,"exp":29,"kw":20},
+    {"key":"goblin_chatarrero","name":"Goblin Chatarrero","hp":64,"atk":14,"def":5,"exp":29,"kw":22},
+    {"key":"sabueso_nocturno","name":"Sabueso Nocturno","hp":66,"atk":15,"def":5,"exp":31,"kw":22},
+    {"key":"cultista_rojo","name":"Cultista Carmesí","hp":60,"atk":17,"def":4,"exp":32,"kw":23},
+    {"key":"armadura_vacia","name":"Armadura Vacía","hp":76,"atk":13,"def":8,"exp":34,"kw":25},
+    {"key":"murcielago_abismo","name":"Murciélago del Abismo","hp":56,"atk":16,"def":4,"exp":29,"kw":20},
+    {"key":"saqueador_huesos","name":"Saqueador de Huesos","hp":69,"atk":15,"def":6,"exp":33,"kw":24},
+    {"key":"serpiente_cristal","name":"Serpiente de Cristal","hp":61,"atk":16,"def":5,"exp":32,"kw":23},
+    {"key":"hongo_toxico","name":"Hongo Tóxico","hp":72,"atk":13,"def":6,"exp":30,"kw":21},
+    {"key":"espectro_errante","name":"Espectro Errante","hp":59,"atk":17,"def":5,"exp":34,"kw":25},
+    {"key":"mercenario_caido","name":"Mercenario Caído","hp":74,"atk":16,"def":7,"exp":36,"kw":27},
+    {"key":"golem_piedra","name":"Gólem de Piedra","hp":82,"atk":13,"def":9,"exp":36,"kw":26},
+    {"key":"bruja_pantano","name":"Bruja del Pantano","hp":62,"atk":18,"def":4,"exp":36,"kw":27},
+    {"key":"acechador_niebla","name":"Acechador de la Niebla","hp":65,"atk":17,"def":5,"exp":35,"kw":26},
+    {"key":"caballero_roto","name":"Caballero Roto","hp":80,"atk":15,"def":8,"exp":38,"kw":29},
+    {"key":"devorador_ceniza","name":"Devorador de Ceniza","hp":75,"atk":17,"def":6,"exp":38,"kw":29},
+    {"key":"mimico_hambriento","name":"Mímico Hambriento","hp":67,"atk":18,"def":6,"exp":38,"kw":30},
+    {"key":"verdugo_sin_rostro","name":"Verdugo sin Rostro","hp":78,"atk":17,"def":7,"exp":40,"kw":31},
+    {"key":"bestia_eclipse","name":"Bestia del Eclipse","hp":84,"atk":16,"def":8,"exp":41,"kw":32},
 ]
+
+# La tirada se hace por CADA /encuentro del mundo, sin importar quién lo genere.
+# Los porcentajes no son pity: el #2000 no está obligado a ser legendario.
+RPG_ENCOUNTER_RARITIES = [
+    ("legendary", 0.0005),   # 0.05%  ~ 1/2000
+    ("ultra",     0.0045),   # 0.45%  ~ 1/222
+    ("rare",      0.0250),   # 2.50%
+    ("uncommon",  0.0900),   # 9.00%
+    ("normal",    0.8800),   # 88.00%
+]
+RPG_ENCOUNTER_RARITY_DATA = {
+    "normal":    {"icon":"⚪","label":"NORMAL","hp":1.00,"atk":1.00,"def":1.00,"reward":1.00,"suffix":""},
+    "uncommon":  {"icon":"🟢","label":"POCO COMÚN","hp":1.08,"atk":1.05,"def":1.05,"reward":1.20,"suffix":" — Curtido"},
+    "rare":      {"icon":"🔵","label":"RARO","hp":1.18,"atk":1.10,"def":1.10,"reward":1.55,"suffix":" — Alfa"},
+    "ultra":     {"icon":"🟣","label":"ULTRA RARO","hp":1.32,"atk":1.18,"def":1.16,"reward":2.10,"suffix":" — Espectral"},
+    "legendary": {"icon":"🟡","label":"LEGENDARIO","hp":1.55,"atk":1.28,"def":1.24,"reward":3.00,"suffix":" — Eclipsado"},
+}
+
+def roll_world_encounter_rarity():
+    x = random.random()
+    acc = 0.0
+    for rarity, chance in RPG_ENCOUNTER_RARITIES:
+        acc += chance
+        if x < acc:
+            return rarity
+    return "normal"
+
+
+def register_world_encounter(rarity):
+    """Incrementa el contador compartido por TODOS los jugadores del mundo actual."""
+    world = current_rpg_world()
+    col = {"normal":"normal_count","uncommon":"uncommon_count","rare":"rare_count","ultra":"ultra_count","legendary":"legendary_count"}.get(rarity,"normal_count")
+    now = int(time.time())
+    with db_lock:
+        conn = get_db()
+        try:
+            conn.execute("""INSERT INTO rpg_encounter_stats(world_id,total_encounters,updated_at)
+                            VALUES (?,0,?) ON CONFLICT(world_id) DO NOTHING""", (world,now))
+            row = conn.execute(f"""UPDATE rpg_encounter_stats
+                                   SET total_encounters=total_encounters+1, {col}={col}+1, updated_at=?
+                                   WHERE world_id=? RETURNING total_encounters""", (now,world)).fetchone()
+            conn.commit(); conn.close()
+            return int(row["total_encounters"] if row else 0)
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
 
 RPG_DICE_MULT = {1: 0.0, 2: 1.00, 3: 1.10, 4: 1.20, 5: 1.35, 6: 1.60}
 
@@ -3517,32 +3600,43 @@ def start_rpg_encounter(chat_id, user_id):
 
     level = int(char["level"])
     base = random.choice(RPG_ENEMIES)
+    rarity = roll_world_encounter_rarity()
+    encounter_number = register_world_encounter(rarity)
+    rd = RPG_ENCOUNTER_RARITY_DATA[rarity]
     scale = max(0, level - 1)
-    enemy_hp = int(base["hp"] + scale * 10)
-    enemy_atk = int(base["atk"] + scale * 2)
-    enemy_def = int(base["def"] + scale)
+    enemy_hp = max(1, int(round((base["hp"] + scale * 10) * rd["hp"])))
+    enemy_atk = max(1, int(round((base["atk"] + scale * 2) * rd["atk"])))
+    enemy_def = max(0, int(round((base["def"] + scale) * rd["def"])))
+    enemy_name = base["name"] + rd["suffix"]
     now = int(time.time())
 
     with db_lock:
         conn = get_db()
         conn.execute("""
             INSERT INTO rpg_battles
-            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action)
-            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'')
+            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number)
+            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'',?,?)
             ON CONFLICT(chat_id,user_id) DO UPDATE SET
                 character_id=excluded.character_id, enemy_key=excluded.enemy_key,
                 enemy_name=excluded.enemy_name, enemy_hp=excluded.enemy_hp,
                 enemy_max_hp=excluded.enemy_max_hp, enemy_atk=excluded.enemy_atk,
                 enemy_def=excluded.enemy_def, state='choosing_action',
                 started_at=excluded.started_at, updated_at=excluded.updated_at,
-                ultimate_cd=0, special_cd=0, defending=0, last_action=''
-        """, (int(chat_id),int(user_id),int(char["id"]),base["key"],base["name"],enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now))
+                ultimate_cd=0, special_cd=0, defending=0, last_action='',
+                encounter_rarity=excluded.encounter_rarity, encounter_number=excluded.encounter_number
+        """, (int(chat_id),int(user_id),int(char["id"]),base["key"],enemy_name,enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now,rarity,encounter_number))
         conn.commit(); conn.close()
     eff=effective_character_stats(char)
+    rare_note = ""
+    if rarity == "rare": rare_note = "\n🎁 DROP RARO GARANTIZADO si lo derrotas."
+    elif rarity == "ultra": rare_note = "\n💎 Tabla de loot ULTRA RARA activada."
+    elif rarity == "legendary": rare_note = "\n👑 Tabla de loot LEGENDARIA activada."
     return True, (
-        f"⚔️ ENCUENTRO — {base['name']}\n\n"
+        f"{rd['icon']} ENCUENTRO {rd['label']} — #{encounter_number} DEL MUNDO\n"
+        f"⚔️ {enemy_name}\n\n"
         f"❤️ {char['name']}: {char['hp']}/{eff['max_hp']} HP\n"
-        f"❤️ {base['name']}: {enemy_hp}/{enemy_hp} HP\n\n"
+        f"❤️ {enemy_name}: {enemy_hp}/{enemy_hp} HP"
+        f"{rare_note}\n\n"
         "Elige una habilidad. KiwBot lanzará el 🎲 real de Telegram automáticamente."
     )
 
@@ -3667,8 +3761,11 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
 
             if enemy_hp<=0:
                 base=next((x for x in RPG_ENEMIES if x["key"]==battle["enemy_key"]),RPG_ENEMIES[0])
-                reward_exp=int(base["exp"]+max(0,int(char["level"])-1)*4)
-                reward_kw=int(base["kw"]+max(0,int(char["level"])-1)*3)
+                encounter_rarity=str(battle.get("encounter_rarity") or "normal")
+                rarity_data=RPG_ENCOUNTER_RARITY_DATA.get(encounter_rarity,RPG_ENCOUNTER_RARITY_DATA["normal"])
+                reward_mult=float(rarity_data["reward"])
+                reward_exp=max(1,int(round((base["exp"]+max(0,int(char["level"])-1)*4)*reward_mult)))
+                reward_kw=max(1,int(round((base["kw"]+max(0,int(char["level"])-1)*3)*reward_mult)))
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
@@ -3682,7 +3779,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.\n\n☠️ {battle['enemy_name']} ha sido derrotado.\n"
                     f"⭐ +{reward_exp} EXP\n🪙 +{reward_kw} KW"
                     +(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels!=1 else ''}! Nivel {newstats['level']}." if levels else ""))
-                drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"])
+                drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"],encounter_rarity)
                 if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
                 return True
 
@@ -4029,20 +4126,45 @@ def grant_rpg_item(user_id, character_id, item_key, source="drop"):
             conn.rollback(); conn.close(); raise
 
 
-def roll_rpg_drop(user_id, character_id, enemy_key):
-    # V2: los legendarios existen en la arquitectura, pero su probabilidad es deliberadamente diminuta.
+def roll_rpg_drop(user_id, character_id, enemy_key, encounter_rarity="normal"):
+    """Loot V5.1: la rareza del ENCUENTRO altera la tabla, no solo el aspecto."""
+    rarity=str(encounter_rarity or "normal")
+    source=f"encuentro:{enemy_key}:{rarity}"
+
+    # RARO: al menos un objeto raro. ULTRA: intenta Ultra Raro. LEGENDARIO:
+    # no regala automáticamente equipo legendario; conserva su prestigio global.
+    if rarity == "rare":
+        key=random.choice(["anillo_carmesi","llave_oxidada"])
+        return grant_rpg_item(user_id,character_id,key,source)
+    if rarity == "ultra":
+        item=grant_rpg_item(user_id,character_id,"colmillo_selene",source)
+        if item: return item
+        return grant_rpg_item(user_id,character_id,random.choice(["anillo_carmesi","llave_oxidada"]),source)
+    if rarity == "legendary":
+        # 5% dentro de una aparición de 0.05% => ~1 oportunidad de espada / 40,000 encuentros,
+        # y además Espada del Eclipse conserva su límite global de copias.
+        if random.random() < 0.05:
+            item=grant_rpg_item(user_id,character_id,"espada_eclipse",source)
+            if item: return item
+        item=grant_rpg_item(user_id,character_id,"colmillo_selene",source)
+        if item: return item
+        return grant_rpg_item(user_id,character_id,random.choice(["anillo_carmesi","llave_oxidada"]),source)
+
     x=random.random()
-    if x < 0.0015: key="espada_eclipse"
-    elif x < 0.012: key="colmillo_selene"
-    elif x < 0.075: key="anillo_carmesi"
-    elif x < 0.16: key="llave_oxidada"
-    elif x < 0.40: key="venda_viajero"
-    elif x < 0.78: key="colmillo_ceniza"
-    else: return None
-    item=grant_rpg_item(user_id,character_id,key,f"encuentro:{enemy_key}")
-    if item is None and key in ("espada_eclipse","colmillo_selene"):
-        return grant_rpg_item(user_id,character_id,"anillo_carmesi",f"encuentro:{enemy_key}")
-    return item
+    if rarity == "uncommon":
+        if x < 0.08: key="anillo_carmesi"
+        elif x < 0.18: key="llave_oxidada"
+        elif x < 0.58: key="venda_viajero"
+        elif x < 0.90: key="colmillo_ceniza"
+        else: return None
+    else:
+        # Normal: sin legendarios/ultras directos. Esos vienen de apariciones especiales.
+        if x < 0.035: key="anillo_carmesi"
+        elif x < 0.075: key="llave_oxidada"
+        elif x < 0.30: key="venda_viajero"
+        elif x < 0.70: key="colmillo_ceniza"
+        else: return None
+    return grant_rpg_item(user_id,character_id,key,source)
 
 
 def announce_rpg_drop(chat_id, user, item):

@@ -3,7 +3,8 @@ import logging
 import os
 import random
 import re
-import sqlite3
+import psycopg
+from psycopg.rows import dict_row
 import time
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -193,50 +194,87 @@ executor = ThreadPoolExecutor(
 
 
 # =========================================================
-# SQLITE
+# POSTGRESQL / SUPABASE
 # =========================================================
 
-# Si defines DATABASE_PATH en Render, esa ruta manda.
-# Para persistencia real entre deploys/reinicios usa un Persistent Disk,
-# por ejemplo montado en /var/data y DATABASE_PATH=/var/data/kiwbot.db.
-DB_PATH = os.getenv("DATABASE_PATH", "").strip()
-
-if not DB_PATH:
-    DB_PATH = (
-        "/var/data/kiwbot.db"
-        if os.path.isdir("/var/data") and os.access("/var/data", os.W_OK)
-        else "kiwbot.db"
-    )
-
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 db_lock = RLock()
 
 
+def _pg_sql(sql):
+    """Compatibilidad mínima con las consultas antiguas de SQLite."""
+    return str(sql).replace("?", "%s")
+
+
+class PgCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def execute(self, sql, params=None):
+        self._cursor.execute(_pg_sql(sql), params or ())
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def close(self):
+        self._cursor.close()
+
+
+class PgConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        cur = self._conn.cursor()
+        cur.execute(_pg_sql(sql), params or ())
+        return PgCursor(cur)
+
+    def cursor(self):
+        return PgCursor(self._conn.cursor())
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
 def get_db():
-    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL no está configurada. Agrégala en Render con la URI "
+            "Session pooler de Supabase."
+        )
 
-    conn = sqlite3.connect(
-        DB_PATH,
-        check_same_thread=False
+    conn = psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+        connect_timeout=10
     )
-
-    conn.row_factory = sqlite3.Row
-
-    return conn
+    return PgConnection(conn)
 
 
 def init_db():
     with db_lock:
-
         conn = get_db()
         cur = conn.cursor()
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS chat_settings (
-                chat_id INTEGER PRIMARY KEY,
-                welcome_enabled INTEGER DEFAULT 1,
-                goodbye_enabled INTEGER DEFAULT 1,
+                chat_id BIGINT PRIMARY KEY,
+                welcome_enabled BIGINT DEFAULT 1,
+                goodbye_enabled BIGINT DEFAULT 1,
                 rules TEXT DEFAULT '',
                 welcome_text TEXT DEFAULT '',
                 goodbye_text TEXT DEFAULT ''
@@ -245,16 +283,16 @@ def init_db():
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS warnings (
-                chat_id INTEGER,
-                user_id INTEGER,
-                count INTEGER DEFAULT 0,
+                chat_id BIGINT,
+                user_id BIGINT,
+                count BIGINT DEFAULT 0,
                 PRIMARY KEY(chat_id, user_id)
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS filters (
-                chat_id INTEGER,
+                chat_id BIGINT,
                 word TEXT,
                 PRIMARY KEY(chat_id, word)
             )
@@ -262,101 +300,102 @@ def init_db():
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS chat_users (
-                chat_id INTEGER,
-                user_id INTEGER,
+                chat_id BIGINT,
+                user_id BIGINT,
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
-                updated_at INTEGER,
+                updated_at BIGINT,
                 PRIMARY KEY(chat_id, user_id)
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS bot_memory (
-                chat_id INTEGER,
-                user_id INTEGER,
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                user_id BIGINT,
                 role TEXT,
                 content TEXT,
-                created_at INTEGER
+                created_at BIGINT
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS long_term_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id BIGSERIAL PRIMARY KEY,
                 scope TEXT NOT NULL,
-                owner_id INTEGER NOT NULL,
-                chat_id INTEGER,
+                owner_id BIGINT NOT NULL,
+                chat_id BIGINT,
                 memory TEXT NOT NULL,
-                created_at INTEGER,
-                updated_at INTEGER
+                created_at BIGINT,
+                updated_at BIGINT
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS bot_mutes (
-                chat_id INTEGER PRIMARY KEY,
-                muted INTEGER DEFAULT 0
+                chat_id BIGINT PRIMARY KEY,
+                muted BIGINT DEFAULT 0
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ai_settings (
-                chat_id INTEGER PRIMARY KEY,
-                enabled INTEGER DEFAULT 1
+                chat_id BIGINT PRIMARY KEY,
+                enabled BIGINT DEFAULT 1
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS processed_updates (
-                update_id INTEGER PRIMARY KEY,
-                processed_at INTEGER
+                update_id BIGINT PRIMARY KEY,
+                processed_at BIGINT
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_facts (
-                owner_id INTEGER NOT NULL,
+                owner_id BIGINT NOT NULL,
                 fact_key TEXT NOT NULL,
                 fact_value TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
+                updated_at BIGINT NOT NULL,
                 PRIMARY KEY(owner_id, fact_key)
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS named_facts (
-                owner_id INTEGER NOT NULL,
+                owner_id BIGINT NOT NULL,
                 subject TEXT NOT NULL,
                 relation TEXT NOT NULL,
                 fact_value TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
+                updated_at BIGINT NOT NULL,
                 PRIMARY KEY(owner_id, subject, relation)
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS players (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 display_name TEXT NOT NULL DEFAULT '',
-                kiwons INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                kiwons BIGINT NOT NULL DEFAULT 0,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
             )
         """)
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS kiwon_transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount BIGINT NOT NULL,
                 kind TEXT NOT NULL,
-                actor_id INTEGER,
-                other_user_id INTEGER,
-                chat_id INTEGER,
+                actor_id BIGINT,
+                other_user_id BIGINT,
+                chat_id BIGINT,
                 note TEXT DEFAULT '',
-                created_at INTEGER NOT NULL
+                created_at BIGINT NOT NULL
             )
         """)
 
@@ -367,19 +406,20 @@ def init_db():
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS characters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
                 name TEXT NOT NULL,
                 class_name TEXT NOT NULL,
-                level INTEGER NOT NULL DEFAULT 1,
-                exp INTEGER NOT NULL DEFAULT 0,
-                hp INTEGER NOT NULL DEFAULT 100,
-                max_hp INTEGER NOT NULL DEFAULT 100,
-                atk INTEGER NOT NULL DEFAULT 10,
-                defense INTEGER NOT NULL DEFAULT 5,
-                is_active INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
+                level BIGINT NOT NULL DEFAULT 1,
+                exp BIGINT NOT NULL DEFAULT 0,
+                hp BIGINT NOT NULL DEFAULT 100,
+                max_hp BIGINT NOT NULL DEFAULT 100,
+                atk BIGINT NOT NULL DEFAULT 10,
+                defense BIGINT NOT NULL DEFAULT 5,
+                is_active BIGINT NOT NULL DEFAULT 0,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                secret_blades_active BIGINT NOT NULL DEFAULT 0,
                 UNIQUE(user_id, name)
             )
         """)
@@ -389,14 +429,11 @@ def init_db():
             ON characters(user_id, is_active DESC, id ASC)
         """)
 
-        # Migración segura: estado de las espadas secretas.
-        character_columns = {
-            row["name"] for row in cur.execute("PRAGMA table_info(characters)").fetchall()
-        }
-        if "secret_blades_active" not in character_columns:
-            cur.execute(
-                "ALTER TABLE characters ADD COLUMN secret_blades_active INTEGER NOT NULL DEFAULT 0"
-            )
+        # Migración segura por si la tabla ya existía en PostgreSQL.
+        cur.execute("""
+            ALTER TABLE characters
+            ADD COLUMN IF NOT EXISTS secret_blades_active BIGINT NOT NULL DEFAULT 0
+        """)
 
         conn.commit()
         conn.close()
@@ -607,8 +644,8 @@ def add_memory(
 
         conn.execute("""
             DELETE FROM bot_memory
-            WHERE rowid NOT IN (
-                SELECT rowid
+            WHERE id NOT IN (
+                SELECT id
                 FROM bot_memory
                 WHERE chat_id = ?
                   AND user_id = ?
@@ -1854,9 +1891,10 @@ def already_processed(
         conn = get_db()
 
         cur = conn.execute("""
-            INSERT OR IGNORE INTO processed_updates
+            INSERT INTO processed_updates
             (update_id, processed_at)
             VALUES (?, ?)
+            ON CONFLICT(update_id) DO NOTHING
         """, (
             update_id,
             int(time.time())
@@ -2621,9 +2659,8 @@ def change_kiwons(user_id, amount, kind, actor_id=None, other_user_id=None,
     with db_lock:
         conn = get_db()
         try:
-            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT kiwons FROM players WHERE user_id=?",
+                "SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",
                 (user_id,)
             ).fetchone()
 
@@ -2682,14 +2719,13 @@ def transfer_kiwons(sender_id, receiver_id, amount, chat_id=None):
     with db_lock:
         conn = get_db()
         try:
-            conn.execute("BEGIN IMMEDIATE")
 
             sender = conn.execute(
-                "SELECT kiwons FROM players WHERE user_id=?",
+                "SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",
                 (sender_id,)
             ).fetchone()
             receiver = conn.execute(
-                "SELECT kiwons FROM players WHERE user_id=?",
+                "SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",
                 (receiver_id,)
             ).fetchone()
 
@@ -2881,7 +2917,7 @@ def create_character(user_id, name, class_name):
             conn.commit()
             conn.close()
             return True, active
-        except sqlite3.IntegrityError:
+        except psycopg.IntegrityError:
             conn.close()
             return False, "Ya tienes un personaje con ese nombre."
 
@@ -2924,7 +2960,6 @@ def set_active_character(user_id, name):
             conn.close()
             return False, None
 
-        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "UPDATE characters SET is_active=0, updated_at=? WHERE user_id=?",
             (int(time.time()), user_id)
@@ -3245,18 +3280,12 @@ def process_command(
             send_message(chat_id, "Este comando es exclusivo de Kiu.")
             return True
 
-        persistent = os.path.abspath(DB_PATH).startswith("/var/data/")
+        configured = bool(DATABASE_URL)
         status_text = (
             "🗄️ ESTADO DE DATOS\n\n"
-            f"Base persistente: {'SÍ' if persistent else 'NO'}\n"
-            f"Modo: {'Render Persistent Disk' if persistent else 'almacenamiento local temporal'}"
+            f"Base persistente: {'SÍ' if configured else 'NO'}\n"
+            f"Modo: {'Supabase PostgreSQL' if configured else 'DATABASE_URL no configurada'}"
         )
-        if not persistent:
-            status_text += (
-                "\n\n⚠️ El código ya está preparado para persistencia. "
-                "Falta montar un Persistent Disk en Render y configurar "
-                "DATABASE_PATH con la ruta del disco."
-            )
         send_message(chat_id, status_text)
         return True
 

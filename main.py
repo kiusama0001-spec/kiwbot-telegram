@@ -562,6 +562,7 @@ def init_db():
         # KiwRPG V4: combate interactivo, habilidades, cooldown y recuperación.
         cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS defeated_until BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS ultimate_cd BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS special_cd BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS defending BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS last_action TEXT DEFAULT ''")
 
@@ -3379,34 +3380,34 @@ RPG_DICE_MULT = {1: 0.0, 2: 1.00, 3: 1.10, 4: 1.20, 5: 1.35, 6: 1.60}
 # en una victoria automática. Los efectos especiales dan identidad sin ignorar el d6.
 RPG_ABILITIES = {
     "Guerrero": [
-        {"key":"corte_feroz","emoji":"⚔️","name":"Corte Feroz","power":1.00,"pen":0.00},
-        {"key":"embate","emoji":"💢","name":"Embate","power":1.08,"pen":0.22},
-        {"key":"furia_titan","emoji":"🔥","name":"Furia del Titán","power":1.42,"pen":0.10,"ultimate":True,"cooldown":4},
+        {"key":"corte_feroz","emoji":"⚔️","name":"Corte Feroz","power":0.970,"pen":0.00},
+        {"key":"embate","emoji":"💢","name":"Embate","power":1.048,"pen":0.22,"special":True,"cooldown":2},
+        {"key":"furia_titan","emoji":"🔥","name":"Furia del Titán","power":1.377,"pen":0.10,"ultimate":True,"cooldown":4},
     ],
     "Mago": [
-        {"key":"proyectil_arcano","emoji":"🔮","name":"Proyectil Arcano","power":0.88,"pen":0.42},
-        {"key":"ruptura_arcana","emoji":"✨","name":"Ruptura Arcana","power":0.96,"pen":0.58},
-        {"key":"cataclismo_arcano","emoji":"☄️","name":"Cataclismo Arcano","power":1.28,"pen":0.65,"ultimate":True,"cooldown":4},
+        {"key":"proyectil_arcano","emoji":"🔮","name":"Proyectil Arcano","power":0.994,"pen":0.42},
+        {"key":"ruptura_arcana","emoji":"✨","name":"Ruptura Arcana","power":1.085,"pen":0.58,"special":True,"cooldown":2},
+        {"key":"cataclismo_arcano","emoji":"☄️","name":"Cataclismo Arcano","power":1.446,"pen":0.65,"ultimate":True,"cooldown":4},
     ],
     "Pícaro": [
-        {"key":"punalada","emoji":"🗡️","name":"Puñalada","power":0.96,"pen":0.12},
-        {"key":"paso_sombrio","emoji":"🌑","name":"Paso Sombrío","power":1.00,"pen":0.18,"high_roll_bonus":0.18},
-        {"key":"ejecucion","emoji":"☠️","name":"Ejecución","power":1.34,"pen":0.25,"ultimate":True,"cooldown":4,"execute":True},
+        {"key":"punalada","emoji":"🗡️","name":"Puñalada","power":1.037,"pen":0.12},
+        {"key":"paso_sombrio","emoji":"🌑","name":"Paso Sombrío","power":1.080,"pen":0.18,"high_roll_bonus":0.18,"special":True,"cooldown":2},
+        {"key":"ejecucion","emoji":"☠️","name":"Ejecución","power":1.447,"pen":0.25,"ultimate":True,"cooldown":4,"execute":True},
     ],
     "Paladín": [
-        {"key":"golpe_sagrado","emoji":"🛡️","name":"Golpe Sagrado","power":1.05,"pen":0.00},
-        {"key":"bendicion","emoji":"🌟","name":"Bendición","power":0.90,"pen":0.00,"heal_pct":0.08},
-        {"key":"juicio_divino","emoji":"⚜️","name":"Juicio Divino","power":1.25,"pen":0.12,"heal_pct":0.12,"ultimate":True,"cooldown":4},
+        {"key":"golpe_sagrado","emoji":"🛡️","name":"Golpe Sagrado","power":0.924,"pen":0.00},
+        {"key":"bendicion","emoji":"🌟","name":"Bendición","power":0.792,"pen":0.00,"heal_pct":0.08,"special":True,"cooldown":3},
+        {"key":"juicio_divino","emoji":"⚜️","name":"Juicio Divino","power":1.100,"pen":0.12,"heal_pct":0.12,"ultimate":True,"cooldown":5},
     ],
     "Arquero": [
-        {"key":"disparo_preciso","emoji":"🏹","name":"Disparo Preciso","power":1.00,"pen":0.10},
-        {"key":"flecha_perforante","emoji":"🎯","name":"Flecha Perforante","power":1.02,"pen":0.55},
-        {"key":"lluvia_flechas","emoji":"🌧️","name":"Lluvia de Flechas","power":1.38,"pen":0.25,"ultimate":True,"cooldown":4},
+        {"key":"disparo_preciso","emoji":"🏹","name":"Disparo Preciso","power":1.100,"pen":0.10},
+        {"key":"flecha_perforante","emoji":"🎯","name":"Flecha Perforante","power":1.122,"pen":0.55,"special":True,"cooldown":2},
+        {"key":"lluvia_flechas","emoji":"🌧️","name":"Lluvia de Flechas","power":1.518,"pen":0.25,"ultimate":True,"cooldown":4},
     ],
     "The Cleaner": [
-        {"key":"v_trigger","emoji":"⚡","name":"V-Trigger","power":0.82,"pen":0.12},
-        {"key":"snap_dragon","emoji":"🐉","name":"Snap Dragon","power":0.88,"pen":0.20,"high_roll_bonus":0.10},
-        {"key":"one_winged_angel","emoji":"🪽","name":"One Winged Angel","power":1.22,"pen":0.28,"ultimate":True,"cooldown":5},
+        {"key":"v_trigger","emoji":"⚡","name":"V-Trigger","power":0.713,"pen":0.12},
+        {"key":"snap_dragon","emoji":"🐉","name":"Snap Dragon","power":0.766,"pen":0.20,"high_roll_bonus":0.10,"special":True,"cooldown":3},
+        {"key":"one_winged_angel","emoji":"🪽","name":"One Winged Angel","power":1.061,"pen":0.28,"ultimate":True,"cooldown":5},
     ],
 }
 
@@ -3446,12 +3447,13 @@ def rpg_abilities_for(class_name):
     return RPG_ABILITIES.get(str(class_name or ""), RPG_ABILITIES["Guerrero"])
 
 
-def rpg_battle_keyboard(class_name, ultimate_cd=0):
+def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0):
     a = rpg_abilities_for(class_name)
+    special_text = f"{a[1]['emoji']} {a[1]['name']}" if int(special_cd) <= 0 else f"⏳ {a[1]['name']} ({special_cd})"
     ult_text = f"{a[2]['emoji']} {a[2]['name']}" if int(ultimate_cd) <= 0 else f"⏳ {a[2]['name']} ({ultimate_cd})"
     return {"inline_keyboard":[
         [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"rpg_attack:{a[0]['key']}"},
-         {"text":f"{a[1]['emoji']} {a[1]['name']}","callback_data":f"rpg_attack:{a[1]['key']}"}],
+         {"text":special_text,"callback_data":f"rpg_attack:{a[1]['key']}"}],
         [{"text":ult_text,"callback_data":f"rpg_attack:{a[2]['key']}"}],
         [{"text":"🛡️ Defender","callback_data":"rpg_defend"},
          {"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},
@@ -3525,15 +3527,15 @@ def start_rpg_encounter(chat_id, user_id):
         conn = get_db()
         conn.execute("""
             INSERT INTO rpg_battles
-            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,defending,last_action)
-            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,'')
+            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action)
+            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'')
             ON CONFLICT(chat_id,user_id) DO UPDATE SET
                 character_id=excluded.character_id, enemy_key=excluded.enemy_key,
                 enemy_name=excluded.enemy_name, enemy_hp=excluded.enemy_hp,
                 enemy_max_hp=excluded.enemy_max_hp, enemy_atk=excluded.enemy_atk,
                 enemy_def=excluded.enemy_def, state='choosing_action',
                 started_at=excluded.started_at, updated_at=excluded.updated_at,
-                ultimate_cd=0, defending=0, last_action=''
+                ultimate_cd=0, special_cd=0, defending=0, last_action=''
         """, (int(chat_id),int(user_id),int(char["id"]),base["key"],base["name"],enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now))
         conn.commit(); conn.close()
     eff=effective_character_stats(char)
@@ -3612,6 +3614,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
         ability=_rpg_get_ability(char["class_name"],ability_key)
         if not ability:
             conn.rollback(); conn.close(); return True
+        if ability.get("special") and int(battle.get("special_cd") or 0)>0:
+            cd=int(battle["special_cd"]); conn.rollback(); conn.close()
+            send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
+            return True
         if ability.get("ultimate") and int(battle.get("ultimate_cd") or 0)>0:
             cd=int(battle["ultimate_cd"]); conn.rollback(); conn.close()
             send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
@@ -3653,6 +3659,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             enemy_hp=max(0,enemy_hp-damage)
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
+            new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
+            if ability.get("special"):
+                new_special_cd=int(ability.get("cooldown",2))
             if ability.get("ultimate"):
                 new_cd=int(ability.get("cooldown",4))
 
@@ -3692,9 +3701,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(char_hp,int(time.time()),int(char["id"])))
-                conn.execute("""UPDATE rpg_battles SET enemy_hp=?,ultimate_cd=?,last_action=?,state='choosing_action',updated_at=?
+                conn.execute("""UPDATE rpg_battles SET enemy_hp=?,ultimate_cd=?,special_cd=?,last_action=?,state='choosing_action',updated_at=?
                                 WHERE chat_id=? AND user_id=?""",
-                             (enemy_hp,new_cd,ability_key,int(time.time()),int(chat_id),int(user_id)))
+                             (enemy_hp,new_cd,new_special_cd,ability_key,int(time.time()),int(chat_id),int(user_id)))
             conn.commit(); conn.close()
 
             fail="❌ ¡FALLÓ!\n" if roll==1 else ("💥 ¡CRÍTICO!\n" if roll==6 else "")
@@ -3712,7 +3721,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
                     f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
-                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd))
+                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -3730,6 +3739,7 @@ def rpg_defend_action(chat_id,user_id):
             enemy_roll,damage=_rpg_enemy_damage(battle,eff,True)
             hp=max(0,int(char["hp"])-damage)
             cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
+            special_cd=max(0,int(battle.get("special_cd") or 0)-1)
             if hp<=0:
                 cdict=dict(char); cdict["hp"]=hp
                 lost,_=_rpg_apply_defeat(conn,cdict)
@@ -3738,10 +3748,10 @@ def rpg_defend_action(chat_id,user_id):
                 send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 5 minutos.")
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(hp,int(time.time()),int(char["id"])))
-                conn.execute("UPDATE rpg_battles SET ultimate_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,int(time.time()),int(chat_id),int(user_id)))
+                conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,int(time.time()),int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 send_message(chat_id,f"🛡️ DEFENSA\n\nEl enemigo tira 🎲 {enemy_roll}.\nRecibes {damage} de daño (50% reducido).\n❤️ {char['name']}: {hp}/{eff['max_hp']}",
-                             reply_markup=rpg_battle_keyboard(char["class_name"],cd))
+                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise

@@ -2701,6 +2701,10 @@ def resolve_target_for_economy(message, text):
     if reply:
         reply_user = reply.get("from")
         if reply_user and reply_user.get("id"):
+            # Nunca entregar/quitar Kiwons a KiwBot por accidente.
+            # Si el mensaje respondido fue enviado por un bot, no es un jugador válido.
+            if reply_user.get("is_bot"):
+                return None
             return reply_user
 
     # 2) Telegram text_mention: contiene el ID real aunque no haya @username.
@@ -2708,6 +2712,8 @@ def resolve_target_for_economy(message, text):
         if entity.get("type") == "text_mention":
             mentioned = entity.get("user")
             if mentioned and mentioned.get("id"):
+                if mentioned.get("is_bot"):
+                    return None
                 return mentioned
 
     # 3) @username: buscar en usuarios vistos en ESTE grupo.
@@ -2745,6 +2751,7 @@ def kiwon_ranking(chat_id, limit=10):
             FROM players p
             INNER JOIN chat_users cu ON cu.user_id=p.user_id
             WHERE cu.chat_id=?
+              AND p.kiwons > 0
             ORDER BY p.kiwons DESC, p.updated_at ASC
             LIMIT ?
         """, (int(chat_id), int(limit))).fetchall()
@@ -2962,7 +2969,7 @@ def process_command(
         if not target or not target.get("id") or not amount:
             send_message(
                 chat_id,
-                "Uso: RESPONDE directamente al mensaje del usuario con /darr 500.\n"
+                "Uso: responde al MENSAJE DEL USUARIO que recibirá los Kiwons con /darr 500.\n"
                 "También puedes usar /darr 500 @usuario si KiwBot ya ha visto a ese usuario en el grupo."
             )
             return True
@@ -3025,7 +3032,7 @@ def process_command(
     if command in ("/ranking", "/topkiwons"):
         rows = kiwon_ranking(chat_id, 10)
         if not rows:
-            send_message(chat_id, "Todavía no hay jugadores con Kiwons en este chat.")
+            send_message(chat_id, "Todavía nadie tiene Kiwons en este chat.")
             return True
 
         lines = ["🏆 RANKING DE KIWONS", ""]

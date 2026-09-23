@@ -554,6 +554,50 @@ def init_db():
             )
         """)
 
+        # KiwRPG V2: mundos, salón histórico, drops e interacciones.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_world_state (
+                singleton BIGINT PRIMARY KEY DEFAULT 1,
+                world_id BIGINT NOT NULL DEFAULT 1,
+                started_at BIGINT NOT NULL,
+                CONSTRAINT one_world CHECK (singleton=1)
+            )
+        """)
+        cur.execute("INSERT INTO rpg_world_state(singleton,world_id,started_at) VALUES (1,1,?) ON CONFLICT(singleton) DO NOTHING", (int(time.time()),))
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_hall_of_fame (
+                id BIGSERIAL PRIMARY KEY,
+                world_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                character_name TEXT NOT NULL DEFAULT '',
+                class_name TEXT NOT NULL DEFAULT '',
+                level BIGINT NOT NULL DEFAULT 1,
+                exp BIGINT NOT NULL DEFAULT 0,
+                legendary_count BIGINT NOT NULL DEFAULT 0,
+                archived_at BIGINT NOT NULL
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_interactions (
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                interaction_key TEXT NOT NULL,
+                payload TEXT DEFAULT '',
+                created_at BIGINT NOT NULL,
+                PRIMARY KEY(chat_id,user_id,interaction_key)
+            )
+        """)
+
+        cur.execute("""
+            ALTER TABLE rpg_inventory ADD COLUMN IF NOT EXISTS world_id BIGINT NOT NULL DEFAULT 1
+        """)
+        cur.execute("""
+            ALTER TABLE rpg_inventory ADD COLUMN IF NOT EXISTS original_owner_id BIGINT
+        """)
+
         now_seed = int(time.time())
         cur.execute("""
             INSERT INTO rpg_items
@@ -565,6 +609,19 @@ def init_db():
             'pocion_menor', 'Poción menor', 'comun', 'consumible',
             'Restaura una pequeña parte de la vida.', now_seed
         ))
+
+        v2_items = [
+            ('colmillo_ceniza','Colmillo de Ceniza','comun','material','Un colmillo aún tibio de una criatura de ceniza.',0,0,0,None,1),
+            ('venda_viajero','Venda del Viajero','poco_comun','consumible','Una venda tratada que ayuda a recuperar fuerzas.',0,0,0,None,1),
+            ('anillo_carmesi','Anillo Carmesí','raro','accesorio','Un anillo oscuro que conserva un pulso rojizo.',1,1,0,None,1),
+            ('llave_oxidada','Llave Oxidada','raro','clave','No parece valiosa, pero claramente abre algo.',0,0,0,None,1),
+            ('colmillo_selene','Colmillo de Selene','ultra_raro','arma','Una daga plateada que parece reaccionar a la luz.',3,0,0,5,1),
+            ('espada_eclipse','Espada del Eclipse','legendario','arma','Una hoja nacida donde la luz dejó de existir.',4,1,0,2,1),
+        ]
+        for it in v2_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(item_key) DO NOTHING""", (*it, now_seed))
 
         conn.commit()
         conn.close()
@@ -1629,7 +1686,8 @@ def telegram(
 def send_message(
     chat_id,
     text,
-    reply_to_message_id=None
+    reply_to_message_id=None,
+    reply_markup=None
 ):
 
     if not text:
@@ -1663,6 +1721,9 @@ def send_message(
             data["reply_parameters"] = {
                 "message_id": reply_to_message_id
             }
+
+        if reply_markup and index == 0:
+            data["reply_markup"] = reply_markup
 
         result = telegram(
             "sendMessage",
@@ -3370,6 +3431,9 @@ def handle_rpg_dice(message):
                     f"☠️ {battle['enemy_name']} ha sido derrotado.\n"
                     f"⭐ +{reward_exp} EXP\n🪙 +{reward_kw} KW{level_text}",
                     reply_to_message_id=message.get("message_id"))
+                drop=roll_rpg_drop(user_id, int(char["id"]), battle["enemy_key"])
+                if drop:
+                    announce_rpg_drop(chat_id, user, drop)
                 return True
 
             enemy_roll=random.randint(1,6)
@@ -3420,6 +3484,193 @@ def rpg_inventory_text(user_id):
         lines.append(f"{rarity.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}")
     return "\n".join(lines)
 
+
+# =========================================================
+# KIWRPG V2 — DROPS, OBJETOS, MUNDOS Y REINICIO
+# =========================================================
+
+RPG_RESET_PASSWORD = os.getenv("KIWRPG_RESET_PASSWORD", "").strip()
+_reset_sessions = {}
+RPG_RARITY_ICON = {"comun":"⚪","poco_comun":"🟢","raro":"🔵","ultra_raro":"🟣","legendario":"🟡","reliquia":"👑"}
+
+
+def current_rpg_world():
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT world_id FROM rpg_world_state WHERE singleton=1").fetchone(); conn.close()
+    return int(row["world_id"] if row else 1)
+
+
+def _global_item_count(conn, item_key, world_id):
+    row=conn.execute("SELECT COALESCE(SUM(quantity),0) AS n FROM rpg_inventory WHERE item_key=? AND world_id=?", (item_key,int(world_id))).fetchone()
+    return int(row["n"] or 0)
+
+
+def grant_rpg_item(user_id, character_id, item_key, source="drop"):
+    world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            item=conn.execute("SELECT * FROM rpg_items WHERE item_key=? FOR UPDATE", (item_key,)).fetchone()
+            if not item:
+                conn.rollback(); conn.close(); return None
+            limit=item["max_global_copies"]
+            serial=None
+            if limit is not None:
+                used=_global_item_count(conn,item_key,world)
+                if used >= int(limit):
+                    conn.rollback(); conn.close(); return None
+                serial=used+1
+            if serial is None and item["rarity"] in ("comun","poco_comun"):
+                row=conn.execute("SELECT id,quantity FROM rpg_inventory WHERE user_id=? AND item_key=? AND serial_number IS NULL AND world_id=? AND equipped=0 AND locked=0 LIMIT 1 FOR UPDATE", (int(user_id),item_key,world)).fetchone()
+                if row:
+                    conn.execute("UPDATE rpg_inventory SET quantity=quantity+1 WHERE id=?", (int(row["id"]),))
+                else:
+                    conn.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES (?,?,?,NULL,1,0,0,?,?,?,?)", (int(user_id),int(character_id),item_key,now,source,world,int(user_id)))
+            else:
+                conn.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES (?,?,?,?,1,0,0,?,?,?,?)", (int(user_id),int(character_id),item_key,serial,now,source,world,int(user_id)))
+            conn.commit(); conn.close()
+            return dict(item) | {"serial_number":serial, "world_id":world}
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def roll_rpg_drop(user_id, character_id, enemy_key):
+    # V2: los legendarios existen en la arquitectura, pero su probabilidad es deliberadamente diminuta.
+    x=random.random()
+    if x < 0.0015: key="espada_eclipse"
+    elif x < 0.012: key="colmillo_selene"
+    elif x < 0.075: key="anillo_carmesi"
+    elif x < 0.16: key="llave_oxidada"
+    elif x < 0.40: key="venda_viajero"
+    elif x < 0.78: key="colmillo_ceniza"
+    else: return None
+    item=grant_rpg_item(user_id,character_id,key,f"encuentro:{enemy_key}")
+    if item is None and key in ("espada_eclipse","colmillo_selene"):
+        return grant_rpg_item(user_id,character_id,"anillo_carmesi",f"encuentro:{enemy_key}")
+    return item
+
+
+def announce_rpg_drop(chat_id, user, item):
+    if not item: return
+    rarity=item["rarity"]; icon=RPG_RARITY_ICON.get(rarity,"⚪")
+    serial=item.get("serial_number")
+    limit=item.get("max_global_copies")
+    numbered=f" #{serial}/{limit}" if serial and limit else ""
+    who=user.get("first_name") or user.get("username") or "Un aventurero"
+    caption=f"{icon} DROP {rarity.replace('_',' ').upper()}\n\n{item['name']}{numbered}\n👤 Obtenido por: {who}\n\n{item['description']}"
+    media=item.get("animation_file_id") or item.get("image_file_id")
+    if rarity in ("ultra_raro","legendario","reliquia") and media:
+        if item.get("animation_file_id"): send_animation(chat_id,item["animation_file_id"],caption)
+        else: send_photo(chat_id,item["image_file_id"],caption)
+    else:
+        send_message(chat_id,caption, reply_markup={"inline_keyboard":[[{"text":"🔍 Examinar","callback_data":f"rpg_examine:{item['item_key']}"}]]})
+
+
+def examine_rpg_item(chat_id, user_id, item_key):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("""SELECT x.*, i.serial_number, i.quantity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.item_key=? AND i.world_id=? ORDER BY i.id DESC LIMIT 1""", (int(user_id),item_key,world)).fetchone()
+        conn.close()
+    if not row:
+        send_message(chat_id,"Ese objeto no está en tu inventario."); return
+    serial=f" #{row['serial_number']}/{row['max_global_copies']}" if row['serial_number'] and row['max_global_copies'] else ""
+    bonuses=[]
+    if int(row['atk_bonus']): bonuses.append(f"⚔️ ATK +{row['atk_bonus']}")
+    if int(row['def_bonus']): bonuses.append(f"🛡️ DEF +{row['def_bonus']}")
+    if int(row['hp_bonus']): bonuses.append(f"❤️ HP +{row['hp_bonus']}")
+    text=f"🔍 {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n\n{row['description']}"
+    if bonuses: text += "\n\n"+" · ".join(bonuses)
+    if int(row['quantity'])>1: text += f"\nCantidad: {row['quantity']}"
+    if row['image_file_id']:
+        send_photo(chat_id,row['image_file_id'],text)
+    else:
+        send_message(chat_id,text)
+
+
+def archive_and_reset_rpg_world():
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            worldrow=conn.execute("SELECT world_id FROM rpg_world_state WHERE singleton=1 FOR UPDATE").fetchone()
+            world=int(worldrow["world_id"] if worldrow else 1)
+            conn.execute("""INSERT INTO rpg_hall_of_fame(world_id,user_id,display_name,character_name,class_name,level,exp,legendary_count,archived_at)
+                SELECT ?, c.user_id, COALESCE(p.display_name,''), c.name, c.class_name, c.level, c.exp,
+                COALESCE((SELECT COUNT(*) FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=c.user_id AND i.world_id=? AND x.rarity IN ('legendario','reliquia')),0), ?
+                FROM characters c LEFT JOIN players p ON p.user_id=c.user_id WHERE c.is_active=1""", (world,world,now))
+            conn.execute("DELETE FROM rpg_battles")
+            conn.execute("DELETE FROM rpg_interactions")
+            conn.execute("DELETE FROM rpg_inventory")
+            conn.execute("DELETE FROM characters")
+            conn.execute("UPDATE rpg_world_state SET world_id=?, started_at=? WHERE singleton=1", (world+1,now))
+            conn.commit(); conn.close()
+            return world, world+1
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def hall_of_fame_text():
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT * FROM rpg_hall_of_fame ORDER BY world_id DESC, level DESC, exp DESC LIMIT 20").fetchall(); conn.close()
+    if not rows: return "🏛️ HÉROES LEGENDARIOS\n\nTodavía no ha terminado ninguna era."
+    lines=["🏛️ HÉROES LEGENDARIOS",""]
+    last=None
+    for r in rows:
+        if r["world_id"]!=last:
+            last=r["world_id"]; lines += [f"🌎 Mundo {last}"]
+        crown=" 👑" if int(r["legendary_count"] or 0)>0 else ""
+        lines.append(f"• {r['character_name']} — Nv. {r['level']} ({r['display_name']}){crown}")
+    return "\n".join(lines)
+
+
+def send_reset_panel(chat_id):
+    return send_message(chat_id,"☢️ REINICIO DE KIWRPG\n\nSolo Kiu puede ejecutar esta acción. Archiva la era actual en Héroes Legendarios y reinicia el mundo RPG.", reply_markup={"inline_keyboard":[[{"text":"☢️ Reiniciar KiwRPG","callback_data":"rpg_reset_begin"}]]})
+
+
+def handle_rpg_callback(query):
+    user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
+    telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("rpg_examine:"):
+        examine_rpg_item(chat_id,uid,data.split(":",1)[1])
+        return True
+    if not data.startswith("rpg_reset_"):
+        return False
+    if not is_owner(uid):
+        if chat_id: send_message(chat_id,"Ese botón es solo para Kiu. 😌")
+        return True
+    if data=="rpg_reset_begin":
+        if not RPG_RESET_PASSWORD:
+            send_message(chat_id,"⚠️ Falta configurar KIWRPG_RESET_PASSWORD en las variables de entorno de Render.")
+            return True
+        _reset_sessions[int(uid)]={"stage":"password","chat_id":int(chat_id),"expires":time.time()+120}
+        send_message(chat_id,"🔐 Escribe ahora la contraseña de reinicio. Tienes 2 minutos.\nNo la mostraré ni la guardaré.")
+        return True
+    if data=="rpg_reset_confirm":
+        st=_reset_sessions.get(int(uid)) or {}
+        if st.get("stage")!="confirm" or st.get("expires",0)<time.time():
+            send_message(chat_id,"La autorización expiró. Usa /reiniciarrpg otra vez."); return True
+        old,new=archive_and_reset_rpg_world(); _reset_sessions.pop(int(uid),None)
+        send_message(chat_id,f"☢️ KIWRPG HA SIDO REINICIADO\n\nEl Mundo {old} fue archivado en Héroes Legendarios.\n🌎 Comienza el Mundo {new}.\n\nUna nueva historia está por comenzar...")
+        return True
+    if data=="rpg_reset_cancel":
+        _reset_sessions.pop(int(uid),None); send_message(chat_id,"Reinicio cancelado. El mundo sigue vivo. 😌"); return True
+    return False
+
+
+def handle_reset_password_message(message, text):
+    uid=(message.get("from") or {}).get("id"); chat_id=(message.get("chat") or {}).get("id")
+    if not is_owner(uid): return False
+    st=_reset_sessions.get(int(uid))
+    if not st or st.get("stage")!="password": return False
+    if st.get("expires",0)<time.time():
+        _reset_sessions.pop(int(uid),None); send_message(chat_id,"La solicitud de reinicio expiró."); return True
+    if str(text).strip()!=RPG_RESET_PASSWORD:
+        _reset_sessions.pop(int(uid),None); send_message(chat_id,"❌ Contraseña incorrecta. Reinicio cancelado."); return True
+    st["stage"]="confirm"; st["expires"]=time.time()+120
+    send_message(chat_id,"⚠️ ÚLTIMA CONFIRMACIÓN\n\nEsto archivará la era actual y borrará el progreso jugable de KiwRPG.", reply_markup={"inline_keyboard":[[{"text":"☢️ SÍ, BORRAR TODO","callback_data":"rpg_reset_confirm"}],[{"text":"❌ Cancelar","callback_data":"rpg_reset_cancel"}]]})
+    return True
 
 # =========================================================
 # COMANDOS
@@ -3487,11 +3738,12 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V1\n\n"
+            "⚔️ KIWRPG — V2\n\n"
             "/encuentro — inicia un combate rápido\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — muestra tus objetos\n"
-            "/personaje — muestra tu personaje\n\n"
+            "/personaje — muestra tu personaje\n"
+            "/heroes — salón de eras anteriores\n\n"
             "En combate debes usar el dado REAL 🎲 de Telegram. Los números escritos no cuentan."
         )
         return True
@@ -3515,6 +3767,18 @@ def process_command(
     if command in ("/inventario", "/inv"):
         user_id = message.get("from", {}).get("id")
         send_message(chat_id, rpg_inventory_text(user_id))
+        return True
+
+    if command in ("/heroes", "/heroeslegendarios"):
+        send_message(chat_id, hall_of_fame_text())
+        return True
+
+    if command in ("/reiniciarrpg", "/reset_rpg"):
+        user_id=message.get("from",{}).get("id")
+        if not is_owner(user_id):
+            send_message(chat_id,"Ese comando es solo para Kiu. 😌")
+        else:
+            send_reset_panel(chat_id)
         return True
 
 
@@ -4683,6 +4947,11 @@ def process_update(
         ):
             return
 
+        callback_query = update.get("callback_query")
+        if callback_query:
+            handle_rpg_callback(callback_query)
+            return
+
         message = update.get(
             "message"
         )
@@ -4732,6 +5001,9 @@ def process_update(
             or message.get("caption")
             or ""
         ).strip()
+
+        if handle_reset_password_message(message, text):
+            return
 
         # Un dado solo afecta al RPG cuando existe un encuentro pendiente
         # para ESTE jugador en ESTE chat. Un número escrito jamás sustituye al dado.

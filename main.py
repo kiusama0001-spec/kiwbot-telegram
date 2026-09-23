@@ -196,15 +196,26 @@ executor = ThreadPoolExecutor(
 # SQLITE
 # =========================================================
 
-DB_PATH = os.getenv(
-    "DATABASE_PATH",
-    "kiwbot.db"
-)
+# Si defines DATABASE_PATH en Render, esa ruta manda.
+# Para persistencia real entre deploys/reinicios usa un Persistent Disk,
+# por ejemplo montado en /var/data y DATABASE_PATH=/var/data/kiwbot.db.
+DB_PATH = os.getenv("DATABASE_PATH", "").strip()
+
+if not DB_PATH:
+    DB_PATH = (
+        "/var/data/kiwbot.db"
+        if os.path.isdir("/var/data") and os.access("/var/data", os.W_OK)
+        else "kiwbot.db"
+    )
 
 db_lock = RLock()
 
 
 def get_db():
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
     conn = sqlite3.connect(
         DB_PATH,
         check_same_thread=False
@@ -2986,7 +2997,7 @@ def toggle_secret_blades(user_id, activate=True):
 
 def ensure_owner_secret_character(user):
     """Crea una sola vez el personaje secreto exclusivo de Kiu."""
-    if not user or not is_owner(user):
+    if not user or not is_owner(user.get("id")):
         return
 
     user_id = int(user.get("id"))
@@ -3227,6 +3238,21 @@ def process_command(
             f"Clase: {normalize_rpg_class(class_input)}"
             f"{active_text}"
             + (f"\n\n{character_card(char)}" if char else "")
+        )
+        return True
+
+    if command == "/dbstatus":
+        user = message.get("from", {})
+        if not is_owner(user.get("id")):
+            send_message(chat_id, "Este comando es exclusivo de Kiu.")
+            return True
+
+        persistent = os.path.abspath(DB_PATH).startswith("/var/data/")
+        send_message(
+            chat_id,
+            "🗄️ ESTADO DE DATOS\n\n"
+            f"Base persistente: {'SÍ' if persistent else 'NO'}\n"
+            f"Modo: {'Render Persistent Disk' if persistent else 'almacenamiento local temporal'}"
         )
         return True
 

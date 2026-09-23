@@ -325,6 +325,35 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                user_id INTEGER PRIMARY KEY,
+                display_name TEXT NOT NULL DEFAULT '',
+                kiwons INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS kiwon_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                actor_id INTEGER,
+                other_user_id INTEGER,
+                chat_id INTEGER,
+                note TEXT DEFAULT '',
+                created_at INTEGER NOT NULL
+            )
+        """)
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_kiwon_transactions_user
+            ON kiwon_transactions(user_id, created_at DESC)
+        """)
+
         conn.commit()
         conn.close()
 
@@ -2479,6 +2508,237 @@ recuerdos que no aparezcan aquí.
         )
 
 
+
+# =========================================================
+# ECONOMÍA — KIWONS
+# =========================================================
+
+def player_display_name(user):
+    if not user:
+        return "Jugador"
+    uid = user.get("id", 0)
+    if is_owner(uid):
+        return OWNER_NAME
+    special = special_display_name(uid)
+    if special:
+        return special
+    return (
+        user.get("first_name")
+        or user.get("username")
+        or f"Jugador {uid}"
+    )
+
+
+def ensure_player(user):
+    """Crea/actualiza la cuenta global del jugador. No crea personajes RPG."""
+    if not user or not user.get("id"):
+        return None
+
+    user_id = int(user["id"])
+    name = player_display_name(user)
+    now = int(time.time())
+
+    with db_lock:
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO players (user_id, display_name, kiwons, created_at, updated_at)
+            VALUES (?, ?, 0, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                display_name=excluded.display_name,
+                updated_at=excluded.updated_at
+        """, (user_id, name, now, now))
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM players WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+        conn.close()
+    return row
+
+
+def get_kiwons(user_id):
+    with db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT kiwons FROM players WHERE user_id=?",
+            (int(user_id),)
+        ).fetchone()
+        conn.close()
+    return int(row["kiwons"]) if row else 0
+
+
+def change_kiwons(user_id, amount, kind, actor_id=None, other_user_id=None,
+                   chat_id=None, note="", allow_negative=False):
+    """Movimiento atómico. Devuelve (ok, nuevo_saldo, mensaje_error)."""
+    user_id = int(user_id)
+    amount = int(amount)
+    now = int(time.time())
+
+    with db_lock:
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT kiwons FROM players WHERE user_id=?",
+                (user_id,)
+            ).fetchone()
+
+            if row is None:
+                conn.execute("""
+                    INSERT INTO players
+                    (user_id, display_name, kiwons, created_at, updated_at)
+                    VALUES (?, ?, 0, ?, ?)
+                """, (user_id, f"Jugador {user_id}", now, now))
+                balance = 0
+            else:
+                balance = int(row["kiwons"])
+
+            new_balance = balance + amount
+            if not allow_negative and new_balance < 0:
+                conn.rollback()
+                conn.close()
+                return False, balance, "Saldo insuficiente."
+
+            conn.execute("""
+                UPDATE players
+                SET kiwons=?, updated_at=?
+                WHERE user_id=?
+            """, (new_balance, now, user_id))
+
+            conn.execute("""
+                INSERT INTO kiwon_transactions
+                (user_id, amount, kind, actor_id, other_user_id, chat_id, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id, amount, str(kind), actor_id, other_user_id,
+                chat_id, str(note or "")[:200], now
+            ))
+
+            conn.commit()
+            conn.close()
+            return True, new_balance, ""
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+
+
+def transfer_kiwons(sender_id, receiver_id, amount, chat_id=None):
+    sender_id = int(sender_id)
+    receiver_id = int(receiver_id)
+    amount = int(amount)
+
+    if sender_id == receiver_id:
+        return False, "No puedes transferirte Kiwons a ti mismo."
+    if amount <= 0:
+        return False, "La cantidad debe ser mayor que cero."
+
+    now = int(time.time())
+
+    with db_lock:
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+
+            sender = conn.execute(
+                "SELECT kiwons FROM players WHERE user_id=?",
+                (sender_id,)
+            ).fetchone()
+            receiver = conn.execute(
+                "SELECT kiwons FROM players WHERE user_id=?",
+                (receiver_id,)
+            ).fetchone()
+
+            sender_balance = int(sender["kiwons"]) if sender else 0
+            if sender_balance < amount:
+                conn.rollback()
+                conn.close()
+                return False, f"No tienes suficientes Kiwons. Saldo: {sender_balance:,} KW."
+
+            if receiver is None:
+                conn.execute("""
+                    INSERT INTO players
+                    (user_id, display_name, kiwons, created_at, updated_at)
+                    VALUES (?, ?, 0, ?, ?)
+                """, (receiver_id, f"Jugador {receiver_id}", now, now))
+
+            conn.execute(
+                "UPDATE players SET kiwons=kiwons-?, updated_at=? WHERE user_id=?",
+                (amount, now, sender_id)
+            )
+            conn.execute(
+                "UPDATE players SET kiwons=kiwons+?, updated_at=? WHERE user_id=?",
+                (amount, now, receiver_id)
+            )
+
+            conn.execute("""
+                INSERT INTO kiwon_transactions
+                (user_id, amount, kind, actor_id, other_user_id, chat_id, note, created_at)
+                VALUES (?, ?, 'transfer_out', ?, ?, ?, '', ?)
+            """, (sender_id, -amount, sender_id, receiver_id, chat_id, now))
+
+            conn.execute("""
+                INSERT INTO kiwon_transactions
+                (user_id, amount, kind, actor_id, other_user_id, chat_id, note, created_at)
+                VALUES (?, ?, 'transfer_in', ?, ?, ?, '', ?)
+            """, (receiver_id, amount, sender_id, sender_id, chat_id, now))
+
+            conn.commit()
+            new_balance = sender_balance - amount
+            conn.close()
+            return True, new_balance
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+
+
+def resolve_target_for_economy(message, text):
+    """Primero reply/text_mention/@username. Nunca confía en nombres para permisos."""
+    target = target_user(message)
+    if target:
+        return target
+
+    parts = text.split()
+    for part in parts[1:]:
+        if part.startswith("@"):
+            cached = find_cached_user(message["chat"]["id"], part)
+            if cached:
+                return {
+                    "id": cached["user_id"],
+                    "username": cached["username"],
+                    "first_name": cached["first_name"],
+                    "last_name": cached["last_name"]
+                }
+    return None
+
+
+def parse_positive_amount(text):
+    for token in text.replace(",", "").split()[1:]:
+        if token.startswith("@"):
+            continue
+        if token.isdigit():
+            value = int(token)
+            if value > 0:
+                return value
+    return None
+
+
+def kiwon_ranking(chat_id, limit=10):
+    with db_lock:
+        conn = get_db()
+        rows = conn.execute("""
+            SELECT p.user_id, p.display_name, p.kiwons
+            FROM players p
+            INNER JOIN chat_users cu ON cu.user_id=p.user_id
+            WHERE cu.chat_id=?
+            ORDER BY p.kiwons DESC, p.updated_at ASC
+            LIMIT ?
+        """, (int(chat_id), int(limit))).fetchall()
+        conn.close()
+    return rows
+
+
 # =========================================================
 # COMANDOS
 # =========================================================
@@ -2610,6 +2870,157 @@ def process_command(
                 "Y no, decir 'soy Kiu' no cambia eso. 😌"
             )
 
+        return True
+
+
+    # -----------------------------------------------------
+    # KIWONS / PERFIL DE JUGADOR
+    # -----------------------------------------------------
+
+    if command in ("/saldo", "/kiwons"):
+        user = message.get("from", {})
+        ensure_player(user)
+        balance = get_kiwons(user.get("id"))
+        send_message(
+            chat_id,
+            f"🪙 {player_display_name(user)}\nSaldo: {balance:,} Kiwons (KW)"
+        )
+        return True
+
+    if command == "/perfil":
+        user = message.get("from", {})
+        ensure_player(user)
+        balance = get_kiwons(user.get("id"))
+        send_message(
+            chat_id,
+            "👤 PERFIL DE JUGADOR\n\n"
+            f"Jugador: {player_display_name(user)}\n"
+            f"Kiwons: {balance:,} KW\n"
+            "Personaje actual: todavía no creado\n"
+            "RPG: próximamente"
+        )
+        return True
+
+    if command in ("/transferir", "/pagar"):
+        user = message.get("from", {})
+        ensure_player(user)
+        target = resolve_target_for_economy(message, text)
+        amount = parse_positive_amount(text)
+
+        if not target or not target.get("id"):
+            send_message(
+                chat_id,
+                "Responde al mensaje de la persona o menciona su @usuario.\n"
+                "Ejemplo: /transferir 500 @usuario"
+            )
+            return True
+
+        if not amount:
+            send_message(chat_id, "Indica una cantidad válida. Ejemplo: /transferir 500 @usuario")
+            return True
+
+        ensure_player(target)
+        ok, result = transfer_kiwons(
+            user.get("id"),
+            target.get("id"),
+            amount,
+            chat_id
+        )
+
+        if not ok:
+            send_message(chat_id, result)
+            return True
+
+        send_message(
+            chat_id,
+            f"💸 Transferencia realizada.\n"
+            f"{amount:,} Kiwons → {player_display_name(target)}\n"
+            f"Tu saldo: {result:,} KW"
+        )
+        return True
+
+    if command in ("/darkiwons", "/darskiwons", "/addkiwons"):
+        if not is_admin(message):
+            send_message(chat_id, "Solo un administrador puede entregar Kiwons.")
+            return True
+
+        target = resolve_target_for_economy(message, text)
+        amount = parse_positive_amount(text)
+        if not target or not target.get("id") or not amount:
+            send_message(
+                chat_id,
+                "Uso: responde a un usuario con /darkiwons 500\n"
+                "o usa /darkiwons 500 @usuario"
+            )
+            return True
+
+        ensure_player(target)
+        ok, balance, error = change_kiwons(
+            target.get("id"),
+            amount,
+            "admin_grant",
+            actor_id=message.get("from", {}).get("id"),
+            chat_id=chat_id
+        )
+        if not ok:
+            send_message(chat_id, error)
+            return True
+
+        send_message(
+            chat_id,
+            f"🪙 {player_display_name(target)} recibió {amount:,} Kiwons.\n"
+            f"Saldo: {balance:,} KW"
+        )
+        return True
+
+    if command in ("/quitarkiwons", "/removekiwons"):
+        if not is_admin(message):
+            send_message(chat_id, "Solo un administrador puede retirar Kiwons.")
+            return True
+
+        target = resolve_target_for_economy(message, text)
+        amount = parse_positive_amount(text)
+        if not target or not target.get("id") or not amount:
+            send_message(
+                chat_id,
+                "Uso: responde a un usuario con /quitarkiwons 500\n"
+                "o usa /quitarkiwons 500 @usuario"
+            )
+            return True
+
+        ensure_player(target)
+        current = get_kiwons(target.get("id"))
+        remove_amount = min(amount, current)
+        ok, balance, error = change_kiwons(
+            target.get("id"),
+            -remove_amount,
+            "admin_remove",
+            actor_id=message.get("from", {}).get("id"),
+            chat_id=chat_id
+        )
+        if not ok:
+            send_message(chat_id, error)
+            return True
+
+        send_message(
+            chat_id,
+            f"🪙 Se retiraron {remove_amount:,} Kiwons a {player_display_name(target)}.\n"
+            f"Saldo: {balance:,} KW"
+        )
+        return True
+
+    if command in ("/ranking", "/topkiwons"):
+        rows = kiwon_ranking(chat_id, 10)
+        if not rows:
+            send_message(chat_id, "Todavía no hay jugadores con Kiwons en este chat.")
+            return True
+
+        lines = ["🏆 RANKING DE KIWONS", ""]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, row in enumerate(rows, 1):
+            icon = medals[i - 1] if i <= 3 else f"{i}."
+            lines.append(f"{icon} {row['display_name']} — {int(row['kiwons']):,} KW")
+        send_message(chat_id, "\n".join(lines))
         return True
 
 
@@ -3105,6 +3516,16 @@ KiwBot:
 /kiwmute
 /kiwunmute
 
+Kiwons:
+/perfil
+/saldo
+/transferir
+/ranking
+
+Administración de Kiwons:
+/darkiwons
+/quitarkiwons
+
 Durante /kiwmute sigo aquí...
 pero oficialmente estoy castigada por arrogante.
 """
@@ -3504,6 +3925,9 @@ def process_update(
             chat_id,
             user
         )
+
+        # Cuenta global de jugador. Jugador y personaje RPG son entidades separadas.
+        ensure_player(user)
 
         text = (
             message.get("text")

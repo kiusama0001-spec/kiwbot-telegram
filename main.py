@@ -640,7 +640,7 @@ def init_db():
         cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS heal_percent BIGINT NOT NULL DEFAULT 0")
 
         # Metadatos V3 para los objetos ya existentes.
-        cur.execute("UPDATE rpg_items SET equip_slot='accesorio', allowed_classes='Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', min_level=1 WHERE item_key='anillo_carmesi'")
+        cur.execute("UPDATE rpg_items SET item_type='accesorio', equip_slot='accesorio', allowed_classes='Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', min_level=1 WHERE item_key='anillo_carmesi'")
         cur.execute("UPDATE rpg_items SET equip_slot='arma', allowed_classes='Pícaro,The Cleaner', min_level=3 WHERE item_key='colmillo_selene'")
         cur.execute("UPDATE rpg_items SET equip_slot='arma', allowed_classes='Guerrero,Paladín,The Cleaner', min_level=8 WHERE item_key='espada_eclipse'")
         cur.execute("UPDATE rpg_items SET heal_percent=20 WHERE item_key='pocion_menor'")
@@ -678,6 +678,42 @@ def init_db():
             cur.execute("""INSERT INTO rpg_items
                 (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(item_key) DO NOTHING""", (*it, now_seed))
+
+        # KiwRPG V5.2 — materiales y equipo base.
+        v52_items = [
+            # materiales
+            ('fragmento_hierro','Fragmento de Hierro','comun','material','Metal gastado útil para futuras recetas y el Mercader Errante.',0,0,0,None,1,'','',1),
+            ('madera_vieja','Madera Vieja','comun','material','Madera resistente recuperada de armas, cofres y ruinas.',0,0,0,None,1,'','',1),
+            ('retazo_tela','Retazo de Tela','comun','material','Tela aprovechable para vendas, guantes y armaduras ligeras.',0,0,0,None,1,'','',1),
+            ('cristal_opaco','Cristal Opaco','poco_comun','material','Cristal con una débil carga mágica. El mercader suele interesarse por ellos.',0,0,0,None,1,'','',1),
+            ('nucleo_sombra','Núcleo de Sombra','raro','material','Un núcleo condensado por criaturas poco comunes. Conserva una energía inquietante.',0,0,0,None,1,'','',1),
+            # equipo común
+            ('espada_recluta','Espada de Recluta','comun','arma','Una hoja sencilla, fiable para comenzar una aventura.',1,0,0,None,1,'arma','Guerrero,Paladín,The Cleaner',1),
+            ('baston_aprendiz','Bastón de Aprendiz','comun','arma','Canaliza magia básica sin demasiadas pretensiones.',1,0,0,None,1,'arma','Mago',1),
+            ('dagas_desgastadas','Dagas Desgastadas','comun','arma','Un par de hojas rápidas que todavía tienen pelea.',1,0,0,None,1,'arma','Pícaro',1),
+            ('arco_cazador','Arco del Cazador','comun','arma','Arco ligero y estable para disparos precisos.',1,0,0,None,1,'arma','Arquero',1),
+            ('capucha_viajero','Capucha del Viajero','comun','casco','Protección ligera para caminos poco amables.',0,1,0,None,1,'casco','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',1),
+            ('pechera_cuero','Pechera de Cuero','comun','armadura','Cuero endurecido que absorbe parte de los golpes.',0,1,5,None,1,'armadura','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',1),
+            ('guantes_viajero','Guantes del Viajero','comun','guantes','Mejoran el agarre y ofrecen protección básica.',0,1,0,None,1,'guantes','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',1),
+            ('botas_sendero','Botas del Sendero','comun','botas','Hechas para sobrevivir caminos largos y terrenos hostiles.',0,0,5,None,1,'botas','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',1),
+            # equipo poco común / raro
+            ('hoja_ceniza','Hoja de Ceniza','poco_comun','arma','Una hoja ennegrecida que conserva calor en el filo.',2,0,0,None,1,'arma','Guerrero,Pícaro,The Cleaner',2),
+            ('foco_cristal','Foco de Cristal','poco_comun','arma','Cristal tallado para amplificar conjuros ofensivos.',2,0,0,None,1,'arma','Mago',2),
+            ('escudo_guardian','Escudo del Guardián','poco_comun','accesorio','Un escudo compacto marcado por innumerables impactos.',0,2,5,None,1,'accesorio','Guerrero,Paladín',2),
+            ('botas_niebla','Botas de la Niebla','poco_comun','botas','Parecen volver más ligero cada paso.',1,0,5,None,1,'botas','Pícaro,Arquero,The Cleaner',2),
+            ('yelmo_carmesi','Yelmo Carmesí','raro','casco','Una pieza de guerra teñida por antiguas batallas.',1,2,5,None,1,'casco','Guerrero,Paladín,The Cleaner',4),
+            ('tunica_arcana','Túnica Arcana','raro','armadura','Tejido encantado que protege sin entorpecer la magia.',2,1,10,None,1,'armadura','Mago',4),
+            ('guantes_acechador','Guantes del Acechador','raro','guantes','Diseñados para atacar antes de ser visto.',2,1,0,None,1,'guantes','Pícaro,Arquero,The Cleaner',4),
+        ]
+        for key,name,rarity,itype,desc,atk,defn,hp,limit,trade,slot,classes,minlvl in v52_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(item_key) DO UPDATE SET
+                  name=excluded.name, rarity=excluded.rarity, item_type=excluded.item_type, description=excluded.description,
+                  atk_bonus=excluded.atk_bonus, def_bonus=excluded.def_bonus, hp_bonus=excluded.hp_bonus,
+                  tradeable=excluded.tradeable, equip_slot=excluded.equip_slot, allowed_classes=excluded.allowed_classes, min_level=excluded.min_level
+            """, (key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,classes,minlvl))
 
         conn.commit()
         conn.close()
@@ -4067,14 +4103,32 @@ def use_inventory_item(chat_id,user_id,inventory_id):
         except Exception: conn.rollback(); conn.close(); raise
     send_message(chat_id,f"🧪 Usaste {row['name']}.\n❤️ +{restored} HP → {newhp}/{maxhp}")
 
+def materials_text(user_id):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""SELECT x.name,x.rarity,SUM(i.quantity) quantity
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=? AND x.item_type='material'
+            GROUP BY x.item_key,x.name,x.rarity ORDER BY x.rarity,x.name""",(int(user_id),world)).fetchall()
+        conn.close()
+    if not rows: return "🧱 MATERIALES\n\nTodavía no tienes materiales."
+    lines=["🧱 MATERIALES",""]
+    for r in rows: lines.append(f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']} ×{r['quantity']}")
+    lines += ["","Se usarán para el Mercader Errante, intercambios y futuras recetas."]
+    return "\n".join(lines)
+
+
 def equipment_text(user_id):
     char=get_active_character(user_id)
     if not char: return "No tienes un personaje activo."
     with db_lock:
         conn=get_db(); rows=conn.execute("""SELECT i.id,x.name,x.equip_slot,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.character_id=? AND i.equipped=1 ORDER BY x.equip_slot""",(int(char['id']),)).fetchall(); conn.close()
     slots={"arma":"⚔️ Arma","casco":"🪖 Casco","armadura":"🛡️ Armadura","guantes":"🧤 Guantes","botas":"👢 Botas","accesorio":"💍 Accesorio"}; by={r['equip_slot']:r for r in rows}
+    eff=effective_character_stats(char); b=eff['bonus']
     lines=[f"🎽 EQUIPO — {char['name']}",""]
     for k,label in slots.items(): lines.append(f"{label}: {by[k]['name'] if k in by else '—'}")
+    lines += ["",f"📊 BONOS: ⚔️ +{b['atk']} · 🛡️ +{b['defense']} · ❤️ +{b['hp']}",f"TOTAL: ⚔️ {eff['atk']} · 🛡️ {eff['defense']} · ❤️ {eff['max_hp']}"]
     return "\n".join(lines)
 
 # =========================================================
@@ -4127,42 +4181,43 @@ def grant_rpg_item(user_id, character_id, item_key, source="drop"):
 
 
 def roll_rpg_drop(user_id, character_id, enemy_key, encounter_rarity="normal"):
-    """Loot V5.1: la rareza del ENCUENTRO altera la tabla, no solo el aspecto."""
+    """Loot V5.2: materiales + equipo; la rareza del encuentro manda sobre la tabla."""
     rarity=str(encounter_rarity or "normal")
     source=f"encuentro:{enemy_key}:{rarity}"
 
-    # RARO: al menos un objeto raro. ULTRA: intenta Ultra Raro. LEGENDARIO:
-    # no regala automáticamente equipo legendario; conserva su prestigio global.
+    # Apariciones especiales conservan recompensas especiales.
     if rarity == "rare":
-        key=random.choice(["anillo_carmesi","llave_oxidada"])
-        return grant_rpg_item(user_id,character_id,key,source)
+        pool=["anillo_carmesi","llave_oxidada","yelmo_carmesi","tunica_arcana","guantes_acechador","nucleo_sombra"]
+        return grant_rpg_item(user_id,character_id,random.choice(pool),source)
     if rarity == "ultra":
         item=grant_rpg_item(user_id,character_id,"colmillo_selene",source)
         if item: return item
-        return grant_rpg_item(user_id,character_id,random.choice(["anillo_carmesi","llave_oxidada"]),source)
+        return grant_rpg_item(user_id,character_id,random.choice(["yelmo_carmesi","tunica_arcana","guantes_acechador"]),source)
     if rarity == "legendary":
-        # 5% dentro de una aparición de 0.05% => ~1 oportunidad de espada / 40,000 encuentros,
-        # y además Espada del Eclipse conserva su límite global de copias.
         if random.random() < 0.05:
             item=grant_rpg_item(user_id,character_id,"espada_eclipse",source)
             if item: return item
         item=grant_rpg_item(user_id,character_id,"colmillo_selene",source)
         if item: return item
-        return grant_rpg_item(user_id,character_id,random.choice(["anillo_carmesi","llave_oxidada"]),source)
+        return grant_rpg_item(user_id,character_id,random.choice(["anillo_carmesi","nucleo_sombra"]),source)
 
     x=random.random()
     if rarity == "uncommon":
-        if x < 0.08: key="anillo_carmesi"
-        elif x < 0.18: key="llave_oxidada"
-        elif x < 0.58: key="venda_viajero"
-        elif x < 0.90: key="colmillo_ceniza"
+        # 90% de obtener algo: mejores materiales y posibilidad real de equipo.
+        if x < .18: key=random.choice(["hoja_ceniza","foco_cristal","escudo_guardian","botas_niebla"])
+        elif x < .35: key="cristal_opaco"
+        elif x < .55: key=random.choice(["fragmento_hierro","madera_vieja","retazo_tela"])
+        elif x < .70: key="venda_viajero"
+        elif x < .82: key=random.choice(["espada_recluta","baston_aprendiz","dagas_desgastadas","arco_cazador","capucha_viajero","pechera_cuero","guantes_viajero","botas_sendero"])
+        elif x < .90: key="colmillo_ceniza"
         else: return None
     else:
-        # Normal: sin legendarios/ultras directos. Esos vienen de apariciones especiales.
-        if x < 0.035: key="anillo_carmesi"
-        elif x < 0.075: key="llave_oxidada"
-        elif x < 0.30: key="venda_viajero"
-        elif x < 0.70: key="colmillo_ceniza"
+        # Normal: principalmente materiales; el equipo cae, pero no a cada rato.
+        if x < .22: key=random.choice(["fragmento_hierro","madera_vieja","retazo_tela"])
+        elif x < .34: key="colmillo_ceniza"
+        elif x < .45: key="venda_viajero"
+        elif x < .53: key=random.choice(["espada_recluta","baston_aprendiz","dagas_desgastadas","arco_cazador","capucha_viajero","pechera_cuero","guantes_viajero","botas_sendero"])
+        elif x < .56: key="cristal_opaco"
         else: return None
     return grant_rpg_item(user_id,character_id,key,source)
 
@@ -4173,7 +4228,12 @@ def announce_rpg_drop(chat_id, user, item):
     serial=item.get("serial_number")
     limit=item.get("max_global_copies")
     numbered=f" #{serial}/{limit}" if serial and limit else ""
-    who=user.get("first_name") or user.get("username") or "Un aventurero"
+    who=user.get("first_name") or user.get("username")
+    if not who and user.get("id"):
+        with db_lock:
+            conn=get_db(); prow=conn.execute("SELECT display_name FROM players WHERE user_id=?",(int(user["id"]),)).fetchone(); conn.close()
+        who=(prow["display_name"] if prow and prow.get("display_name") else None)
+    who=who or "Un aventurero"
     caption=f"{icon} DROP {rarity.replace('_',' ').upper()}\n\n{item['name']}{numbered}\n👤 Obtenido por: {who}\n\n{item['description']}"
     media=item.get("animation_file_id") or item.get("image_file_id")
     if rarity in ("ultra_raro","legendario","reliquia") and media:
@@ -4441,11 +4501,12 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V4\n\n"
-            "/encuentro — inicia un combate rápido\n"
+            "⚔️ KIWRPG — V5.2\n\n"
+            "/encuentro — combate y apariciones por rareza\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — objetos con botones\n"
-            "/equipo — equipo actual\n"
+            "/materiales — materiales reunidos\n"
+            "/equipo — equipo y estadísticas totales\n"
             "/personaje — muestra tu personaje\n"
             "/heroes — salón de eras anteriores\n\n"
             "En combate elige tus movimientos con botones. KiwBot lanza el dado REAL 🎲 de Telegram automáticamente."
@@ -4486,6 +4547,11 @@ def process_command(
                 serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
                 kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
             send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
+        return True
+
+    if command in ("/materiales", "/mats"):
+        user_id=message.get("from",{}).get("id")
+        send_message(chat_id,materials_text(user_id))
         return True
 
     if command in ("/equipo", "/equipamiento"):

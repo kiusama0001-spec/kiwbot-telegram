@@ -3552,7 +3552,7 @@ def send_one_winged_angel_finisher(chat_id):
     if cached:
         return send_animation(chat_id,cached,caption)
     # El GIF va junto al main.py en Render. Tras el primer envío guardamos el file_id de Telegram.
-    gif_path = Path(__file__).with_name("one_winged_angel.gif")
+    gif_path = Path(__file__).with_name("one_winged_angel.mp4")
     if not gif_path.exists() or not TELEGRAM_API:
         return send_message(chat_id,caption)
     try:
@@ -3560,7 +3560,7 @@ def send_one_winged_angel_finisher(chat_id):
             resp=TELEGRAM_SESSION.post(
                 f"{TELEGRAM_API}/sendAnimation",
                 data={"chat_id":str(chat_id),"caption":caption},
-                files={"animation":("one_winged_angel.gif",fh,"image/gif")},
+                files={"animation":("one_winged_angel.mp4",fh,"video/mp4")},
                 timeout=TELEGRAM_TIMEOUT
             )
         payload=resp.json() if resp.ok else {}

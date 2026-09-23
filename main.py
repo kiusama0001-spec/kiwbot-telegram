@@ -314,6 +314,17 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS named_facts (
+                owner_id INTEGER NOT NULL,
+                subject TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(owner_id, subject, relation)
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -949,6 +960,106 @@ def canonical_fact_key(raw):
     }
     return aliases.get(k, k)
 
+
+
+def save_named_fact(owner_id, subject, relation, value):
+    subject = _norm_local(subject).strip(" .!?")
+    relation = _norm_local(relation).strip(" .!?")
+    value = re.sub(r"\s+", " ", str(value or "")).strip(" .!?")
+    if not subject or not relation or not value:
+        return False
+    with db_lock:
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO named_facts (owner_id, subject, relation, fact_value, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(owner_id, subject, relation)
+            DO UPDATE SET fact_value=excluded.fact_value, updated_at=excluded.updated_at
+        """, (int(owner_id), subject, relation, value, int(time.time())))
+        conn.commit()
+        conn.close()
+    return True
+
+
+def get_named_fact(owner_id, subject, relation="es"):
+    subject = _norm_local(subject).strip(" .!?")
+    relation = _norm_local(relation).strip(" .!?")
+    with db_lock:
+        conn = get_db()
+        row = conn.execute("""
+            SELECT fact_value FROM named_facts
+            WHERE owner_id=? AND subject=? AND relation=?
+        """, (int(owner_id), subject, relation)).fetchone()
+        conn.close()
+    return row["fact_value"] if row else None
+
+
+def extract_named_fact(text, speaker_id):
+    """Aprende hechos arbitrarios: 'Kalu es...', 'los admin de mi grupo son...'."""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw or raw.startswith("/") or "?" in raw:
+        return None
+
+    # Quita "recuerda/recurda..." si existe.
+    raw = re.sub(
+        r"^(?:recuerda|recurda|recorda|recuérdame|recuerdame)\s+(?:que\s+)?",
+        "", raw, flags=re.I
+    ).strip()
+
+    # Lista/grupo: "los admin de mi grupo son A, B y C"
+    m = re.match(r"^(?:los|las)\s+(.+?)\s+son\s+(.+)$", raw, re.I)
+    if m:
+        subject = m.group(1).strip()
+        return int(speaker_id), subject, "son", m.group(2).strip(" .!?")
+
+    # Entidad: "Kalu es una Kalutiesa..."
+    m = re.match(r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_ -]{2,60}?)\s+es\s+(.+)$", raw, re.I)
+    if m:
+        subject = m.group(1).strip()
+        # Evita capturar "mi anime favorito es..." como entidad.
+        if not _norm_local(subject).startswith(("mi ", "el ", "la ", "tu amo", "kiu")):
+            return int(speaker_id), subject, "es", m.group(2).strip(" .!?")
+    return None
+
+
+def answer_named_fact(speaker_id, text):
+    """Consulta hechos arbitrarios sin depender de coincidencia difusa."""
+    q = _norm_local(text).strip(" ?!.")
+
+    # "qué es Kalu", "Kalu qué es", "quién es Kalu"
+    patterns = [
+        r"^(?:que|quien)\s+es\s+(.+)$",
+        r"^(.+?)\s+(?:que|quien)\s+es$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, q, re.I)
+        if m:
+            subject = m.group(1).strip()
+            # No interferir con identidad del Amo / del propio usuario.
+            if subject not in ("tu amo", "amo", "yo"):
+                value = get_named_fact(speaker_id, subject, "es")
+                if value:
+                    return f"{subject.title()} es {value}."
+
+    # "quiénes son (los) admin de mi grupo"
+    m = re.match(r"^quienes?\s+son\s+(?:los\s+|las\s+)?(.+)$", q, re.I)
+    if m:
+        subject = m.group(1).strip()
+        value = get_named_fact(speaker_id, subject, "son")
+        if value:
+            return f"{subject.capitalize()} son {value}."
+
+        # tolera admin/adm/administradores y artículos.
+        aliases = [subject]
+        if "admin" in subject:
+            aliases += [subject.replace("admin", "adm"), subject.replace("admin", "administradores")]
+        if "adm " in subject or subject.startswith("adm"):
+            aliases += [subject.replace("adm", "admin")]
+        for alias in aliases:
+            value = get_named_fact(speaker_id, alias, "son")
+            if value:
+                return f"{subject.capitalize()} son {value}."
+    return None
 
 def extract_structured_fact(text, speaker_id):
     """Entiende hechos tipo 'mi X es Y', 'soy hombre' y 'el X de tu amo es Y'."""
@@ -2060,7 +2171,8 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
 
     # Primero consulta hechos estructurados; luego la memoria textual antigua.
     structured_answer = answer_structured_fact(chat_id, user_id, text)
-    remembered_answer = structured_answer
+    named_answer = answer_named_fact(user_id, text)
+    remembered_answer = structured_answer or named_answer
     if not remembered_answer:
         remembered_answer = answer_from_long_term_memory(chat_id, user_id, text)
 
@@ -3565,6 +3677,11 @@ def process_update(
             fact_owner, fact_key, fact_value = structured_fact
             save_user_fact(fact_owner, fact_key, fact_value)
 
+        named_fact = extract_named_fact(fact_text, user_id)
+        if named_fact:
+            named_owner, named_subject, named_relation, named_value = named_fact
+            save_named_fact(named_owner, named_subject, named_relation, named_value)
+
         # Memoria automática textual (compatibilidad con recuerdos anteriores).
         auto_memory = extract_automatic_memory(text, user_id)
         preference_memory = extract_preference_memory(text) if is_owner(user_id) else ""
@@ -3583,6 +3700,16 @@ def process_update(
             # Si la frase contiene un dato personal reconocible, la normalizamos.
             # Ej.: "recuerda le voy al Club América" -> "Le va a Club América".
             canonical_memory = extract_automatic_memory(explicit_memory, user_id) or explicit_memory
+
+            explicit_named = extract_named_fact(explicit_memory, user_id)
+            if explicit_named:
+                eno, esub, erel, eval_ = explicit_named
+                save_named_fact(eno, esub, erel, eval_)
+
+            explicit_structured = extract_structured_fact(explicit_memory, user_id)
+            if explicit_structured:
+                eowner, ekey, eval_ = explicit_structured
+                save_user_fact(eowner, ekey, eval_)
 
             # La memoria personal se asocia al ID real del usuario.
             # En el caso de Kiu queda disponible en todos los grupos.

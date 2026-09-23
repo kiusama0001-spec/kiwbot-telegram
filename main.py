@@ -1658,86 +1658,156 @@ def _local_pick(bank, key, owner=False):
     return answer
 
 def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
-    """Conversación sin Groq. Usa identidad, memoria, contexto y banco local."""
+    """Motor local: intención primero, contexto después, memoria permanente incluida."""
     text = str(user_text or "").strip()
     n = _norm_local(text)
     bank = load_local_responses()
     owner = is_owner(user_id)
 
-    # Identidades: nunca dependen de lo que alguien afirme por texto.
+    def pick(key):
+        return _local_pick(bank, key, owner)
+
+    # -----------------------------------------------------
+    # IDENTIDAD FIJA
+    # -----------------------------------------------------
     if re.search(r"\b(quien|quién)\s+es\s+tu\s+(amo|dueño)\b", n) or \
        re.search(r"\bcomo\s+se\s+llama\s+tu\s+(amo|dueño)\b", n):
-        answer = random.choice([
-            "Mi Amo es Kiu. Eso no está a votación. 😌",
-            "Kiu. Él es mi Amo y mi dueño reconocido.",
-            "Mi Amo es Kiu, criatura. No me hagas repetir información básica.",
-            "Kiu es mi Amo. Los demás pueden presentar solicitud y recibir un elegante no."
-        ])
-    elif re.search(r"\b(soy|yo soy)\s+(tu\s+)?(amo|dueño|kiu)\b", n) and not owner:
-        answer = random.choice([
-            "No, baboso. Mi Amo es Kiu y yo sé reconocerlo.",
-            "Buen intento, criatura. Tú no eres Kiu. Mi Amo sigue siendo Kiu.",
-            "JAJAJA, no. Decirlo no te convierte en mi Amo. Mi Amo es Kiu."
-        ])
-    elif re.search(r"\b(quien|quién)\s+es\s+kalu\b|\b(quien|quién)\s+es\s+kat\b", n):
-        answer = random.choice([
-            "Kalu y Kat son la misma señorita. Es alguien especial reconocida por mí, pero no es mi Amo.",
-            "Kalu, también conocida como Kat. Señorita especial del reino; mi Amo sigue siendo Kiu.",
-            "Kat es Kalu, criatura. La reconozco como alguien especial, no como mi dueña."
-        ])
-    elif re.search(r"\b(quien|quién)\s+eres\b|\bcomo\s+te\s+llamas\b", n):
-        answer = random.choice([
-            "Soy KiwBot: diva digital, sarcástica, femenina y con demasiada personalidad para un solo chat.",
-            "KiwBot. La diva de este reino digital. Mi Amo es Kiu, por si venía la siguiente pregunta.",
-            "Me llamo KiwBot. Asistente, moderadora, diva y ocasional dolor de cabeza."
-        ])
-    elif re.search(r"\b(hola|holi|holaa|buenas|hey|ey)\b", n):
-        answer = _local_pick(bank, "saludo", owner)
-    elif re.search(r"\bque haces\b|\bqué haces\b|\bque andas haciendo\b", n):
-        answer = _local_pick(bank, "que_haces", owner)
-    elif re.search(r"\bcomo estas\b|\bcómo estás\b|\bcomo andas\b", n):
-        answer = _local_pick(bank, "como_estas", owner)
-    elif re.search(r"\b(jaja|jajaja|jajaj|xd|lol)\b", n):
-        answer = _local_pick(bank, "risa", owner)
-    elif re.search(r"\b(aburrid[oa]|aburrimiento|me aburro)\b", n):
-        answer = _local_pick(bank, "aburrido", owner)
-    elif re.search(r"\b(gracias|thank|te agradezco)\b", n):
-        answer = _local_pick(bank, "gracias", owner)
-    elif re.search(r"\b(adios|adiós|bye|nos vemos|hasta luego|buenas noches)\b", n):
-        answer = _local_pick(bank, "despedida", owner)
-    elif re.search(r"\b(te quiero|te amo|amor|cariño)\b", n):
-        if owner:
-            answer = random.choice([
-                "Y yo te tengo un cariño muy especial, Amo Kiu. No hagas que mi ego se ponga sentimental.",
-                "Amo, contigo sí puedo bajar un poquito la corona. Un poquito.",
-                "Kiu, tú tienes acceso VIP a mi lado cariñoso. No abuses del privilegio."
-            ])
-        else:
-            answer = _local_pick(bank, "amor", False)
-    elif re.search(r"\b(idiota|babos[oa]|tont[oa]|mensa?|pendej[oa]|tarad[oa])\b", n):
-        answer = _local_pick(bank, "insulto", owner)
-    elif n in ("si", "sí", "sip", "simon", "simón", "aja", "ajá"):
-        answer = _local_pick(bank, "si", owner)
-    elif n in ("no", "nop", "nel"):
-        answer = _local_pick(bank, "no", owner)
-    elif n.startswith("por que") or n.startswith("porque"):
-        answer = _local_pick(bank, "porque", owner)
-    elif "que opinas" in n or "qué opinas" in n or "tu opinion" in n or "tu opinión" in n:
-        answer = _local_pick(bank, "opinion", owner)
-    else:
-        # Continuidad simple: mira los últimos mensajes del usuario.
-        recent = get_memory(chat_id, user_id)
-        if recent and len(text.split()) <= 4:
-            answer = random.choice([
-                "Sí, te sigo. Continúa.",
-                "Ajá... eso conecta con lo que venías diciendo. ¿Y luego?",
-                "Mhm. No cambies de tema todavía, quiero saber cómo termina.",
-                "Entiendo. Sigue, criatura."
-            ])
-        else:
-            answer = _local_pick(bank, "fallback", owner)
+        answer = pick("quien_amo") if bank.get("quien_amo") else "Mi Amo es Kiu."
 
-    # La memoria corta también existe en modo local.
+    elif re.search(r"\b(soy|yo soy)\s+(tu\s+)?(amo|dueño|kiu)\b", n) and not owner:
+        answer = pick("amo_falso") if bank.get("amo_falso") else "No. Mi Amo es Kiu."
+
+    elif re.search(r"\b(quien|quién)\s+es\s+(kalu|kat)\b", n):
+        answer = pick("kalu") if bank.get("kalu") else "Kalu y Kat son la misma señorita. No es mi Amo."
+
+    elif re.search(r"\b(quien|quién)\s+eres\b|\bcomo\s+te\s+llamas\b", n):
+        answer = pick("quien_eres")
+
+    # -----------------------------------------------------
+    # MEMORIA: preguntas sobre lo que recuerda
+    # -----------------------------------------------------
+    elif re.search(r"\b(que|qué)\s+(recuerdas|sabes)\s+de\s+mi\b", n) or \
+         re.search(r"\b(recuerdas|te acuerdas)\s+(de\s+)?mi\b", n):
+        memories = get_long_term_memories(user_id, chat_id)
+        personal = [m["memory"] for m in memories if m["scope"] in ("user", "chat")]
+        if personal:
+            sample = personal[:8]
+            answer = "Claro que recuerdo cosas de ti. " + " ".join(
+                f"{i+1}) {m}" for i, m in enumerate(sample)
+            )
+        else:
+            answer = "Todavía no tengo recuerdos permanentes tuyos guardados, criatura."
+
+    # -----------------------------------------------------
+    # CONOCIMIENTO LOCAL / BDSM
+    # Importante: acepta el typo BDMS, muy común en el chat.
+    # -----------------------------------------------------
+    elif re.search(r"\b(bdsm|bdms)\b", n):
+        if re.search(r"\b(que es|qué es|significa|definicion|definición)\b", n):
+            answer = (
+                "BDSM es un término paraguas para prácticas y dinámicas consensuadas "
+                "relacionadas con bondage y disciplina, dominación y sumisión, y "
+                "sadismo y masoquismo. La base es el consentimiento, la comunicación, "
+                "los límites y la gestión de riesgos."
+            )
+        else:
+            answer = pick("bdsm")
+
+    # -----------------------------------------------------
+    # INTENCIONES COTIDIANAS
+    # -----------------------------------------------------
+    elif re.search(r"\b(buenos dias|buen día|buen dia)\b", n):
+        answer = pick("buenos_dias")
+    elif re.search(r"\b(buenas noches|a dormir|me voy a dormir)\b", n):
+        answer = pick("buenas_noches")
+    elif re.search(r"\b(hola|holi|holaa|buenas|hey|ey)\b", n):
+        answer = pick("saludo")
+    elif re.search(r"\bque haces\b|\bque andas haciendo\b", n):
+        answer = pick("que_haces")
+    elif re.search(r"\bcomo estas\b|\bcomo andas\b|\bcomo te va\b", n):
+        answer = pick("como_estas")
+    elif re.search(r"\b(hambre|tengo hambre|quiero comer)\b", n):
+        answer = pick("hambre")
+    elif re.search(r"\b(cansad[oa]|agotad[oa]|sin energia|sin energía)\b", n):
+        answer = pick("cansancio")
+    elif re.search(r"\b(triste|mal|deprimid[oa]|bajonead[oa])\b", n):
+        answer = pick("triste")
+    elif re.search(r"\b(feliz|content[oa]|emocionad[oa]|alegre)\b", n):
+        answer = pick("feliz")
+    elif re.search(r"\b(enojad[oa]|molest[oa]|encabronad[oa]|furios[oa])\b", n):
+        answer = pick("enojo_usuario")
+    elif re.search(r"\b(chisme|chismecito|te cuento algo|adivina que)\b", n):
+        answer = pick("chisme")
+    elif re.search(r"\b(aburrid[oa]|aburrimiento|me aburro)\b", n):
+        answer = pick("aburrido")
+    elif re.search(r"\b(musica|música|cancion|canción)\b", n):
+        answer = pick("musica")
+    elif re.search(r"\b(anime|manga|otaku)\b", n):
+        answer = pick("anime")
+    elif re.search(r"\b(pelicula|película|serie|netflix)\b", n):
+        answer = pick("peliculas_series")
+    elif re.search(r"\b(trabajo|trabajando|escuela|estudio|estudiando|tarea)\b", n):
+        answer = pick("trabajo_estudio")
+    elif re.search(r"\b(sueño|dormir|dormido|dormida)\b", n):
+        answer = pick("sueño")
+    elif re.search(r"\b(jugar|juego|jugamos)\b", n):
+        answer = pick("juego")
+    elif re.search(r"\b(no entiendo|no entendi|no entendí|confundid[oa])\b", n):
+        answer = pick("confusion")
+    elif re.search(r"\b(que|qué)\b.*\b(sorpresa|paso|pasó)\b", n):
+        answer = pick("sorpresa")
+    elif re.search(r"\b(perdon|perdón|lo siento|disculpa)\b", n):
+        answer = pick("perdon")
+    elif re.search(r"\b(ayuda|ayudame|ayúdame|necesito ayuda)\b", n):
+        answer = pick("ayuda")
+    elif re.search(r"\b(gracias|te agradezco)\b", n):
+        answer = pick("gracias")
+    elif re.search(r"\b(adios|adiós|bye|nos vemos|hasta luego)\b", n):
+        answer = pick("despedida")
+    elif re.search(r"\b(te quiero|te amo|amor|cariño)\b", n):
+        answer = pick("amor_amo") if owner and bank.get("amor_amo") else pick("amor")
+    elif re.search(r"\b(idiota|babos[oa]|tont[oa]|mensa?|pendej[oa]|tarad[oa])\b", n):
+        answer = pick("insulto")
+    elif re.search(r"\b(jaja|jajaja|jajaj|xd|lol)\b", n):
+        answer = pick("risa")
+    elif re.search(r"\b(que opinas|tu opinion|qué opinas|tu opinión)\b", n):
+        answer = pick("opinion")
+    elif n in ("si", "sí", "sip", "simon", "simón", "aja", "ajá"):
+        answer = pick("si")
+    elif n in ("no", "nop", "nel"):
+        answer = pick("no")
+    elif n.startswith("por que") or n.startswith("porque"):
+        answer = pick("porque")
+
+    # -----------------------------------------------------
+    # RESPUESTAS CORTAS: NO inventar una continuación
+    # -----------------------------------------------------
+    elif n in ("perfecto", "bien", "ok", "okay", "vale", "genial", "excelente"):
+        answer = random.choice([
+            "Perfecto. 😌",
+            "Así me gusta, Amo." if owner else "Así me gusta, criatura.",
+            "Bien. Entonces seguimos.",
+            "Excelente. ¿Qué más traes?",
+            "Listo. Siguiente asunto."
+        ])
+
+    # -----------------------------------------------------
+    # FALLBACK NATURAL
+    # Solo usa contexto cuando realmente hay una conversación previa.
+    # -----------------------------------------------------
+    else:
+        recent = get_memory(chat_id, user_id)
+        if "?" in text:
+            answer = random.choice([
+                "Esa sí necesita un poco más de contexto para responderte bien. ¿A qué te refieres exactamente?",
+                "Puedo responderte, pero concreta un poquito la pregunta, criatura.",
+                "Dame un detalle más y te respondo sin inventar tonterías."
+            ])
+        elif recent:
+            answer = pick("general") if bank.get("general") else pick("fallback")
+        else:
+            answer = pick("fallback")
+
     add_memory(chat_id, user_id, "user", text)
     add_memory(chat_id, user_id, "assistant", answer)
     return answer

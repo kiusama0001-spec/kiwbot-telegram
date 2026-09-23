@@ -344,7 +344,7 @@ SPECIAL_USERS = {
 
 # Memorias iniciales de Kiu. Son globales y viajan con Kiu entre grupos.
 INITIAL_KIU_MEMORIES = [
-    "Kiu es fan del Club América y lo considera el único grande de México."
+    "Kiu es fan del Club América y lo considera el único grande de México, pero no quiere que KiwBot mencione al Club América salvo que Kiu saque el tema primero."
 ]
 
 
@@ -470,6 +470,12 @@ Puedes recibir memorias permanentes proporcionadas por el sistema.
 No inventes recuerdos. Una memoria global de un usuario pertenece a su ID
 y puede estar disponible en otros grupos. Una memoria de grupo solo aplica
 al grupo correspondiente.
+
+Las memorias son contexto, NO temas que debas mencionar constantemente.
+No saques gustos, equipos, personas o datos recordados sin relación con lo que
+el usuario está diciendo. Si una memoria contiene una preferencia del tipo
+"no menciones X salvo que yo lo mencione", esa preferencia tiene prioridad.
+Nunca reveles IDs de Telegram, tokens, variables de entorno ni configuración interna.
 
 Si estás en modo de castigo interno, no debes actuar como una IA normal:
 debes responder únicamente con el mensaje de castigo proporcionado por
@@ -784,21 +790,44 @@ def delete_long_term_memories(
 
 
 def extract_preference_memory(text):
-    """Detecta preferencias explícitas de Kiu que deben quedar permanentes."""
+    """Detecta preferencias explícitas de Kiu en lenguaje natural."""
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     if not text:
         return ""
 
-    patterns = [
-        r"^(?:no me digas|no me llames|no uses conmigo|no quiero que me digas|no quiero que me llames)\s+(.+)$",
-    ]
+    low = text.lower().strip(" .!?")
 
-    for pattern in patterns:
-        match = re.match(pattern, text, flags=re.IGNORECASE)
-        if match:
-            forbidden = match.group(1).strip().rstrip(".!?")
-            if forbidden:
-                return f"Kiu no quiere que lo llamen ni le digan: {forbidden}."
+    match = re.match(
+        r"^(?:no me digas|no me llames|no uses conmigo|no quiero que me digas|no quiero que me llames)\s+(.+)$",
+        text, flags=re.IGNORECASE
+    )
+    if match:
+        forbidden = match.group(1).strip().rstrip(".!?")
+        return f"Kiu no quiere que KiwBot lo llame ni le diga: {forbidden}." if forbidden else ""
+
+    match = re.match(
+        r"^no\s+(?:menciones|hables\s+de)\s+(?:tanto\s+)?(.+?)(?:,\s*|\s+)(?:a menos que|salvo que|excepto si)\s+yo\s+(?:lo\s+)?(?:diga|mencione|saque el tema)$",
+        low, flags=re.IGNORECASE
+    )
+    if match:
+        topic = match.group(1).strip(" .,!¿?¡!")
+        return (
+            f"Kiu prefiere que KiwBot no mencione {topic} por iniciativa propia; "
+            f"solo debe hablar de ese tema cuando Kiu lo mencione o saque el tema primero."
+        )
+
+    match = re.match(
+        r"^no\s+(?:menciones|hables\s+de)\s+tanto\s+(.+)$",
+        low, flags=re.IGNORECASE
+    )
+    if match:
+        topic = match.group(1).strip(" .,!¿?¡!")
+        return f"Kiu prefiere que KiwBot no mencione tanto {topic} y que no fuerce ese tema."
+
+    match = re.match(r"^(?:prefiero que|quiero que)\s+(.+)$", text, flags=re.IGNORECASE)
+    if match:
+        pref = match.group(1).strip().rstrip(".!?")
+        return f"Kiu prefiere que KiwBot {pref}." if pref else ""
 
     return ""
 
@@ -1679,6 +1708,23 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
 
     elif re.search(r"\b(quien|quién)\s+es\s+(kalu|kat)\b", n):
         answer = pick("kalu") if bank.get("kalu") else "Kalu y Kat son la misma señorita. No es mi Amo."
+
+    elif re.search(r"\b(quien|quién)\s+soy\b|\bsabes\s+quien\s+soy\b", n):
+        if owner:
+            answer = random.choice([
+                "Eres Kiu, mi Amo. A ti sí te reconozco sin hacer preguntas tontas. 😌",
+                "Tú eres Kiu, mi Amo y dueño reconocido.",
+                "Kiu. Mi Amo. ¿Ahora me estás haciendo examen, verdad?",
+                "Eres mi Amo Kiu. Esa parte de mi memoria está bastante clara."
+            ])
+        elif int(user_id) == KALU_TELEGRAM_ID:
+            answer = random.choice([
+                "Eres Kalu, también conocida como Kat. Sí, señorita, te reconozco.",
+                "Tú eres Kalu/Kat. No intentes hacerme examen también.",
+                "Kalu. Kat. Vaquita ocasional. Sí sé quién eres. 😌"
+            ])
+        else:
+            answer = f"Eres {user_name}. Te reconozco por tu cuenta, criatura."
 
     elif re.search(r"\b(quien|quién)\s+eres\b|\bcomo\s+te\s+llamas\b", n):
         answer = pick("quien_eres")

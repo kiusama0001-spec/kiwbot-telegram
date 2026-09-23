@@ -598,6 +598,19 @@ def init_db():
             ALTER TABLE rpg_inventory ADD COLUMN IF NOT EXISTS original_owner_id BIGINT
         """)
 
+        # KiwRPG V3: equipo, requisitos y consumibles.
+        cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS equip_slot TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS allowed_classes TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS min_level BIGINT NOT NULL DEFAULT 1")
+        cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS heal_percent BIGINT NOT NULL DEFAULT 0")
+
+        # Metadatos V3 para los objetos ya existentes.
+        cur.execute("UPDATE rpg_items SET equip_slot='accesorio', allowed_classes='Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', min_level=1 WHERE item_key='anillo_carmesi'")
+        cur.execute("UPDATE rpg_items SET equip_slot='arma', allowed_classes='Pícaro,The Cleaner', min_level=3 WHERE item_key='colmillo_selene'")
+        cur.execute("UPDATE rpg_items SET equip_slot='arma', allowed_classes='Guerrero,Paladín,The Cleaner', min_level=8 WHERE item_key='espada_eclipse'")
+        cur.execute("UPDATE rpg_items SET heal_percent=20 WHERE item_key='pocion_menor'")
+        cur.execute("UPDATE rpg_items SET heal_percent=20 WHERE item_key='venda_viajero'")
+
         now_seed = int(time.time())
         cur.execute("""
             INSERT INTO rpg_items
@@ -1733,7 +1746,7 @@ def send_message(
     return result
 
 
-def send_photo(chat_id, photo, caption="", reply_to_message_id=None):
+def send_photo(chat_id, photo, caption="", reply_to_message_id=None, reply_markup=None):
     if not photo:
         return None
     data = {"chat_id": chat_id, "photo": photo}
@@ -1741,6 +1754,8 @@ def send_photo(chat_id, photo, caption="", reply_to_message_id=None):
         data["caption"] = str(caption)[:1024]
     if reply_to_message_id:
         data["reply_parameters"] = {"message_id": reply_to_message_id}
+    if reply_markup:
+        data["reply_markup"] = reply_markup
     return telegram("sendPhoto", data)
 
 
@@ -3202,21 +3217,16 @@ def set_active_character(user_id, name):
 def character_card(row):
     if not row:
         return "Sin personaje activo."
-
-    extra = ""
-    if row["name"].lower() == "one winged angel":
-        blades_on = bool(row["secret_blades_active"])
-        if blades_on:
-            extra = "\n🗡️🗡️ Estado especial: Doble Espada — ACTIVO"
-
-    return (
-        f"🧙 Personaje: {row['name']}\n"
-        f"⚔️ Clase: {row['class_name']}\n"
-        f"⭐ Nivel: {row['level']} | EXP: {row['exp']}\n"
-        f"❤️ HP: {row['hp']}/{row['max_hp']}\n"
-        f"🗡️ ATK: {row['atk']} | 🛡️ DEF: {row['defense']}"
-        f"{extra}"
-    )
+    eff=effective_character_stats(row)
+    b=eff["bonus"]
+    extra=""
+    if row["name"].lower()=="one winged angel" and bool(row["secret_blades_active"]):
+        extra="\n🗡️🗡️ Estado especial: Doble Espada — ACTIVO"
+    atk=f"{row['atk']}"+(f" + {b['atk']} = {eff['atk']}" if b['atk'] else "")
+    deff=f"{row['defense']}"+(f" + {b['defense']} = {eff['defense']}" if b['defense'] else "")
+    maxhp=eff['max_hp']
+    hpbonus=f" (+{b['hp']} equipo)" if b['hp'] else ""
+    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {row['level']} | EXP: {row['exp']}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{extra}")
 
 
 
@@ -3407,7 +3417,8 @@ def handle_rpg_dice(message):
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?", (int(chat_id),int(user_id)))
                 conn.commit(); conn.close(); return True
 
-            raw = (int(char["atk"]) * 0.65) + (value * 2.5) - (int(battle["enemy_def"]) * 0.45)
+            eff=effective_character_stats(char)
+            raw = (eff["atk"] * 0.65) + (value * 2.5) - (int(battle["enemy_def"]) * 0.45)
             damage=max(1, int(round(raw)))
             if value == 6:
                 damage=max(damage+1, int(round(damage*1.5)))
@@ -3437,7 +3448,7 @@ def handle_rpg_dice(message):
                 return True
 
             enemy_roll=random.randint(1,6)
-            enemy_raw=(int(battle["enemy_atk"])*0.65)+(enemy_roll*2.0)-(int(char["defense"])*0.50)
+            enemy_raw=(int(battle["enemy_atk"])*0.65)+(enemy_roll*2.0)-(eff["defense"]*0.50)
             enemy_damage=max(1,int(round(enemy_raw)))
             char_hp=max(0,int(char["hp"])-enemy_damage)
             conn.execute("UPDATE rpg_battles SET enemy_hp=?, updated_at=? WHERE chat_id=? AND user_id=?", (enemy_hp,int(time.time()),int(chat_id),int(user_id)))
@@ -3458,7 +3469,7 @@ def handle_rpg_dice(message):
                     f"🎲 {value}\n{crit}⚔️ Causas {damage} de daño.\n"
                     f"❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
-                    f"❤️ {char['name']}: {char_hp}/{char['max_hp']}\n\n"
+                    f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\n"
                     "Tu turno. Lanza 🎲 otra vez.",
                     reply_to_message_id=message.get("message_id"))
             return True
@@ -3484,6 +3495,155 @@ def rpg_inventory_text(user_id):
         lines.append(f"{rarity.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}")
     return "\n".join(lines)
 
+
+# =========================================================
+# KIWRPG V3 — CREADOR INTERACTIVO / EQUIPO / CONSUMIBLES
+# =========================================================
+
+_character_creation_sessions = {}
+RPG_CLASS_INFO = {
+    "guerrero": {"label":"Guerrero","emoji":"⚔️","desc":"Resistente y estable. Buen equilibrio entre ataque y defensa.","ability":"Golpe poderoso"},
+    "mago": {"label":"Mago","emoji":"🔮","desc":"Mucho daño, poca resistencia. Su magia podrá ignorar parte de la defensa.","ability":"Penetración mágica"},
+    "picaro": {"label":"Pícaro","emoji":"🗡️","desc":"Ágil y agresivo. Especialista en críticos y evasión.","ability":"Crítico / evasión"},
+    "paladin": {"label":"Paladín","emoji":"🛡️","desc":"La clase más resistente, con defensa y recuperación.","ability":"Bloqueo / recuperación"},
+    "arquero": {"label":"Arquero","emoji":"🏹","desc":"Preciso y consistente. Premia las buenas tiradas.","ability":"Precisión"},
+}
+
+def creator_keyboard():
+    return {"inline_keyboard":[
+        [{"text":"⚔️ Guerrero","callback_data":"rpg_class:guerrero"},{"text":"🔮 Mago","callback_data":"rpg_class:mago"}],
+        [{"text":"🗡️ Pícaro","callback_data":"rpg_class:picaro"},{"text":"🛡️ Paladín","callback_data":"rpg_class:paladin"}],
+        [{"text":"🏹 Arquero","callback_data":"rpg_class:arquero"}],
+        [{"text":"❌ Cancelar","callback_data":"rpg_create_cancel"}],
+    ]}
+
+def send_character_creator(chat_id, user_id):
+    _character_creation_sessions[int(user_id)]={"stage":"class","chat_id":int(chat_id),"expires":time.time()+600}
+    return send_message(chat_id,"🧙 CREACIÓN DE PERSONAJE\n\nElige una clase para ver sus estadísticas, especialidad y estilo antes de decidir.",reply_markup=creator_keyboard())
+
+def class_preview(chat_id, user_id, key):
+    info=RPG_CLASS_INFO.get(key)
+    if not info: return
+    stats=get_rpg_class_stats(info["label"])
+    _character_creation_sessions[int(user_id)]={"stage":"preview","chat_id":int(chat_id),"class_key":key,"expires":time.time()+600}
+    send_message(chat_id,f"{info['emoji']} {info['label'].upper()}\n\n❤️ HP: {stats['hp']}\n🗡️ ATK: {stats['atk']}\n🛡️ DEF: {stats['defense']}\n\n✨ Especialidad: {info['ability']}\n{info['desc']}",reply_markup={"inline_keyboard":[[{"text":f"✅ Elegir {info['label']}","callback_data":f"rpg_choose:{key}"}],[{"text":"◀️ Ver otras clases","callback_data":"rpg_create_back"}]]})
+
+def handle_character_name_message(message, text):
+    uid=(message.get("from") or {}).get("id"); chat_id=(message.get("chat") or {}).get("id")
+    if not uid: return False
+    st=_character_creation_sessions.get(int(uid)) or {}
+    if st.get("stage")!="name": return False
+    if st.get("expires",0)<time.time():
+        _character_creation_sessions.pop(int(uid),None); send_message(chat_id,"La creación expiró. Usa /crear_personaje para empezar otra vez."); return True
+    name=re.sub(r"\s+"," ",str(text or "")).strip()
+    if text.startswith("/"): return False
+    if not name or len(name)<2 or len(name)>24 or not re.match(r"^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 _-]+$",name):
+        send_message(chat_id,"Ese nombre no es válido. Usa entre 2 y 24 caracteres: letras, números, espacios, - o _."); return True
+    key=st["class_key"]; info=RPG_CLASS_INFO[key]; stats=get_rpg_class_stats(info["label"])
+    st.update({"stage":"confirm","name":name,"expires":time.time()+600}); _character_creation_sessions[int(uid)]=st
+    send_message(chat_id,f"✨ ¿Crear este personaje?\n\n🧙 {name}\n{info['emoji']} {info['label']}\n❤️ {stats['hp']} HP · 🗡️ {stats['atk']} ATK · 🛡️ {stats['defense']} DEF",reply_markup={"inline_keyboard":[[{"text":"✅ Crear personaje","callback_data":"rpg_create_confirm"}],[{"text":"↩️ Cambiar clase","callback_data":"rpg_create_back"},{"text":"❌ Cancelar","callback_data":"rpg_create_cancel"}]]})
+    return True
+
+def equipped_bonuses(character_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute("""SELECT COALESCE(SUM(x.atk_bonus),0) atk, COALESCE(SUM(x.def_bonus),0) defense, COALESCE(SUM(x.hp_bonus),0) hp FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.character_id=? AND i.equipped=1""",(int(character_id),)).fetchone(); conn.close()
+    return {"atk":int(row["atk"] or 0),"defense":int(row["defense"] or 0),"hp":int(row["hp"] or 0)}
+
+def effective_character_stats(char):
+    b=equipped_bonuses(char["id"])
+    return {"atk":int(char["atk"])+b["atk"],"defense":int(char["defense"])+b["defense"],"max_hp":int(char["max_hp"])+b["hp"],"bonus":b}
+
+def item_compatibility(item, char):
+    if not item.get("equip_slot"): return False,"Este objeto no es equipable."
+    allowed=[x.strip().lower() for x in str(item.get("allowed_classes") or "").split(",") if x.strip()]
+    if allowed and str(char["class_name"]).lower() not in allowed: return False,f"Solo: {item['allowed_classes']}"
+    if int(char["level"])<int(item.get("min_level") or 1): return False,f"Requiere nivel {item['min_level']}"
+    return True,"Compatible"
+
+def inventory_item_row(user_id, inventory_id):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db(); row=conn.execute("""SELECT i.*,x.name,x.rarity,x.item_type,x.description,x.atk_bonus,x.def_bonus,x.hp_bonus,x.max_global_copies,x.image_file_id,x.animation_file_id,x.tradeable,x.equip_slot,x.allowed_classes,x.min_level,x.heal_percent FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=?""",(int(inventory_id),int(user_id),world)).fetchone(); conn.close()
+    return dict(row) if row else None
+
+def item_action_keyboard(row, char):
+    buttons=[]
+    if row.get("equip_slot"):
+        ok,_=item_compatibility(row,char)
+        if int(row.get("equipped") or 0): buttons.append({"text":"📤 Desequipar","callback_data":f"rpg_unequip:{row['id']}"})
+        elif ok: buttons.append({"text":"⚔️ Equipar","callback_data":f"rpg_equip:{row['id']}"})
+        else: buttons.append({"text":"🔒 No compatible","callback_data":f"rpg_locked:{row['id']}"})
+    if int(row.get("heal_percent") or 0)>0: buttons.append({"text":"🧪 Usar","callback_data":f"rpg_use:{row['id']}"})
+    keyboard=[]
+    if buttons: keyboard.append(buttons[:2]);
+    if len(buttons)>2: keyboard.append(buttons[2:])
+    return {"inline_keyboard":keyboard} if keyboard else None
+
+def show_inventory_item(chat_id,user_id,inventory_id):
+    row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
+    if not row or not char: return send_message(chat_id,"No encontré ese objeto o personaje.")
+    serial=f" #{row['serial_number']}/{row['max_global_copies']}" if row.get('serial_number') and row.get('max_global_copies') else ""
+    bonuses=[]
+    if int(row['atk_bonus']): bonuses.append(f"⚔️ ATK +{row['atk_bonus']}")
+    if int(row['def_bonus']): bonuses.append(f"🛡️ DEF +{row['def_bonus']}")
+    if int(row['hp_bonus']): bonuses.append(f"❤️ HP +{row['hp_bonus']}")
+    ok,reason=item_compatibility(row,char) if row.get('equip_slot') else (True,'')
+    text=f"🔍 {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n\n{row['description']}"
+    if bonuses: text+="\n\n"+" · ".join(bonuses)
+    if row.get('equip_slot'): text+=f"\n🎯 Slot: {row['equip_slot'].title()}\n📈 Nivel requerido: {row['min_level']}\n"+("✅ Compatible" if ok else f"🔒 {reason}")
+    if int(row.get('equipped') or 0): text+="\n🟢 EQUIPADO"
+    kb=item_action_keyboard(row,char)
+    if row.get('image_file_id'): send_photo(chat_id,row['image_file_id'],text,reply_markup=kb)
+    else: send_message(chat_id,text,reply_markup=kb)
+
+def equip_inventory_item(chat_id,user_id,inventory_id):
+    row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
+    if not row or not char: return send_message(chat_id,"No encontré ese objeto.")
+    ok,reason=item_compatibility(row,char)
+    if not ok: return send_message(chat_id,f"❌ No puedes equipar {row['name']}.\n{reason}")
+    slot=row['equip_slot']; now=int(time.time())
+    with db_lock:
+        conn=get_db();
+        try:
+            conn.execute("UPDATE rpg_inventory i SET equipped=0 FROM rpg_items x WHERE i.item_key=x.item_key AND i.character_id=? AND i.equipped=1 AND x.equip_slot=?",(int(char['id']),slot))
+            conn.execute("UPDATE rpg_inventory SET equipped=1, character_id=? WHERE id=? AND user_id=?",(int(char['id']),int(inventory_id),int(user_id)))
+            conn.execute("UPDATE characters SET updated_at=? WHERE id=?",(now,int(char['id']))); conn.commit(); conn.close()
+        except Exception: conn.rollback(); conn.close(); raise
+    send_message(chat_id,f"🟢 EQUIPADO\n\n{row['name']} → {slot.title()}")
+
+def unequip_inventory_item(chat_id,user_id,inventory_id):
+    row=inventory_item_row(user_id,inventory_id)
+    if not row: return send_message(chat_id,"No encontré ese objeto.")
+    with db_lock:
+        conn=get_db(); conn.execute("UPDATE rpg_inventory SET equipped=0 WHERE id=? AND user_id=?",(int(inventory_id),int(user_id))); conn.commit(); conn.close()
+    send_message(chat_id,f"📤 {row['name']} fue desequipado.")
+
+def use_inventory_item(chat_id,user_id,inventory_id):
+    row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
+    if not row or not char: return send_message(chat_id,"No encontré ese objeto.")
+    heal=int(row.get('heal_percent') or 0)
+    if heal<=0: return send_message(chat_id,"Ese objeto no se puede usar de esa forma.")
+    eff=effective_character_stats(char); maxhp=eff['max_hp']; current=int(char['hp'])
+    if current>=maxhp: return send_message(chat_id,"❤️ Ya tienes la vida completa.")
+    amount=max(1,round(maxhp*heal/100)); newhp=min(maxhp,current+amount); restored=newhp-current
+    with db_lock:
+        conn=get_db();
+        try:
+            if int(row['quantity'])>1: conn.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),))
+            else: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),))
+            conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(newhp,int(time.time()),int(char['id']))); conn.commit(); conn.close()
+        except Exception: conn.rollback(); conn.close(); raise
+    send_message(chat_id,f"🧪 Usaste {row['name']}.\n❤️ +{restored} HP → {newhp}/{maxhp}")
+
+def equipment_text(user_id):
+    char=get_active_character(user_id)
+    if not char: return "No tienes un personaje activo."
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""SELECT i.id,x.name,x.equip_slot,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.character_id=? AND i.equipped=1 ORDER BY x.equip_slot""",(int(char['id']),)).fetchall(); conn.close()
+    slots={"arma":"⚔️ Arma","casco":"🪖 Casco","armadura":"🛡️ Armadura","guantes":"🧤 Guantes","botas":"👢 Botas","accesorio":"💍 Accesorio"}; by={r['equip_slot']:r for r in rows}
+    lines=[f"🎽 EQUIPO — {char['name']}",""]
+    for k,label in slots.items(): lines.append(f"{label}: {by[k]['name'] if k in by else '—'}")
+    return "\n".join(lines)
 
 # =========================================================
 # KIWRPG V2 — DROPS, OBJETOS, MUNDOS Y REINICIO
@@ -3632,6 +3792,47 @@ def send_reset_panel(chat_id):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data=="rpg_show_equipment":
+        send_message(chat_id,equipment_text(uid)); return True
+    if data=="rpg_show_inventory":
+        world=current_rpg_world()
+        with db_lock:
+            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
+        if not rows: send_message(chat_id,"🎒 INVENTARIO\n\nTodavía está vacío."); return True
+        kb=[]
+        for r in rows:
+            serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
+            kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
+        send_message(chat_id,"🎒 INVENTARIO\n\nToca un objeto para administrarlo.",reply_markup={"inline_keyboard":kb}); return True
+    if data.startswith("rpg_class:"):
+        class_preview(chat_id,uid,data.split(":",1)[1]); return True
+    if data.startswith("rpg_choose:"):
+        key=data.split(":",1)[1]
+        if key not in RPG_CLASS_INFO: return True
+        _character_creation_sessions[int(uid)]={"stage":"name","chat_id":int(chat_id),"class_key":key,"expires":time.time()+600}
+        send_message(chat_id,f"✏️ Elegiste {RPG_CLASS_INFO[key]['label']}.\nAhora escribe el nombre de tu personaje."); return True
+    if data=="rpg_create_back":
+        send_character_creator(chat_id,uid); return True
+    if data=="rpg_create_cancel":
+        _character_creation_sessions.pop(int(uid),None); send_message(chat_id,"Creación cancelada."); return True
+    if data=="rpg_create_confirm":
+        st=_character_creation_sessions.get(int(uid)) or {}
+        if st.get("stage")!="confirm" or st.get("expires",0)<time.time(): send_message(chat_id,"La creación expiró. Usa /crear_personaje."); return True
+        info=RPG_CLASS_INFO[st["class_key"]]; ok,result=create_character(uid,st["name"],info["label"]); _character_creation_sessions.pop(int(uid),None)
+        if not ok: send_message(chat_id,result); return True
+        char=get_active_character(uid)
+        send_message(chat_id,f"✨ Personaje creado: {st['name']}\nClase: {info['label']}"+(f"\n\n{character_card(char)}" if char and char['name'].lower()==st['name'].lower() else "\n\nPuedes seleccionarlo desde /personajes.")); return True
+    if data.startswith("rpg_item:"):
+        show_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
+    if data.startswith("rpg_equip:"):
+        equip_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
+    if data.startswith("rpg_unequip:"):
+        unequip_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
+    if data.startswith("rpg_use:"):
+        use_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
+    if data.startswith("rpg_locked:"):
+        row=inventory_item_row(uid,int(data.split(":",1)[1])); char=get_active_character(uid)
+        if row and char: send_message(chat_id,"🔒 "+item_compatibility(row,char)[1]); return True
     if data.startswith("rpg_examine:"):
         examine_rpg_item(chat_id,uid,data.split(":",1)[1])
         return True
@@ -3738,10 +3939,11 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V2\n\n"
+            "⚔️ KIWRPG — V3\n\n"
             "/encuentro — inicia un combate rápido\n"
             "/huir — abandona el encuentro actual\n"
-            "/inventario — muestra tus objetos\n"
+            "/inventario — objetos con botones\n"
+            "/equipo — equipo actual\n"
             "/personaje — muestra tu personaje\n"
             "/heroes — salón de eras anteriores\n\n"
             "En combate debes usar el dado REAL 🎲 de Telegram. Los números escritos no cuentan."
@@ -3766,7 +3968,23 @@ def process_command(
 
     if command in ("/inventario", "/inv"):
         user_id = message.get("from", {}).get("id")
-        send_message(chat_id, rpg_inventory_text(user_id))
+        world=current_rpg_world()
+        with db_lock:
+            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(user_id),world)).fetchall(); conn.close()
+        if not rows:
+            send_message(chat_id,"🎒 INVENTARIO\n\nTodavía está vacío.")
+        else:
+            lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."]
+            kb=[]
+            for r in rows:
+                serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
+                kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
+            send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
+        return True
+
+    if command in ("/equipo", "/equipamiento"):
+        user_id=message.get("from",{}).get("id")
+        send_message(chat_id,equipment_text(user_id))
         return True
 
     if command in ("/heroes", "/heroeslegendarios"):
@@ -3892,7 +4110,7 @@ def process_command(
                 f"ATK: {character['atk']} | DEF: {character['defense']}"
             )
         else:
-            rpg_text = "Personaje actual: ninguno\nUsa /crear_personaje Nombre Clase"
+            rpg_text = "Personaje actual: ninguno\nUsa /crear_personaje para abrir el creador interactivo"
 
         send_message(
             chat_id,
@@ -3906,35 +4124,8 @@ def process_command(
     if command in ("/crear_personaje", "/crearpersonaje"):
         user = message.get("from", {})
         ensure_player(user)
-        ensure_owner_secret_character(user)
-
-        parts = text.split()
-        if len(parts) < 3:
-            send_message(
-                chat_id,
-                "Uso: /crear_personaje Nombre Clase\n"
-                "Clases: Guerrero, Mago, Pícaro, Paladín, Arquero\n"
-                "Ejemplo: /crear_personaje Kael Guerrero"
-            )
-            return True
-
-        class_input = parts[-1]
-        name = " ".join(parts[1:-1]).strip()
-        ok, result = create_character(user.get("id"), name, class_input)
-
-        if not ok:
-            send_message(chat_id, result)
-            return True
-
-        active_text = "\nQuedó seleccionado como tu personaje activo." if result else ""
-        char = get_active_character(user.get("id")) if result else None
-        send_message(
-            chat_id,
-            f"✨ Personaje creado: {name}\n"
-            f"Clase: {normalize_rpg_class(class_input)}"
-            f"{active_text}"
-            + (f"\n\n{character_card(char)}" if char else "")
-        )
+        # V3: creador visual; The Cleaner sigue siendo clase exclusiva de Kiu.
+        send_character_creator(chat_id, user.get("id"))
         return True
 
     if command == "/dbstatus":
@@ -3956,7 +4147,7 @@ def process_command(
         user_id = message.get("from", {}).get("id")
         rows = get_characters(user_id)
         if not rows:
-            send_message(chat_id, "Todavía no tienes personajes. Usa /crear_personaje Nombre Clase")
+            send_message(chat_id, "Todavía no tienes personajes.", reply_markup={"inline_keyboard":[[{"text":"🧙 Crear personaje","callback_data":"rpg_create_back"}]]})
             return True
 
         lines = ["🧙 TUS PERSONAJES", ""]
@@ -4028,9 +4219,9 @@ def process_command(
         user_id = message.get("from", {}).get("id")
         char = get_active_character(user_id)
         if not char:
-            send_message(chat_id, "No tienes un personaje activo. Usa /crear_personaje Nombre Clase")
+            send_message(chat_id, "No tienes un personaje activo.", reply_markup={"inline_keyboard":[[{"text":"🧙 Crear personaje","callback_data":"rpg_create_back"}]]})
             return True
-        send_message(chat_id, character_card(char))
+        send_message(chat_id, character_card(char), reply_markup={"inline_keyboard":[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]})
         return True
 
     if command in ("/transferir", "/pagar"):
@@ -5003,6 +5194,8 @@ def process_update(
         ).strip()
 
         if handle_reset_password_message(message, text):
+            return
+        if handle_character_name_message(message, text):
             return
 
         # Un dado solo afecta al RPG cuando existe un encuentro pendiente

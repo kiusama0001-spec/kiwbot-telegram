@@ -834,6 +834,20 @@ def init_db():
             )
         """)
 
+        # KiwRPG V6.1 — mascotas y gacha por Colmillos de Ceniza.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pets_owned (
+                user_id BIGINT NOT NULL, pet_key TEXT NOT NULL, copies BIGINT NOT NULL DEFAULT 1,
+                equipped BIGINT NOT NULL DEFAULT 0, obtained_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id, pet_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pet_essence (
+                user_id BIGINT PRIMARY KEY, amount BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -4019,6 +4033,8 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 pen=float(ability.get("pen",0.0))
                 raw=(eff["atk"] * float(ability["power"]) * RPG_DICE_MULT[roll]) - (enemy_def * (1.0-pen) * 0.42)
                 damage=max(1,int(round(raw)))
+                pet_pct=_pet_bonus(user_id,"pve_damage")
+                if pet_pct: damage=max(1,int(round(damage*(1.0+pet_pct/100.0))))
                 if roll>=5 and ability.get("high_roll_bonus"):
                     damage=max(1,int(round(damage*(1.0+float(ability["high_roll_bonus"])))))
                 if ability.get("execute") and enemy_hp <= int(battle["enemy_max_hp"])*0.35:
@@ -4041,6 +4057,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 reward_mult=float(rarity_data["reward"])
                 reward_exp=max(1,int(round((base["exp"]+max(0,int(char["level"])-1)*4)*reward_mult)))
                 reward_kw=max(1,int(round((base["kw"]+max(0,int(char["level"])-1)*3)*reward_mult)))
+                exp_pct=_pet_bonus(user_id,"exp"); kw_pct=_pet_bonus(user_id,"kiwons")
+                if exp_pct: reward_exp=max(1,int(round(reward_exp*(1.0+exp_pct/100.0))))
+                if kw_pct: reward_kw=max(1,int(round(reward_kw*(1.0+kw_pct/100.0))))
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
@@ -4871,7 +4890,140 @@ def pvp_surrender(duel_id, uid):
     send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\n" + ("Resultado registrado en la clasificatoria." if d.get("duel_mode")=="ranked" else "Duelo amistoso: sin pérdida de HP, EXP ni KW.")); return True,''
 
 # =========================================================
-# KIWRPG V6.0 — TIENDA RPG / CONSUMIBLES
+# KIWRPG V6.1 — MASCOTAS / GACHA
+# =========================================================
+
+RPG_PETS = {
+    "slime_lunar": {"name":"Slime Lunar","icon":"⚪","rarity":"Común","weight":50,"bonus":"exp","pct":2,"desc":"+2% EXP en PvE y Bosses."},
+    "lobo_carmesi": {"name":"Lobo Carmesí","icon":"🔵","rarity":"Rara","weight":28,"bonus":"pve_damage","pct":2,"desc":"+2% daño en encuentros PvE."},
+    "fenix_azur": {"name":"Fénix Azur","icon":"🟣","rarity":"Épica","weight":15,"bonus":"boss_damage","pct":3,"desc":"+3% daño contra Bosses."},
+    "dragon_dorado": {"name":"Dragón Dorado","icon":"🟡","rarity":"Legendaria","weight":6,"bonus":"boss_damage","pct":5,"desc":"+5% daño contra Bosses."},
+    "angel_negro": {"name":"Ángel Negro","icon":"🔴","rarity":"Mítica","weight":1,"bonus":"kiwons","pct":5,"desc":"+5% Kiwons obtenidos en PvE y Bosses."},
+}
+RPG_GACHA_FANG_COST = 10
+RPG_GACHA_FANG_ITEM = "colmillo_ceniza"
+
+
+def _private_launch_keyboard(payload="shop"):
+    username=get_bot_identity().get("username","")
+    if not username: return None
+    return {"inline_keyboard":[[{"text":"🔒 Abrir en privado con KiwBot","url":f"https://t.me/{username}?start={payload}"}]]}
+
+
+def _is_private_chat_obj(chat):
+    return (chat or {}).get("type")=="private"
+
+
+def _pet_owned_rows(user_id):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT * FROM rpg_pets_owned WHERE user_id=? ORDER BY equipped DESC, obtained_at ASC",(int(user_id),)).fetchall(); conn.close()
+    return rows
+
+
+def _equipped_pet(user_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_pets_owned WHERE user_id=? AND equipped=1 LIMIT 1",(int(user_id),)).fetchone(); conn.close()
+    if not row: return None
+    cfg=RPG_PETS.get(row['pet_key'])
+    return (dict(row)|cfg) if cfg else None
+
+
+def _pet_bonus(user_id, kind):
+    pet=_equipped_pet(user_id)
+    return int(pet.get('pct',0)) if pet and pet.get('bonus')==kind else 0
+
+
+def _fang_count(user_id):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT COALESCE(SUM(quantity),0) n FROM rpg_inventory WHERE user_id=? AND world_id=? AND item_key=?",(int(user_id),world,RPG_GACHA_FANG_ITEM)).fetchone(); conn.close()
+    return int(row['n'] or 0)
+
+
+def _consume_fangs(user_id, amount):
+    world=current_rpg_world(); need=int(amount)
+    with db_lock:
+        conn=get_db()
+        try:
+            rows=conn.execute("SELECT id,quantity FROM rpg_inventory WHERE user_id=? AND world_id=? AND item_key=? ORDER BY id FOR UPDATE",(int(user_id),world,RPG_GACHA_FANG_ITEM)).fetchall()
+            if sum(int(r['quantity']) for r in rows)<need:
+                conn.rollback(); conn.close(); return False
+            left=need
+            for r in rows:
+                if left<=0: break
+                q=int(r['quantity']); take=min(q,left)
+                if take==q: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(int(r['id']),))
+                else: conn.execute("UPDATE rpg_inventory SET quantity=quantity-? WHERE id=?",(take,int(r['id'])))
+                left-=take
+            conn.commit(); conn.close(); return True
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def pet_gacha_text(user_id):
+    return (f"🎰 COFRE DE FAMILIAR\n\n🦷 Coste: {RPG_GACHA_FANG_COST} Colmillos de Ceniza\n"
+            f"🎒 Tienes: {_fang_count(user_id)}\n\n"
+            "⚪ Común 50% · 🔵 Rara 28% · 🟣 Épica 15%\n🟡 Legendaria 6% · 🔴 Mítica 1%\n\n"
+            "Las mascotas son permanentes. Solo una puede estar equipada.\n"
+            "Los duplicados se convierten en ✨ Esencia de mascota.")
+
+
+def pet_gacha_keyboard():
+    return {"inline_keyboard":[[{"text":f"🦷 ABRIR — {RPG_GACHA_FANG_COST}","callback_data":"pet_gacha_open"}],
+                               [{"text":"🐾 MIS MASCOTAS","callback_data":"pet_list"}],
+                               [{"text":"🏪 TIENDA RPG","callback_data":"rpg_shop"}]]}
+
+
+def pets_text_keyboard(user_id):
+    rows=_pet_owned_rows(user_id)
+    with db_lock:
+        conn=get_db(); er=conn.execute("SELECT amount FROM rpg_pet_essence WHERE user_id=?",(int(user_id),)).fetchone(); conn.close()
+    essence=int(er['amount'] if er else 0)
+    lines=["🐾 TUS MASCOTAS",""]
+    kb=[]
+    if not rows: lines.append("Todavía no tienes mascotas. Abre un Cofre de Familiar.")
+    for r in rows:
+        cfg=RPG_PETS.get(r['pet_key']);
+        if not cfg: continue
+        active=" ✅ EQUIPADA" if int(r['equipped']) else ""
+        lines.append(f"{cfg['icon']} {cfg['name']} — {cfg['rarity']}{active}\n   {cfg['desc']}")
+        kb.append([{"text":f"{'✅ ' if int(r['equipped']) else ''}{cfg['icon']} {cfg['name']}","callback_data":f"pet_equip:{r['pet_key']}"}])
+    lines += ["",f"✨ Esencia de mascota: {essence}"]
+    kb.append([{"text":"🎰 Cofre de Familiar","callback_data":"pet_gacha"}])
+    return "\n".join(lines),{"inline_keyboard":kb}
+
+
+def open_pet_gacha(user_id):
+    if _fang_count(user_id)<RPG_GACHA_FANG_COST:
+        return False,f"🦷 Necesitas {RPG_GACHA_FANG_COST} Colmillos de Ceniza. Tienes {_fang_count(user_id)}."
+    if not _consume_fangs(user_id,RPG_GACHA_FANG_COST): return False,"No pude consumir los colmillos. Inténtalo otra vez."
+    keys=list(RPG_PETS); weights=[RPG_PETS[k]['weight'] for k in keys]; key=random.choices(keys,weights=weights,k=1)[0]; cfg=RPG_PETS[key]
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); old=conn.execute("SELECT copies FROM rpg_pets_owned WHERE user_id=? AND pet_key=? FOR UPDATE",(int(user_id),key)).fetchone()
+        if old:
+            conn.execute("UPDATE rpg_pets_owned SET copies=copies+1 WHERE user_id=? AND pet_key=?",(int(user_id),key))
+            conn.execute("INSERT INTO rpg_pet_essence(user_id,amount) VALUES(?,1) ON CONFLICT(user_id) DO UPDATE SET amount=rpg_pet_essence.amount+1",(int(user_id),))
+            duplicate=True
+        else:
+            anypet=conn.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? LIMIT 1",(int(user_id),)).fetchone()
+            conn.execute("INSERT INTO rpg_pets_owned(user_id,pet_key,copies,equipped,obtained_at) VALUES(?,?,1,?,?)",(int(user_id),key,0 if anypet else 1,now)); duplicate=False
+        conn.commit(); conn.close()
+    if duplicate:
+        return True,f"🎰 El cofre se abre...\n\n{cfg['icon']} {cfg['name']} — {cfg['rarity']}\n♻️ Ya la tenías: el duplicado se convirtió en ✨ 1 Esencia de mascota."
+    return True,f"🎰 El cofre se abre...\n\n{cfg['icon']} ¡{cfg['name']}! — {cfg['rarity']}\n🎁 {cfg['desc']}\n"+("✅ Es tu primera mascota y quedó equipada automáticamente." if not anypet else "🐾 Ya forma parte de tu colección.")
+
+
+def equip_pet(user_id,key):
+    if key not in RPG_PETS: return False,"Mascota desconocida."
+    with db_lock:
+        conn=get_db(); own=conn.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? AND pet_key=? FOR UPDATE",(int(user_id),key)).fetchone()
+        if not own: conn.rollback(); conn.close(); return False,"Esa mascota no está en tu colección."
+        conn.execute("UPDATE rpg_pets_owned SET equipped=0 WHERE user_id=?",(int(user_id),)); conn.execute("UPDATE rpg_pets_owned SET equipped=1 WHERE user_id=? AND pet_key=?",(int(user_id),key)); conn.commit(); conn.close()
+    return True,f"🐾 {RPG_PETS[key]['name']} quedó equipada.\n{RPG_PETS[key]['desc']}"
+
+# =========================================================
+# KIWRPG V6.1 — TIENDA RPG / CONSUMIBLES
 # =========================================================
 
 RPG_SHOP = {
@@ -5139,6 +5291,9 @@ def _boss_reward_all(b):
         conn=get_db(); rows=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(b['id']),)).fetchall(); conn.close()
     for p in rows:
         uid=int(p['user_id']); dmg=int(p['damage']); kw=500+min(2500,dmg*2); exp=150+min(1000,dmg)
+        exp_pct=_pet_bonus(uid,'exp'); kw_pct=_pet_bonus(uid,'kiwons')
+        if exp_pct: exp=max(1,int(round(exp*(1.0+exp_pct/100.0))))
+        if kw_pct: kw=max(1,int(round(kw*(1.0+kw_pct/100.0))))
         with db_lock:
             conn=get_db(); exists=conn.execute("SELECT 1 FROM rpg_boss_rewards WHERE boss_id=? AND user_id=?",(int(b['id']),uid)).fetchone()
             if exists: conn.close(); continue
@@ -5172,6 +5327,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         eff=effective_character_stats(char); dmg=0; heal=0
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
+            pet_pct=_pet_bonus(user_id,'boss_damage')
+            if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
             if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
             if int(b.get('defending') or 0): dmg=max(1,int(round(dmg*.5)))
             if ab.get('heal_pct'): heal=max(1,int(round(int(p['max_hp'])*float(ab['heal_pct'])*RPG_DICE_MULT[roll])))
@@ -5233,7 +5390,8 @@ def handle_rpg_callback(query):
         bid=int(data.split(":",1)[1]); char=get_active_character(uid)
         if not char or not is_owner(uid) or char['class_name']!='The Cleaner': send_message(chat_id,"Esa habilidad no te pertenece. 😌"); return True
         active=bool(char['secret_blades_active']); ok,msg2=toggle_secret_blades(uid,activate=not active)
-        send_message(chat_id,("🗡️🗡️ Espadas del Ángel activadas. +6 ATK." if not active and ok else "🗡️🗡️ Espadas del Ángel guardadas." if active and ok else msg2)); return True
+        notice=("🗡️🗡️ Espadas del Ángel activadas · +6 ATK" if not active and ok else "🗡️ Espadas del Ángel guardadas" if active and ok else msg2)
+        telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":notice,"show_alert":False}); return True
     if data.startswith("boss_rejoin:"):
         bid=int(data.split(":",1)[1]); ok,msg2=boss_rejoin(chat_id,uid,bid); b=_boss_active(chat_id)
         send_message(chat_id,msg2+("\n\n"+_boss_card(b,uid) if b else ""),reply_markup=_boss_keyboard(b,uid) if b else None); return True
@@ -5298,8 +5456,24 @@ def handle_rpg_callback(query):
         else: send_message(chat_id,"No tienes un encuentro activo.")
         return True
     if data=="rpg_shop":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 La tienda de KiwRPG se abre en privado.",reply_markup=_private_launch_keyboard("shop")); return True
         balance,kb=rpg_shop_keyboard(uid)
         send_message(chat_id,f"🏪 TIENDA RPG\n\nCompra consumibles y equipo básico con Kiwons.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb); return True
+    if data=="pet_gacha":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 El gacha y tus mascotas se administran en privado.",reply_markup=_private_launch_keyboard("pets")); return True
+        send_message(chat_id,pet_gacha_text(uid),reply_markup=pet_gacha_keyboard()); return True
+    if data=="pet_gacha_open":
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        ok,msg2=open_pet_gacha(uid); send_message(chat_id,msg2,reply_markup=pet_gacha_keyboard()); return True
+    if data=="pet_list":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 Tu colección de mascotas es privada.",reply_markup=_private_launch_keyboard("pets")); return True
+        txt,kb=pets_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("pet_equip:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        ok,msg2=equip_pet(uid,data.split(":",1)[1]); txt,kb=pets_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
     if data.startswith("rpg_shop_item:"):
         key=data.split(":",1)[1]; txt,kb=rpg_shop_item_text(uid,key)
         send_message(chat_id,txt or "Ese objeto ya no está disponible.",reply_markup=kb); return True
@@ -5328,7 +5502,9 @@ def handle_rpg_callback(query):
             send_message(chat_id,"Esa habilidad no te pertenece. 😌"); return True
         active=bool(char['secret_blades_active']); ok,msg2=toggle_secret_blades(uid,activate=not active)
         if not ok: send_message(chat_id,msg2); return True
-        send_message(chat_id,"🗡️🗡️ Las Espadas del Ángel han despertado. +6 ATK." if not active else "🗡️ Las Espadas del Ángel vuelven a quedar selladas. +6 ATK desactivado.")
+        notice="🗡️🗡️ Espadas del Ángel activadas · +6 ATK" if not active else "🗡️ Espadas del Ángel guardadas · +6 ATK desactivado"
+        if _is_private_chat_obj(msg.get("chat")): send_message(chat_id,notice)
+        else: telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":notice,"show_alert":False})
         return True
     if data.startswith("rpg_class:"):
         class_preview(chat_id,uid,data.split(":",1)[1]); return True
@@ -5481,6 +5657,14 @@ def process_command(
             ensure_player(user)
             send_character_creator(chat_id,user.get("id"),origin_chat_id=origin_chat_id or chat_id)
             return True
+        if len(parts)>1 and parts[1] in ("shop","pets"):
+            user=message.get("from",{}); ensure_player(user)
+            if chat.get("type")!="private": return True
+            if parts[1]=="shop":
+                balance,kb=rpg_shop_keyboard(user.get("id")); send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
+            else:
+                send_message(chat_id,pet_gacha_text(user.get("id")),reply_markup=pet_gacha_keyboard())
+            return True
 
     # -----------------------------------------------------
     # PING
@@ -5618,9 +5802,21 @@ def process_command(
 
     if command in ("/tienda", "/shop"):
         user_id=message.get("from",{}).get("id"); ensure_player(message.get("from",{}))
+        if chat.get("type")!="private":
+            send_message(chat_id,"🔒 La tienda de KiwRPG es privada.",reply_markup=_private_launch_keyboard("shop")); return True
         balance,kb=rpg_shop_keyboard(user_id)
         send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico. Los objetos raros siguen siendo de drops, Bosses y recompensas.\n\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
         return True
+
+    if command in ("/mascotas", "/pets"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private": send_message(chat_id,"🔒 Tu colección de mascotas se administra en privado.",reply_markup=_private_launch_keyboard("pets")); return True
+        txt,kb=pets_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/gacha", "/cofre"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private": send_message(chat_id,"🔒 El Cofre de Familiar se abre en privado.",reply_markup=_private_launch_keyboard("pets")); return True
+        send_message(chat_id,pet_gacha_text(user_id),reply_markup=pet_gacha_keyboard()); return True
 
     if command in ("/darpocion", "/dar_pocion"):
         return admin_grant_potion(chat_id,message,text)
@@ -5856,12 +6052,8 @@ def process_command(
             send_message(chat_id, error)
             return True
 
-        send_message(
-            chat_id,
-            "🗡️🗡️ Las Espadas del Ángel han despertado.\n"
-            "One Winged Angel entra en modo Doble Espada.\n"
-            "Bonificación de combate: +6 ATK mientras estén activas."
-        )
+        if chat.get("type")=="private":
+            send_message(chat_id,"🗡️🗡️ Espadas del Ángel activadas · +6 ATK")
         return True
 
     if command in ("/guardar_espadas", "/sellar_espadas"):
@@ -5875,11 +6067,8 @@ def process_command(
             send_message(chat_id, error)
             return True
 
-        send_message(
-            chat_id,
-            "🗡️ Las Espadas del Ángel vuelven a quedar selladas.\n"
-            "La bonificación de +6 ATK queda desactivada."
-        )
+        if chat.get("type")=="private":
+            send_message(chat_id,"🗡️ Espadas del Ángel guardadas · +6 ATK desactivado")
         return True
 
     if command in ("/personaje", "/pj"):

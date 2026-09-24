@@ -764,6 +764,35 @@ def init_db():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_pvp_stats_chat ON rpg_pvp_stats(chat_id,wins DESC,losses ASC)")
 
+        # KiwRPG V5.6 — amistosos separados de clasificatoria por temporadas de 14 días.
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS duel_mode TEXT NOT NULL DEFAULT 'friendly'")
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS season_id BIGINT")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pvp_seasons (
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, season_number BIGINT NOT NULL,
+                starts_at BIGINT NOT NULL, ends_at BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                rewards_sent BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL,
+                UNIQUE(chat_id, season_number)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pvp_season_active ON rpg_pvp_seasons(chat_id,status,season_number DESC)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pvp_season_stats (
+                season_id BIGINT NOT NULL, chat_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+                wins BIGINT NOT NULL DEFAULT 0, losses BIGINT NOT NULL DEFAULT 0,
+                surrenders BIGINT NOT NULL DEFAULT 0, duels BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL, PRIMARY KEY(season_id,user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pvp_season_rewards (
+                id BIGSERIAL PRIMARY KEY, season_id BIGINT NOT NULL, chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL, place BIGINT NOT NULL, options TEXT NOT NULL DEFAULT '',
+                chosen TEXT, claimed BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL,
+                UNIQUE(season_id,user_id)
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -4489,7 +4518,7 @@ def _pvp_name(uid):
 
 def _pvp_active_for_user(chat_id, uid):
     with db_lock:
-        conn=get_db(); row=conn.execute("""SELECT * FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1""",(int(chat_id),int(uid),int(uid))).fetchone(); conn.close()
+        conn=get_db(); row=conn.execute("""SELECT * FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1""",(int(chat_id),int(uid),int(uid))).fetchone(); conn.close()
     return row
 
 def _pvp_get(duel_id):
@@ -4527,10 +4556,11 @@ def _pvp_card(duel):
         return f"⚔️ DUELO ABIERTO\n\n{n1} — {c1['name']} · {c1['class_name']} · Nv. {c1['level']}\n\n¿Quién se atreve?"
     turn='—'
     if duel['status']=='active': turn=_pvp_name(duel['turn_user_id'])
-    return (f"⚔️ DUELO PVP\n\n{n1} — {c1['name']} · {c1['class_name']}\n❤️ {duel['challenger_hp']}/{effective_character_stats(c1)['max_hp']}\n\nVS\n\n"
+    return (f"{'🏆 DUELO CLASIFICATORIO' if duel.get('duel_mode')=='ranked' else '⚔️ DUELO AMISTOSO'}\n\n{n1} — {c1['name']} · {c1['class_name']}\n❤️ {duel['challenger_hp']}/{effective_character_stats(c1)['max_hp']}\n\nVS\n\n"
             f"{n2} — {c2['name']} · {c2['class_name']}\n❤️ {duel['opponent_hp']}/{effective_character_stats(c2)['max_hp']}\n\n🎯 Turno: {turn}")
 
-def start_pvp_challenge(chat_id, user, target=None):
+def start_pvp_challenge(chat_id, user, target=None, duel_mode="friendly"):
+    duel_mode = "ranked" if str(duel_mode)=="ranked" else "friendly"
     uid=int(user['id']); ensure_player(user); ensure_owner_secret_character(user)
     char=get_active_character(uid)
     if not char: return False,'Primero crea un personaje con /crear_personaje.'
@@ -4547,13 +4577,18 @@ def start_pvp_challenge(chat_id, user, target=None):
         if _pvp_active_for_user(chat_id,opp_id): return False,'Ese jugador ya tiene un duelo pendiente o activo.'
     now=int(time.time())
     with db_lock:
-        conn=get_db(); row=conn.execute("""INSERT INTO rpg_pvp_duels(chat_id,challenger_id,opponent_id,challenger_character_id,status,is_open,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) RETURNING id""",(int(chat_id),uid,opp_id,int(char['id']),status,is_open,now,now)).fetchone(); conn.commit(); conn.close()
+        conn=get_db()
+        season_id=None
+        if duel_mode=='ranked':
+            season=_pvp_ensure_season(chat_id)
+            season_id=int(season['id'])
+        row=conn.execute("""INSERT INTO rpg_pvp_duels(chat_id,challenger_id,opponent_id,challenger_character_id,status,is_open,created_at,updated_at,duel_mode,season_id) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id""",(int(chat_id),uid,opp_id,int(char['id']),status,is_open,now,now,duel_mode,season_id)).fetchone(); conn.commit(); conn.close()
     did=int(row['id']); name=user.get('first_name') or user.get('username') or char['name']
     if is_open:
-        txt=f"⚔️ DUELO ABIERTO\n\n{name} — {char['name']} · {char['class_name']} · Nv. {char['level']}\n\n¿Quién se atreve?"
+        txt=f"{'🏆 CLASIFICATORIA PVP' if duel_mode=='ranked' else '⚔️ DUELO AMISTOSO'}\n\n{name} — {char['name']} · {char['class_name']} · Nv. {char['level']}\n\n¿Quién se atreve?"
         kb={'inline_keyboard':[[{'text':'⚔️ ACEPTAR DUELO','callback_data':f'pvp_accept:{did}'}],[{'text':'❌ Cancelar','callback_data':f'pvp_cancel:{did}'}]]}
     else:
-        txt=f"⚔️ DESAFÍO PVP\n\n{name} desafía a {_pvp_name(opp_id)}.\n{char['name']} · {char['class_name']} · Nv. {char['level']}"
+        txt=f"{'🏆 DESAFÍO CLASIFICATORIO' if duel_mode=='ranked' else '⚔️ DESAFÍO AMISTOSO'}\n\n{name} desafía a {_pvp_name(opp_id)}.\n{char['name']} · {char['class_name']} · Nv. {char['level']}"
         kb={'inline_keyboard':[[{'text':'⚔️ Aceptar','callback_data':f'pvp_accept:{did}'},{'text':'❌ Rechazar','callback_data':f'pvp_reject:{did}'}],[{'text':'Cancelar reto','callback_data':f'pvp_cancel:{did}'}]]}
     res=send_message(chat_id,txt,reply_markup=kb)
     mid=((res or {}).get('result') or {}).get('message_id')
@@ -4581,7 +4616,7 @@ def accept_pvp(duel_id, chat_id, user):
             conn.execute("UPDATE rpg_pvp_duels SET status='expired',updated_at=? WHERE id=?",(int(time.time()),int(duel_id))); conn.commit(); conn.close(); return False,'Ese desafío expiró.'
         char=get_active_character(uid)
         if not char: conn.rollback(); conn.close(); return False,'Primero necesitas un personaje activo.'
-        busy=conn.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND id<>? AND status IN ('open','pending','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(int(chat_id),int(duel_id),uid,uid)).fetchone()
+        busy=conn.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND id<>? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(int(chat_id),int(duel_id),uid,uid)).fetchone()
         pve=conn.execute('SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=?',(int(chat_id),uid)).fetchone()
         if busy or pve: conn.rollback(); conn.close(); return False,'Ahora mismo estás ocupado en otro combate o desafío.'
         c1=_pvp_char(d['challenger_character_id']); e1=effective_character_stats(c1); e2=effective_character_stats(char)
@@ -4649,46 +4684,141 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         return True,''
     send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
 
-def _pvp_record_result(duel_id, winner_id, loser_id, reason="ko"):
-    """Registra una sola vez el resultado amistoso del duelo para perfil/ranking."""
-    now=int(time.time())
+PVP_SEASON_SECONDS = 14 * 24 * 60 * 60
+PVP_MIN_REWARD_DUELS = 3
+
+
+def _pvp_ensure_season(chat_id):
+    """Devuelve la temporada activa. Si venció, entrega premios y abre la siguiente."""
+    chat_id=int(chat_id); now=int(time.time())
+    with db_lock:
+        conn=get_db(); season=conn.execute("SELECT * FROM rpg_pvp_seasons WHERE chat_id=? AND status='active' ORDER BY season_number DESC LIMIT 1",(chat_id,)).fetchone(); conn.close()
+    if not season:
+        with db_lock:
+            conn=get_db(); last=conn.execute("SELECT COALESCE(MAX(season_number),0) n FROM rpg_pvp_seasons WHERE chat_id=?",(chat_id,)).fetchone(); num=int(last['n'] or 0)+1
+            row=conn.execute("INSERT INTO rpg_pvp_seasons(chat_id,season_number,starts_at,ends_at,status,rewards_sent,created_at) VALUES(?,?,?,?, 'active',0,?) RETURNING *",(chat_id,num,now,now+PVP_SEASON_SECONDS,now)).fetchone(); conn.commit(); conn.close()
+        return row
+    if now >= int(season['ends_at']):
+        _pvp_close_season(dict(season))
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT * FROM rpg_pvp_seasons WHERE chat_id=? AND status='active' ORDER BY season_number DESC LIMIT 1",(chat_id,)).fetchone(); conn.close()
+        return row
+    return season
+
+
+def _pvp_reward_options(place):
+    if int(place)==1: return ['kw5000','exp1200','rare_item']
+    if int(place)==2: return ['kw3000','exp700']
+    if int(place)==3: return ['kw2000']
+    return ['kw750']
+
+
+def _pvp_reward_label(code):
+    return {'kw5000':'💰 5,000 KW','exp1200':'✨ 1,200 EXP','rare_item':'🎁 Equipo raro compatible',
+            'kw3000':'💰 3,000 KW','exp700':'✨ 700 EXP','kw2000':'💰 2,000 KW','kw750':'💰 750 KW'}.get(code,code)
+
+
+def _pvp_apply_reward(user_id, code, season_number):
+    user_id=int(user_id); char=get_active_character(user_id)
+    if code.startswith('kw'):
+        amount=int(code[2:]); change_kiwons(user_id,amount,'pvp_season_reward',note=f'Temporada PvP {season_number}'); return f'{amount:,} KW'
+    if code.startswith('exp'):
+        amount=int(code[3:])
+        if not char:
+            change_kiwons(user_id,2000,'pvp_season_reward',note=f'Compensación temporada PvP {season_number}'); return '2,000 KW (sin personaje activo)'
+        grant_rpg_exp(int(char['id']),amount); return f'{amount:,} EXP para {char["name"]}'
+    if code=='rare_item':
+        if not char:
+            change_kiwons(user_id,2500,'pvp_season_reward',note=f'Compensación temporada PvP {season_number}'); return '2,500 KW (sin personaje activo)'
+        cls=str(char['class_name']); lvl=int(char['level'])
+        with db_lock:
+            conn=get_db(); rows=conn.execute("SELECT item_key FROM rpg_items WHERE rarity='raro' AND min_level<=? AND (allowed_classes IS NULL OR allowed_classes='' OR allowed_classes LIKE ?) ORDER BY item_key",(lvl,f'%{cls}%')).fetchall(); conn.close()
+        keys=[r['item_key'] for r in rows]
+        if keys:
+            item=grant_rpg_item(user_id,int(char['id']),random.choice(keys),f'pvp_temporada_{season_number}')
+            if item: return f'🎁 {item["name"]}'
+        change_kiwons(user_id,2500,'pvp_season_reward',note=f'Compensación temporada PvP {season_number}'); return '2,500 KW (recompensa alternativa)'
+    return 'recompensa'
+
+
+def _pvp_close_season(season):
+    sid=int(season['id']); chat_id=int(season['chat_id']); num=int(season['season_number']); now=int(time.time())
+    with db_lock:
+        conn=get_db(); locked=conn.execute('SELECT * FROM rpg_pvp_seasons WHERE id=? FOR UPDATE',(sid,)).fetchone()
+        if not locked or locked['status']!='active': conn.rollback(); conn.close(); return
+        rows=conn.execute("""SELECT s.*,COALESCE(NULLIF(p.display_name,''),CAST(s.user_id AS TEXT)) display_name FROM rpg_pvp_season_stats s LEFT JOIN players p ON p.user_id=s.user_id WHERE s.season_id=? AND s.duels>0 ORDER BY s.wins DESC,(s.wins::numeric/NULLIF(s.duels,0)) DESC,s.losses ASC,s.updated_at ASC""",(sid,)).fetchall()
+        conn.execute("UPDATE rpg_pvp_seasons SET status='closed',rewards_sent=0 WHERE id=?",(sid,))
+        next_num=num+1
+        conn.commit(); conn.close()
+    lines=[f'🏁 CLASIFICATORIA PVP — TEMPORADA {num} FINALIZADA','']
+    medals=['🥇','🥈','🥉']
+    for i,r in enumerate(rows[:10],1): lines.append(f"{medals[i-1] if i<=3 else str(i)+'.'} {r['display_name']} — {int(r['wins'])}V/{int(r['losses'])}D")
+    if not rows: lines.append('Sin participantes esta temporada.')
+    lines += ['', '🎁 Entregando premios antes de abrir la siguiente temporada...']
+    send_message(chat_id,'\n'.join(lines))
+    # Premios: top 3 siempre; participación desde 4.º con mínimo 3 duelos.
+    for place,r in enumerate(rows,1):
+        uid=int(r['user_id']); duels=int(r['duels'])
+        if place>3 and duels<PVP_MIN_REWARD_DUELS: continue
+        opts=_pvp_reward_options(place)
+        with db_lock:
+            conn=get_db(); rr=conn.execute("INSERT INTO rpg_pvp_season_rewards(season_id,chat_id,user_id,place,options,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(season_id,user_id) DO UPDATE SET options=EXCLUDED.options RETURNING id,claimed",(sid,chat_id,uid,place,','.join(opts),now)).fetchone(); conn.commit(); conn.close()
+        if int(rr['claimed'] or 0): continue
+        rid=int(rr['id'])
+        if len(opts)==1:
+            got=_pvp_apply_reward(uid,opts[0],num)
+            with db_lock:
+                conn=get_db(); conn.execute("UPDATE rpg_pvp_season_rewards SET claimed=1,chosen=? WHERE id=?",(opts[0],rid)); conn.commit(); conn.close()
+            send_message(chat_id,f"🎁 {_pvp_name(uid)} — puesto #{place}: {got}")
+        else:
+            buttons=[[{'text':_pvp_reward_label(c),'callback_data':f'pvp_reward:{rid}:{c}'}] for c in opts]
+            send_message(chat_id,f"🎁 COFRE DE TEMPORADA {num}\n\n{_pvp_name(uid)} terminó #{place}.\nElige 1 recompensa de {len(opts)}:",reply_markup={'inline_keyboard':buttons})
+    # Solo después de emitir todos los premios/cofres se abre la siguiente temporada.
     with db_lock:
         conn=get_db()
-        d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
-        if not d or int(d.get('stats_recorded') or 0):
+        conn.execute("UPDATE rpg_pvp_seasons SET rewards_sent=1 WHERE id=?",(sid,))
+        conn.execute("INSERT INTO rpg_pvp_seasons(chat_id,season_number,starts_at,ends_at,status,rewards_sent,created_at) VALUES(?,?,?,?, 'active',0,?) ON CONFLICT(chat_id,season_number) DO NOTHING",(chat_id,next_num,now,now+PVP_SEASON_SECONDS,now))
+        conn.commit(); conn.close()
+    send_message(chat_id,f"🌱 TEMPORADA {next_num} INICIADA\n\nLa clasificación vuelve a cero. Tienen 14 días.")
+
+
+def _pvp_record_result(duel_id, winner_id, loser_id, reason="ko"):
+    """Solo los duelos clasificatorios alteran la temporada; amistosos quedan fuera."""
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
+        if not d or int(d.get('stats_recorded') or 0): conn.rollback(); conn.close(); return False
+        if d.get('duel_mode')!='ranked' or not d.get('season_id'):
+            conn.execute("UPDATE rpg_pvp_duels SET stats_recorded=1,winner_user_id=?,finish_reason=?,updated_at=? WHERE id=?",(int(winner_id),str(reason),now,int(duel_id))); conn.commit(); conn.close(); return True
+        sid=int(d['season_id']); chat_id=int(d['chat_id'])
+        season=conn.execute('SELECT * FROM rpg_pvp_seasons WHERE id=?',(sid,)).fetchone()
+        if not season or season['status']!='active' or now>=int(season['ends_at']):
             conn.rollback(); conn.close(); return False
-        chat_id=int(d['chat_id'])
-        for player_id, won in ((int(winner_id),1),(int(loser_id),0)):
+        for player_id,won in ((int(winner_id),1),(int(loser_id),0)):
             surrender=1 if (not won and reason=='surrender') else 0
-            conn.execute("""
-                INSERT INTO rpg_pvp_stats(chat_id,user_id,wins,losses,surrenders,duels,updated_at)
-                VALUES(?,?,?,?,?,?,?)
-                ON CONFLICT(chat_id,user_id) DO UPDATE SET
-                    wins=rpg_pvp_stats.wins+EXCLUDED.wins,
-                    losses=rpg_pvp_stats.losses+EXCLUDED.losses,
-                    surrenders=rpg_pvp_stats.surrenders+EXCLUDED.surrenders,
-                    duels=rpg_pvp_stats.duels+1,
-                    updated_at=EXCLUDED.updated_at
-            """,(chat_id,player_id,won,0 if won else 1,surrender,1,now))
-        conn.execute("UPDATE rpg_pvp_duels SET stats_recorded=1,winner_user_id=?,finish_reason=?,updated_at=? WHERE id=?",
-                     (int(winner_id),str(reason),now,int(duel_id)))
-        conn.commit(); conn.close(); return True
+            conn.execute("""INSERT INTO rpg_pvp_season_stats(season_id,chat_id,user_id,wins,losses,surrenders,duels,updated_at) VALUES(?,?,?,?,?,?,1,?) ON CONFLICT(season_id,user_id) DO UPDATE SET wins=rpg_pvp_season_stats.wins+EXCLUDED.wins,losses=rpg_pvp_season_stats.losses+EXCLUDED.losses,surrenders=rpg_pvp_season_stats.surrenders+EXCLUDED.surrenders,duels=rpg_pvp_season_stats.duels+1,updated_at=EXCLUDED.updated_at""",(sid,chat_id,player_id,won,0 if won else 1,surrender,now))
+        conn.execute("UPDATE rpg_pvp_duels SET stats_recorded=1,winner_user_id=?,finish_reason=?,updated_at=? WHERE id=?",(int(winner_id),str(reason),now,int(duel_id))); conn.commit(); conn.close(); return True
 
-def pvp_profile(chat_id, user_id):
-    with db_lock:
-        conn=get_db(); row=conn.execute('SELECT * FROM rpg_pvp_stats WHERE chat_id=? AND user_id=?',(int(chat_id),int(user_id))).fetchone(); conn.close()
-    return row
 
-def pvp_ranking(chat_id, limit=10):
+def pvp_profile(chat_id,user_id):
+    season=_pvp_ensure_season(chat_id)
     with db_lock:
-        conn=get_db(); rows=conn.execute("""
-            SELECT s.*, COALESCE(NULLIF(p.display_name,''), CAST(s.user_id AS TEXT)) AS display_name
-            FROM rpg_pvp_stats s LEFT JOIN players p ON p.user_id=s.user_id
-            WHERE s.chat_id=? AND s.duels>0
-            ORDER BY s.wins DESC, (s.wins::numeric / NULLIF(s.duels,0)) DESC, s.losses ASC, s.updated_at ASC
-            LIMIT ?
-        """,(int(chat_id),int(limit))).fetchall(); conn.close()
-    return rows
+        conn=get_db(); row=conn.execute('SELECT * FROM rpg_pvp_season_stats WHERE season_id=? AND user_id=?',(int(season['id']),int(user_id))).fetchone(); conn.close()
+    return season,row
+
+
+def pvp_ranking(chat_id,limit=10):
+    season=_pvp_ensure_season(chat_id)
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""SELECT s.*,COALESCE(NULLIF(p.display_name,''),CAST(s.user_id AS TEXT)) display_name FROM rpg_pvp_season_stats s LEFT JOIN players p ON p.user_id=s.user_id WHERE s.season_id=? AND s.duels>0 ORDER BY s.wins DESC,(s.wins::numeric/NULLIF(s.duels,0)) DESC,s.losses ASC,s.updated_at ASC LIMIT ?""",(int(season['id']),int(limit))).fetchall(); conn.close()
+    return season,rows
+
+
+def _pvp_time_left(ends_at):
+    sec=max(0,int(ends_at)-int(time.time())); days=sec//86400; hours=(sec%86400)//3600; mins=(sec%3600)//60
+    if days: return f'{days} días {hours} horas'
+    if hours: return f'{hours} horas {mins} min'
+    return f'{mins} min'
 
 def pvp_surrender(duel_id, uid):
     d=_pvp_get(duel_id)
@@ -4697,7 +4827,7 @@ def pvp_surrender(duel_id, uid):
     with db_lock:
         conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='finished',turn_user_id=NULL,updated_at=? WHERE id=?",(int(time.time()),int(duel_id))); conn.commit(); conn.close()
     _pvp_record_result(duel_id,winner,int(uid),'surrender')
-    send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\nSin pérdida de HP, EXP ni KW."); return True,''
+    send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\n" + ("Resultado registrado en la clasificatoria." if d.get("duel_mode")=="ranked" else "Duelo amistoso: sin pérdida de HP, EXP ni KW.")); return True,''
 
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
@@ -4714,6 +4844,18 @@ def handle_rpg_callback(query):
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='cancelled',updated_at=? WHERE id=? AND status IN ('open','pending')",(int(time.time()),did)); conn.commit(); conn.close()
         send_message(chat_id,"❌ Duelo cancelado." if data.startswith('pvp_cancel:') else "❌ Desafío rechazado."); return True
+    if data.startswith("pvp_reward:"):
+        try: _,rid_s,code=data.split(":",2); rid=int(rid_s)
+        except Exception: return True
+        with db_lock:
+            conn=get_db(); rr=conn.execute("SELECT r.*,s.season_number FROM rpg_pvp_season_rewards r JOIN rpg_pvp_seasons s ON s.id=r.season_id WHERE r.id=? FOR UPDATE",(rid,)).fetchone()
+            if not rr or int(rr['user_id'])!=int(uid): conn.rollback(); conn.close(); send_message(chat_id,"Ese cofre no es tuyo. 😌"); return True
+            opts=str(rr['options'] or '').split(',')
+            if int(rr['claimed'] or 0): conn.rollback(); conn.close(); send_message(chat_id,"Ese cofre ya fue reclamado."); return True
+            if code not in opts: conn.rollback(); conn.close(); send_message(chat_id,"Esa recompensa no pertenece a este cofre."); return True
+            conn.execute("UPDATE rpg_pvp_season_rewards SET claimed=1,chosen=? WHERE id=? AND claimed=0",(code,rid)); conn.commit(); conn.close()
+        got=_pvp_apply_reward(uid,code,int(rr['season_number'])); send_message(chat_id,f"🎁 {_pvp_name(uid)} eligió: {got}")
+        return True
     if data.startswith("pvp_atk:"):
         _,did,key=data.split(":",2); ok,msg2=pvp_action(int(did),uid,ability_key=key)
         if not ok: send_message(chat_id,msg2)
@@ -4918,10 +5060,12 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V5.5\n\n"
-            "/duelo — PvP abierto · /duelo @usuario — reto directo\n"
-            "/rendirse — abandonar un duelo PvP\n"
-            "/pvp — tu perfil de duelos · /rankingpvp — clasificación\n"
+            "⚔️ KIWRPG — V5.6\n\n"
+            "/duelo — duelo amistoso (no afecta ranking)\n"
+            "/duelo @usuario — amistoso directo\n"
+            "/duelopvp — clasificatoria abierta · /duelopvp @usuario — reto clasificatorio\n"
+            "/rendirse — abandonar el duelo actual\n"
+            "/pvp — perfil de la temporada · /rankingpvp — clasificación de temporada\n"
             "/encuentro — combate y apariciones por rareza\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — objetos con botones\n"
@@ -4933,7 +5077,9 @@ def process_command(
         )
         return True
 
-    if command == "/duelo":
+    if command in ("/duelo", "/duelopvp"):
+        duel_mode="ranked" if command=="/duelopvp" else "friendly"
+        if duel_mode=="ranked": _pvp_ensure_season(chat_id)
         user=message.get("from",{})
         parts=str(text or "").strip().split(maxsplit=1)
         target=None
@@ -4944,8 +5090,8 @@ def process_command(
                 if not target:
                     send_message(chat_id,"No conozco todavía a ese usuario en este grupo. Que escriba al menos un mensaje y vuelve a intentarlo."); return True
             else:
-                send_message(chat_id,"Usa /duelo para abrirlo a cualquiera o /duelo @usuario para retar a alguien."); return True
-        ok,msg2=start_pvp_challenge(chat_id,user,target)
+                send_message(chat_id,("Usa /duelopvp o /duelopvp @usuario." if duel_mode=="ranked" else "Usa /duelo o /duelo @usuario.")); return True
+        ok,msg2=start_pvp_challenge(chat_id,user,target,duel_mode=duel_mode)
         if not ok: send_message(chat_id,msg2)
         return True
 
@@ -4955,27 +5101,25 @@ def process_command(
         pvp_surrender(d['id'],uid); return True
 
     if command in ("/pvp", "/perfilpvp"):
-        uid=int(message.get("from",{}).get("id"))
-        ensure_player(message.get("from",{}))
-        st=pvp_profile(chat_id,uid)
+        uid=int(message.get("from",{}).get("id")); ensure_player(message.get("from",{}))
+        season,st=pvp_profile(chat_id,uid); num=int(season['season_number']); left=_pvp_time_left(season['ends_at'])
         if not st:
-            send_message(chat_id,"⚔️ PERFIL PVP\n\nTodavía no tienes duelos terminados en este chat.")
+            send_message(chat_id,f"⚔️ PERFIL PVP — TEMPORADA {num}\n\nTodavía no tienes duelos clasificatorios.\n\n⏳ Quedan: {left}\n⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos")
             return True
         duels=int(st['duels']); wins=int(st['wins']); losses=int(st['losses']); surr=int(st['surrenders']); rate=(wins*100.0/duels) if duels else 0.0
-        send_message(chat_id,f"⚔️ PERFIL PVP — {_pvp_name(uid)}\n\n🏆 Victorias: {wins}\n💀 Derrotas: {losses}\n🏳️ Rendiciones: {surr}\n⚔️ Duelos: {duels}\n📊 Victorias: {rate:.1f}%")
+        _,rows=pvp_ranking(chat_id,1000); pos=next((i for i,r in enumerate(rows,1) if int(r['user_id'])==uid),None)
+        send_message(chat_id,f"⚔️ PERFIL PVP — TEMPORADA {num}\n\n🏆 Victorias: {wins}\n💀 Derrotas: {losses}\n🏳️ Rendiciones: {surr}\n⚔️ Duelos: {duels}\n📊 Victorias: {rate:.1f}%\n\n🏅 Posición actual: #{pos or '—'}\n⏳ Quedan: {left}")
         return True
 
     if command in ("/rankingpvp", "/toppvp"):
-        rows=pvp_ranking(chat_id,10)
-        if not rows:
-            send_message(chat_id,"Todavía no hay duelos PvP terminados en este chat.")
-            return True
-        lines=["🏆 RANKING PVP",""]; medals=["🥇","🥈","🥉"]
+        season,rows=pvp_ranking(chat_id,10); num=int(season['season_number']); left=_pvp_time_left(season['ends_at'])
+        lines=[f"🏆 CLASIFICATORIA PVP — TEMPORADA {num}",""]; medals=["🥇","🥈","🥉"]
+        if not rows: lines.append("Todavía no hay duelos clasificatorios terminados.")
         for i,row in enumerate(rows,1):
             icon=medals[i-1] if i<=3 else f"{i}."; duels=int(row['duels']); wins=int(row['wins']); losses=int(row['losses']); rate=(wins*100.0/duels) if duels else 0.0
             lines.append(f"{icon} {row['display_name']} — {wins}V/{losses}D · {rate:.0f}%")
-        send_message(chat_id,"\n".join(lines))
-        return True
+        lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
+        send_message(chat_id,"\n".join(lines)); return True
 
     if command in ("/encuentro", "/combatir"):
         user = message.get("from", {})

@@ -746,6 +746,24 @@ def init_db():
         cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS challenger_defends_used BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS opponent_defends_used BIGINT NOT NULL DEFAULT 0")
 
+        # KiwRPG V5.5 — historial competitivo PvP amistoso.
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS stats_recorded BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS winner_user_id BIGINT")
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS finish_reason TEXT DEFAULT ''")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pvp_stats (
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                wins BIGINT NOT NULL DEFAULT 0,
+                losses BIGINT NOT NULL DEFAULT 0,
+                surrenders BIGINT NOT NULL DEFAULT 0,
+                duels BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL,
+                PRIMARY KEY(chat_id, user_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_pvp_stats_chat ON rpg_pvp_stats(chat_id,wins DESC,losses ASC)")
+
         conn.commit()
         conn.close()
 
@@ -4621,6 +4639,8 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_hp=?,{opref}_hp=?,{pref}_special_cd=?,{pref}_ultimate_cd=?,{opref}_defending=0,status=?,turn_user_id=?,updated_at=? WHERE id=?",(own_hp,target_hp,scd,ucd,status,turn,int(time.time()),int(duel_id))); conn.commit(); conn.close()
     nd=_pvp_get(duel_id); crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; heal_txt=f' · ❤️ +{heal}' if heal else ''
     if nd['status']=='finished':
+        loser_id=int(nd['opponent_id']) if uid==int(nd['challenger_id']) else int(nd['challenger_id'])
+        _pvp_record_result(duel_id,uid,loser_id,'ko')
         send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n🏆 {_pvp_name(uid)} gana el duelo.\nDuelo amistoso: sin pérdida de HP, EXP ni KW.")
         # El finisher de Kenny Omega es exclusivo de Kiu/The Cleaner y solo aparece
         # cuando One Winged Angel es el golpe que TERMINA el duelo PvP.
@@ -4629,12 +4649,54 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         return True,''
     send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
 
+def _pvp_record_result(duel_id, winner_id, loser_id, reason="ko"):
+    """Registra una sola vez el resultado amistoso del duelo para perfil/ranking."""
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
+        if not d or int(d.get('stats_recorded') or 0):
+            conn.rollback(); conn.close(); return False
+        chat_id=int(d['chat_id'])
+        for player_id, won in ((int(winner_id),1),(int(loser_id),0)):
+            surrender=1 if (not won and reason=='surrender') else 0
+            conn.execute("""
+                INSERT INTO rpg_pvp_stats(chat_id,user_id,wins,losses,surrenders,duels,updated_at)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(chat_id,user_id) DO UPDATE SET
+                    wins=rpg_pvp_stats.wins+EXCLUDED.wins,
+                    losses=rpg_pvp_stats.losses+EXCLUDED.losses,
+                    surrenders=rpg_pvp_stats.surrenders+EXCLUDED.surrenders,
+                    duels=rpg_pvp_stats.duels+1,
+                    updated_at=EXCLUDED.updated_at
+            """,(chat_id,player_id,won,0 if won else 1,surrender,1,now))
+        conn.execute("UPDATE rpg_pvp_duels SET stats_recorded=1,winner_user_id=?,finish_reason=?,updated_at=? WHERE id=?",
+                     (int(winner_id),str(reason),now,int(duel_id)))
+        conn.commit(); conn.close(); return True
+
+def pvp_profile(chat_id, user_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute('SELECT * FROM rpg_pvp_stats WHERE chat_id=? AND user_id=?',(int(chat_id),int(user_id))).fetchone(); conn.close()
+    return row
+
+def pvp_ranking(chat_id, limit=10):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""
+            SELECT s.*, COALESCE(NULLIF(p.display_name,''), CAST(s.user_id AS TEXT)) AS display_name
+            FROM rpg_pvp_stats s LEFT JOIN players p ON p.user_id=s.user_id
+            WHERE s.chat_id=? AND s.duels>0
+            ORDER BY s.wins DESC, (s.wins::numeric / NULLIF(s.duels,0)) DESC, s.losses ASC, s.updated_at ASC
+            LIMIT ?
+        """,(int(chat_id),int(limit))).fetchall(); conn.close()
+    return rows
+
 def pvp_surrender(duel_id, uid):
     d=_pvp_get(duel_id)
     if not d or d['status']!='active' or int(uid) not in (int(d['challenger_id']),int(d['opponent_id'])): return False,'No participas en ese duelo.'
     winner=int(d['opponent_id']) if int(uid)==int(d['challenger_id']) else int(d['challenger_id'])
     with db_lock:
         conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='finished',turn_user_id=NULL,updated_at=? WHERE id=?",(int(time.time()),int(duel_id))); conn.commit(); conn.close()
+    _pvp_record_result(duel_id,winner,int(uid),'surrender')
     send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\nSin pérdida de HP, EXP ni KW."); return True,''
 
 def handle_rpg_callback(query):
@@ -4856,9 +4918,10 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V5.4.1\n\n"
+            "⚔️ KIWRPG — V5.5\n\n"
             "/duelo — PvP abierto · /duelo @usuario — reto directo\n"
             "/rendirse — abandonar un duelo PvP\n"
+            "/pvp — tu perfil de duelos · /rankingpvp — clasificación\n"
             "/encuentro — combate y apariciones por rareza\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — objetos con botones\n"
@@ -4890,6 +4953,29 @@ def process_command(
         uid=message.get("from",{}).get("id"); d=_pvp_active_for_user(chat_id,uid)
         if not d or d['status']!='active': send_message(chat_id,"No estás en un duelo PvP activo."); return True
         pvp_surrender(d['id'],uid); return True
+
+    if command in ("/pvp", "/perfilpvp"):
+        uid=int(message.get("from",{}).get("id"))
+        ensure_player(message.get("from",{}))
+        st=pvp_profile(chat_id,uid)
+        if not st:
+            send_message(chat_id,"⚔️ PERFIL PVP\n\nTodavía no tienes duelos terminados en este chat.")
+            return True
+        duels=int(st['duels']); wins=int(st['wins']); losses=int(st['losses']); surr=int(st['surrenders']); rate=(wins*100.0/duels) if duels else 0.0
+        send_message(chat_id,f"⚔️ PERFIL PVP — {_pvp_name(uid)}\n\n🏆 Victorias: {wins}\n💀 Derrotas: {losses}\n🏳️ Rendiciones: {surr}\n⚔️ Duelos: {duels}\n📊 Victorias: {rate:.1f}%")
+        return True
+
+    if command in ("/rankingpvp", "/toppvp"):
+        rows=pvp_ranking(chat_id,10)
+        if not rows:
+            send_message(chat_id,"Todavía no hay duelos PvP terminados en este chat.")
+            return True
+        lines=["🏆 RANKING PVP",""]; medals=["🥇","🥈","🥉"]
+        for i,row in enumerate(rows,1):
+            icon=medals[i-1] if i<=3 else f"{i}."; duels=int(row['duels']); wins=int(row['wins']); losses=int(row['losses']); rate=(wins*100.0/duels) if duels else 0.0
+            lines.append(f"{icon} {row['display_name']} — {wins}V/{losses}D · {rate:.0f}%")
+        send_message(chat_id,"\n".join(lines))
+        return True
 
     if command in ("/encuentro", "/combatir"):
         user = message.get("from", {})

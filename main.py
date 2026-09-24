@@ -875,6 +875,24 @@ def init_db():
             )
         """)
 
+        # Objetos secretos de la Caja Omega.
+        _omega_items = [
+            ("fragmento_omega","Fragmento Omega","legendario","Fragmento dejado por The Best Bout Machine."),
+            ("nucleo_best_bout","Núcleo Best Bout Machine","legendario","Núcleo legendario de Kenny Omega."),
+            ("cinta_campeon","Cinta del Campeón","epico","Recuerdo épico de una batalla contra Kenny Omega."),
+            ("chispa_omega","Chispa Omega","epico","Una chispa de energía Omega."),
+            ("placa_vtrigger","Placa V-Trigger","epico","Placa marcada por el impacto de un V-Trigger."),
+        ]
+        _omega_now=int(time.time())
+        for _key,_name,_rarity,_desc in _omega_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,
+                 image_file_id,animation_file_id,tradeable,created_at,equip_slot,allowed_classes,min_level,heal_percent)
+                VALUES (?,?,?,'misc',?,0,0,0,NULL,'','',1,?,'','',1,0)
+                ON CONFLICT(item_key) DO UPDATE SET
+                    name=EXCLUDED.name,rarity=EXCLUDED.rarity,description=EXCLUDED.description""",
+                (_key,_name,_rarity,_desc,_omega_now))
+
         # Migraciones compatibles para Omega: HP mundial compartido y HP por intento.
         for _sql in (
             "ALTER TABLE rpg_omega_events ADD COLUMN IF NOT EXISTS hp BIGINT NOT NULL DEFAULT 250000",
@@ -5708,7 +5726,12 @@ def _omega_give_chest(event_id,user_id):
     ]
     rarity="Legendario" if random.random()<0.25 else "Épico"
     item_id,item_name=random.choice(legendary if rarity=="Legendario" else epic)
-    add_inventory_item(int(user_id),item_id,1)
+    char=get_active_character(int(user_id))
+    if not char:
+        return None,None
+    granted=grant_rpg_item(int(user_id),int(char['id']),item_id,source=f"omega:{int(event_id)}")
+    if not granted:
+        return None,None
     try:
         send_message(int(user_id),
             f"📦 CAJA OMEGA ABIERTA\n\n🎁 OBJETO OBTENIDO\n{'🟡' if rarity=='Legendario' else '🟣'} {item_name} ×1\n⭐ {rarity}\n\nSolo tú puedes ver el contenido de tu caja.")
@@ -5753,9 +5776,15 @@ def _omega_finalize(event,defeated=False):
             conn=get_db()
             participants=conn.execute("SELECT user_id FROM rpg_omega_scores WHERE event_id=? AND total_turns>0",(int(event['id']),)).fetchall()
             conn.close()
+        chest_count=0
         for pr in participants:
-            _omega_give_chest(int(event['id']),int(pr['user_id']))
-        lines += ["",f"📦 Caja Omega entregada a {len(participants)} participantes.",
+            try:
+                rarity,item_name=_omega_give_chest(int(event['id']),int(pr['user_id']))
+                if rarity and item_name:
+                    chest_count+=1
+            except Exception as exc:
+                print(f"[OMEGA] Error entregando caja a {int(pr['user_id'])}: {exc}")
+        lines += ["",f"📦 Caja Omega entregada a {chest_count} participantes.",
                   "🎁 Cada caja contiene en secreto un objeto Épico o Legendario."]
     send_message(int(event['chat_id']),"\n".join(lines))
     return True

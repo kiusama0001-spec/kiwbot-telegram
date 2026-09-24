@@ -3420,33 +3420,6 @@ def send_rpg_image(chat_id, asset_key, caption="", reply_markup=None):
         logger.exception("No pude enviar asset RPG %s: %s", asset_key, e)
         return None
 
-def send_boss_victory_animation(chat_id):
-    """Animación universal de victoria para cualquier Boss."""
-    cache_key = "anim:boss_victory"
-    cached = _rpg_asset_get(cache_key)
-    if cached:
-        return telegram("sendAnimation", {"chat_id": chat_id, "animation": cached})
-    path = RPG_ASSETS_DIR / "boss_victory.gif"
-    if not path.exists() or not TELEGRAM_API:
-        return None
-    try:
-        data = apply_current_topic({"chat_id": str(chat_id)})
-        with path.open("rb") as fh:
-            resp = TELEGRAM_SESSION.post(
-                f"{TELEGRAM_API}/sendAnimation",
-                data=data,
-                files={"animation": (path.name, fh, "image/gif")},
-                timeout=TELEGRAM_TIMEOUT,
-            )
-        payload = resp.json() if resp.ok else {}
-        file_id = ((payload.get("result") or {}).get("animation") or {}).get("file_id")
-        if file_id:
-            _rpg_asset_set(cache_key, file_id)
-        return payload
-    except Exception as e:
-        logger.exception("No pude enviar la animación universal de victoria: %s", e)
-        return None
-
 def rpg_class_asset_key(class_name):
     key = str(class_name or "").strip().lower()
     key = key.replace("í", "i").replace("á", "a").replace("é", "e").replace("ó", "o").replace("ú", "u")
@@ -3612,7 +3585,9 @@ def character_card(row):
     deff=f"{row['defense']}"+(f" + {b['defense']} = {eff['defense']}" if b['defense'] else "")
     maxhp=eff['max_hp']
     hpbonus=f" (+{b['hp']} equipo)" if b['hp'] else ""
-    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {row['level']} | EXP: {row['exp']}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{extra}")
+    level_text = f"{row['level']} — MAX" if int(row["level"]) >= RPG_MAX_LEVEL else str(row["level"])
+    exp_text = "MAX" if int(row["level"]) >= RPG_MAX_LEVEL else str(row["exp"])
+    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {level_text} | EXP: {exp_text}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{extra}")
 
 
 
@@ -3801,8 +3776,20 @@ RPG_ABILITIES = {
     ],
 }
 
+RPG_MAX_LEVEL = 100
+
 def exp_needed(level):
-    return max(100, int(level) * 100)
+    """EXP necesaria para subir de nivel. Desde Nv.70 comienza el endgame."""
+    level = max(1, int(level))
+    if level >= RPG_MAX_LEVEL:
+        return 0
+    if level >= 90:
+        return level * 300
+    if level >= 80:
+        return level * 200
+    if level >= 70:
+        return level * 150
+    return max(100, level * 100)
 
 
 def grant_rpg_exp(character_id, amount):
@@ -3814,15 +3801,19 @@ def grant_rpg_exp(character_id, amount):
             if not row:
                 conn.rollback(); conn.close()
                 return None, 0
-            level = int(row["level"]); exp = int(row["exp"]) + amount
+            level = min(RPG_MAX_LEVEL, int(row["level"]))
+            exp = 0 if level >= RPG_MAX_LEVEL else int(row["exp"]) + amount
             hp = int(row["hp"]); max_hp = int(row["max_hp"])
             atk = int(row["atk"]); defense = int(row["defense"])
             gained = 0
-            while exp >= exp_needed(level):
+            while level < RPG_MAX_LEVEL and exp >= exp_needed(level):
                 exp -= exp_needed(level)
                 level += 1; gained += 1
                 max_hp += 10; atk += 2; defense += 1
                 hp = max_hp
+            if level >= RPG_MAX_LEVEL:
+                level = RPG_MAX_LEVEL
+                exp = 0
             conn.execute("""
                 UPDATE characters SET level=?, exp=?, hp=?, max_hp=?, atk=?, defense=?, updated_at=?
                 WHERE id=?
@@ -5387,32 +5378,13 @@ def spawn_boss(chat_id,key=None):
         conn=get_db(); r=conn.execute("INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",(int(chat_id),key,cfg['name'],cfg['level'],cfg['hp'],cfg['hp'],cfg['atk'],cfg['defense'],now,now+cfg['hours']*3600)).fetchone(); conn.commit(); conn.close()
     b=dict(r); return True,b
 
-# Modo secreto de pruebas de Bosses. Solo Kiu puede activarlo y solo afecta combates contra Bosses.
-# Es temporal: se reinicia apagado cuando Render reinicia el proceso.
-BOSS_TEST_MODE_USERS = set()
-BOSS_TEST_HP = 1000
-BOSS_TEST_ATK = 250
-BOSS_TEST_DEF = 50
-
-def _boss_test_mode(user_id):
-    return int(user_id) == int(OWNER_TELEGRAM_ID) and int(user_id) in BOSS_TEST_MODE_USERS
-
-def _boss_test_stats(eff, user_id):
-    if not _boss_test_mode(user_id):
-        return eff
-    boosted = dict(eff)
-    boosted['max_hp'] = BOSS_TEST_HP
-    boosted['atk'] = BOSS_TEST_ATK
-    boosted['defense'] = BOSS_TEST_DEF
-    return boosted
-
 def boss_join(chat_id,user_id,boss_id):
     b=_boss_active(chat_id)
     if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya no está disponible."
     if _boss_participant(boss_id,user_id): return True,"Ya estás participando."
     char=get_active_character(user_id)
     if not char: return False,"Necesitas un personaje activo para entrar."
-    eff=_boss_test_stats(effective_character_stats(char),user_id)
+    eff=effective_character_stats(char)
     with db_lock:
         conn=get_db(); conn.execute("INSERT INTO rpg_boss_participants(boss_id,user_id,character_id,hp,max_hp,joined_at) VALUES(?,?,?,?,?,?) ON CONFLICT(boss_id,user_id) DO NOTHING",(int(boss_id),int(user_id),int(char['id']),int(eff['max_hp']),int(eff['max_hp']),int(time.time()))); conn.commit(); conn.close()
     return True,f"⚔️ {_pvp_name(user_id)} entró al combate contra {b['name']}."
@@ -5543,7 +5515,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
         if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
-        eff=_boss_test_stats(effective_character_stats(char),user_id); dmg=0; heal=0
+        eff=effective_character_stats(char); dmg=0; heal=0
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
             pet_pct=_pet_bonus(user_id,'boss_damage')
@@ -5572,10 +5544,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if not b:
             with db_lock:
                 conn=get_db(); dead=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(boss_id),)).fetchone(); conn.close()
-            dead=dict(dead); n=_boss_reward_all(dead)
-            send_boss_victory_animation(chat_id)
-            reward_kb={"inline_keyboard":[[{"text":"🎁 Ver mi recompensa","callback_data":f"boss_reward:{boss_id}"}]]}
-            send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes.",reply_markup=reward_kb)
+            dead=dict(dead); n=_boss_reward_all(dead); send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes.")
             if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel': send_one_winged_angel_finisher(chat_id)
             return True,''
     # IA decide DESPUÉS de la acción del jugador y antes de resolver su propio resultado.
@@ -5594,7 +5563,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET hp=?,heals_used=heals_used+1 WHERE id=?",(nh,int(boss_id))); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
-        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=_boss_test_stats(effective_character_stats(char),user_id); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
         if int(p['defending']): damage=max(1,int(round(damage*.5))) if damage else 0
         php=max(0,int(p['hp'])-damage)
         with db_lock:
@@ -5606,20 +5575,6 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
-    if data.startswith("boss_reward:"):
-        bid=int(data.split(":",1)[1])
-        with db_lock:
-            conn=get_db()
-            reward=conn.execute("SELECT kw,exp FROM rpg_boss_rewards WHERE boss_id=? AND user_id=?",(bid,int(uid))).fetchone()
-            boss=conn.execute("SELECT name FROM rpg_boss_instances WHERE id=?",(bid,)).fetchone()
-            conn.close()
-        if not reward:
-            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"No tienes una recompensa registrada en esta batalla.","show_alert":True})
-            return True
-        boss_name=(boss['name'] if boss else 'Boss')
-        text=f"🎁 {boss_name}\n💰 +{int(reward['kw']):,} Kiwons\n⭐ +{int(reward['exp']):,} EXP"
-        telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":text,"show_alert":True})
-        return True
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
     if data.startswith("boss_delete_offer:"):
         bid=int(data.split(":",1)[1]); b=_boss_active(chat_id)
@@ -6331,43 +6286,6 @@ def process_command(
             chat_id,
             f"⭐ Ahora tu personaje activo es {selected}.\n\n{character_card(char)}"
         )
-        return True
-
-    if command == "/modotest":
-        user = message.get("from", {})
-        uid = user.get("id")
-        if not is_owner(uid):
-            send_message(chat_id, "No puedes usar ese comando.")
-            return True
-
-        uid = int(uid)
-        enabling = uid not in BOSS_TEST_MODE_USERS
-        if enabling:
-            BOSS_TEST_MODE_USERS.add(uid)
-        else:
-            BOSS_TEST_MODE_USERS.discard(uid)
-
-        # Si Kiu ya está dentro de un Boss, ajusta su HP inmediatamente.
-        b = _boss_active(chat_id)
-        if b:
-            p = _boss_participant(b['id'], uid)
-            if p:
-                char = get_active_character(uid)
-                normal_max = int(effective_character_stats(char)['max_hp']) if char else int(p['max_hp'])
-                new_max = BOSS_TEST_HP if enabling else normal_max
-                new_hp = new_max if enabling else min(int(p['hp']), new_max)
-                with db_lock:
-                    conn = get_db()
-                    conn.execute("UPDATE rpg_boss_participants SET hp=?,max_hp=? WHERE boss_id=? AND user_id=?",
-                                 (new_hp,new_max,int(b['id']),uid))
-                    conn.commit(); conn.close()
-
-        # Confirmar siempre, también en grupos. Antes el comando sí cambiaba el
-        # estado, pero no respondía fuera del chat privado y parecía no funcionar.
-        if enabling:
-            send_message(chat_id, f"🧪 Modo Boss de prueba ACTIVADO.\n❤️ {BOSS_TEST_HP} HP · ⚔️ {BOSS_TEST_ATK} ATK · 🛡️ {BOSS_TEST_DEF} DEF\nSolo afecta combates contra Bosses.")
-        else:
-            send_message(chat_id, "🧪 Modo Boss de prueba DESACTIVADO. Tus estadísticas normales vuelven a usarse.")
         return True
 
     if command in ("/espadas", "/doble_espada"):

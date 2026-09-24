@@ -715,6 +715,34 @@ def init_db():
                   tradeable=excluded.tradeable, equip_slot=excluded.equip_slot, allowed_classes=excluded.allowed_classes, min_level=excluded.min_level
             """, (key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,classes,minlvl))
 
+        # KiwRPG V5.4.1 — PvP amistoso, retos directos y duelos abiertos.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_pvp_duels (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                challenger_id BIGINT NOT NULL,
+                opponent_id BIGINT,
+                challenger_character_id BIGINT NOT NULL,
+                opponent_character_id BIGINT,
+                challenger_hp BIGINT NOT NULL DEFAULT 0,
+                opponent_hp BIGINT NOT NULL DEFAULT 0,
+                challenger_special_cd BIGINT NOT NULL DEFAULT 0,
+                challenger_ultimate_cd BIGINT NOT NULL DEFAULT 0,
+                opponent_special_cd BIGINT NOT NULL DEFAULT 0,
+                opponent_ultimate_cd BIGINT NOT NULL DEFAULT 0,
+                challenger_defending BIGINT NOT NULL DEFAULT 0,
+                opponent_defending BIGINT NOT NULL DEFAULT 0,
+                turn_user_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'open',
+                is_open BIGINT NOT NULL DEFAULT 0,
+                message_id BIGINT,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_pvp_chat_status ON rpg_pvp_duels(chat_id,status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_pvp_users ON rpg_pvp_duels(challenger_id,opponent_id,status)")
+
         conn.commit()
         conn.close()
 
@@ -4426,9 +4454,191 @@ def send_reset_panel(chat_id):
     return send_message(chat_id,"☢️ REINICIO DE KIWRPG\n\nSolo Kiu puede ejecutar esta acción. Archiva la era actual en Héroes Legendarios y reinicia el mundo RPG.", reply_markup={"inline_keyboard":[[{"text":"☢️ Reiniciar KiwRPG","callback_data":"rpg_reset_begin"}]]})
 
 
+# =========================================================
+# KIWRPG V5.4.1 — PVP AMISTOSO
+# =========================================================
+
+PVP_EXPIRE_SECONDS = 300
+PVP_DICE_MULT = {1:0.0, 2:1.00, 3:1.10, 4:1.20, 5:1.35, 6:1.60}
+
+def _pvp_name(uid):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT display_name FROM players WHERE user_id=?",(int(uid),)).fetchone(); conn.close()
+    return (row or {}).get("display_name") or f"Jugador {uid}"
+
+def _pvp_active_for_user(chat_id, uid):
+    with db_lock:
+        conn=get_db(); row=conn.execute("""SELECT * FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1""",(int(chat_id),int(uid),int(uid))).fetchone(); conn.close()
+    return row
+
+def _pvp_get(duel_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_pvp_duels WHERE id=?",(int(duel_id),)).fetchone(); conn.close()
+    return row
+
+def _pvp_char(cid):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM characters WHERE id=?",(int(cid),)).fetchone(); conn.close()
+    return row
+
+def _pvp_keyboard(duel, viewer_turn=True):
+    if duel['status']!='active': return None
+    turn=int(duel['turn_user_id'] or 0)
+    char_id=int(duel['challenger_character_id'] if turn==int(duel['challenger_id']) else duel['opponent_character_id'])
+    char=_pvp_char(char_id); abilities=rpg_abilities_for(char['class_name'])
+    scd=int(duel['challenger_special_cd'] if turn==int(duel['challenger_id']) else duel['opponent_special_cd'])
+    ucd=int(duel['challenger_ultimate_cd'] if turn==int(duel['challenger_id']) else duel['opponent_ultimate_cd'])
+    st=f"{abilities[1]['emoji']} {abilities[1]['name']}" if scd<=0 else f"⏳ {abilities[1]['name']} ({scd})"
+    ut=f"{abilities[2]['emoji']} {abilities[2]['name']}" if ucd<=0 else f"⏳ {abilities[2]['name']} ({ucd})"
+    return {'inline_keyboard':[
+      [{'text':f"{abilities[0]['emoji']} {abilities[0]['name']}",'callback_data':f"pvp_atk:{duel['id']}:{abilities[0]['key']}"}, {'text':st,'callback_data':f"pvp_atk:{duel['id']}:{abilities[1]['key']}"}],
+      [{'text':ut,'callback_data':f"pvp_atk:{duel['id']}:{abilities[2]['key']}"}],
+      [{'text':'🛡️ Defender','callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}]
+    ]}
+
+def _pvp_card(duel):
+    c1=_pvp_char(duel['challenger_character_id']); c2=_pvp_char(duel['opponent_character_id']) if duel.get('opponent_character_id') else None
+    n1=_pvp_name(duel['challenger_id']); n2=_pvp_name(duel['opponent_id']) if duel.get('opponent_id') else 'Esperando rival...'
+    if not c2:
+        return f"⚔️ DUELO ABIERTO\n\n{n1} — {c1['name']} · {c1['class_name']} · Nv. {c1['level']}\n\n¿Quién se atreve?"
+    turn='—'
+    if duel['status']=='active': turn=_pvp_name(duel['turn_user_id'])
+    return (f"⚔️ DUELO PVP\n\n{n1} — {c1['name']} · {c1['class_name']}\n❤️ {duel['challenger_hp']}/{effective_character_stats(c1)['max_hp']}\n\nVS\n\n"
+            f"{n2} — {c2['name']} · {c2['class_name']}\n❤️ {duel['opponent_hp']}/{effective_character_stats(c2)['max_hp']}\n\n🎯 Turno: {turn}")
+
+def start_pvp_challenge(chat_id, user, target=None):
+    uid=int(user['id']); ensure_player(user); ensure_owner_secret_character(user)
+    char=get_active_character(uid)
+    if not char: return False,'Primero crea un personaje con /crear_personaje.'
+    if _pvp_active_for_user(chat_id,uid): return False,'Ya tienes un duelo pendiente o activo.'
+    with db_lock:
+        conn=get_db(); pve=conn.execute('SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=?',(int(chat_id),uid)).fetchone(); conn.close()
+    if pve: return False,'Termina o abandona tu encuentro actual antes de entrar a PvP.'
+    opp_id=None; is_open=1; status='open'
+    if target:
+        opp_id=int(target['user_id']); is_open=0; status='pending'
+        if opp_id==uid: return False,'No puedes desafiarte a ti mismo. 😌'
+        opp=get_active_character(opp_id)
+        if not opp: return False,'Ese jugador no tiene un personaje activo.'
+        if _pvp_active_for_user(chat_id,opp_id): return False,'Ese jugador ya tiene un duelo pendiente o activo.'
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); row=conn.execute("""INSERT INTO rpg_pvp_duels(chat_id,challenger_id,opponent_id,challenger_character_id,status,is_open,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) RETURNING id""",(int(chat_id),uid,opp_id,int(char['id']),status,is_open,now,now)).fetchone(); conn.commit(); conn.close()
+    did=int(row['id']); name=user.get('first_name') or user.get('username') or char['name']
+    if is_open:
+        txt=f"⚔️ DUELO ABIERTO\n\n{name} — {char['name']} · {char['class_name']} · Nv. {char['level']}\n\n¿Quién se atreve?"
+        kb={'inline_keyboard':[[{'text':'⚔️ ACEPTAR DUELO','callback_data':f'pvp_accept:{did}'}],[{'text':'❌ Cancelar','callback_data':f'pvp_cancel:{did}'}]]}
+    else:
+        txt=f"⚔️ DESAFÍO PVP\n\n{name} desafía a {_pvp_name(opp_id)}.\n{char['name']} · {char['class_name']} · Nv. {char['level']}"
+        kb={'inline_keyboard':[[{'text':'⚔️ Aceptar','callback_data':f'pvp_accept:{did}'},{'text':'❌ Rechazar','callback_data':f'pvp_reject:{did}'}],[{'text':'Cancelar reto','callback_data':f'pvp_cancel:{did}'}]]}
+    res=send_message(chat_id,txt,reply_markup=kb)
+    mid=((res or {}).get('result') or {}).get('message_id')
+    if mid:
+        with db_lock:
+            conn=get_db(); conn.execute('UPDATE rpg_pvp_duels SET message_id=? WHERE id=?',(int(mid),did)); conn.commit(); conn.close()
+    return True,txt
+
+def accept_pvp(duel_id, chat_id, user):
+    uid=int(user['id']); ensure_player(user); ensure_owner_secret_character(user)
+    with db_lock:
+        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
+        if not d or d['status'] not in ('open','pending'): conn.rollback(); conn.close(); return False,'Ese desafío ya no está disponible.'
+        if int(d['chat_id'])!=int(chat_id): conn.rollback(); conn.close(); return False,'Ese duelo pertenece a otro chat.'
+        if int(d['challenger_id'])==uid: conn.rollback(); conn.close(); return False,'No puedes aceptar tu propio duelo. 😂'
+        if d['status']=='pending' and int(d['opponent_id'])!=uid: conn.rollback(); conn.close(); return False,'Ese desafío no es para ti.'
+        if int(time.time())-int(d['created_at'])>PVP_EXPIRE_SECONDS:
+            conn.execute("UPDATE rpg_pvp_duels SET status='expired',updated_at=? WHERE id=?",(int(time.time()),int(duel_id))); conn.commit(); conn.close(); return False,'Ese desafío expiró.'
+        char=get_active_character(uid)
+        if not char: conn.rollback(); conn.close(); return False,'Primero necesitas un personaje activo.'
+        busy=conn.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND id<>? AND status IN ('open','pending','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(int(chat_id),int(duel_id),uid,uid)).fetchone()
+        pve=conn.execute('SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=?',(int(chat_id),uid)).fetchone()
+        if busy or pve: conn.rollback(); conn.close(); return False,'Ahora mismo estás ocupado en otro combate o desafío.'
+        c1=_pvp_char(d['challenger_character_id']); e1=effective_character_stats(c1); e2=effective_character_stats(char)
+        conn.execute("""UPDATE rpg_pvp_duels SET opponent_id=?,opponent_character_id=?,challenger_hp=?,opponent_hp=?,status='initiative',is_open=0,updated_at=? WHERE id=?""",(uid,int(char['id']),int(e1['max_hp']),int(e2['max_hp']),int(time.time()),int(duel_id))); conn.commit(); conn.close()
+    # Dos dados reales de Telegram: uno por combatiente.
+    r1=send_dice(chat_id,'🎲'); r2=send_dice(chat_id,'🎲')
+    v1=int((((r1 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6)); v2=int((((r2 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
+    # empate: desempate real adicional hasta resolver
+    while v1==v2:
+        send_message(chat_id,f'⚖️ Iniciativa empatada ({v1}-{v2}). Desempate...')
+        r1=send_dice(chat_id,'🎲'); r2=send_dice(chat_id,'🎲'); v1=int((((r1 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6)); v2=int((((r2 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
+    first=int(d['challenger_id']) if v1>v2 else uid
+    with db_lock:
+        conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='active',turn_user_id=?,updated_at=? WHERE id=?",(first,int(time.time()),int(duel_id))); conn.commit(); conn.close()
+    duel=_pvp_get(duel_id); send_message(chat_id,f"🎲 Iniciativa: {_pvp_name(d['challenger_id'])} {v1} — { _pvp_name(uid)} {v2}\n\n"+_pvp_card(duel),reply_markup=_pvp_keyboard(duel)); return True,''
+
+def pvp_action(duel_id, uid, ability_key=None, defend=False):
+    uid=int(uid)
+    with db_lock:
+        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
+        if not d or d['status']!='active': conn.rollback(); conn.close(); return False,'Ese duelo ya no está activo.'
+        if int(d['turn_user_id'])!=uid: conn.rollback(); conn.close(); return False,'Todavía no es tu turno. 😌'
+        is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); char=_pvp_char(cid)
+        scd=int(d['challenger_special_cd'] if is_ch else d['opponent_special_cd']); ucd=int(d['challenger_ultimate_cd'] if is_ch else d['opponent_ultimate_cd'])
+        if defend:
+            nsc=max(0,scd-1); nuc=max(0,ucd-1); pref='challenger' if is_ch else 'opponent'; other=int(d['opponent_id'] if is_ch else d['challenger_id'])
+            conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_defending=1,{pref}_special_cd=?,{pref}_ultimate_cd=?,turn_user_id=?,updated_at=? WHERE id=?",(nsc,nuc,other,int(time.time()),int(duel_id))); conn.commit(); conn.close()
+            nd=_pvp_get(duel_id); send_message(d['chat_id'],f"🛡️ {_pvp_name(uid)} adopta una postura defensiva.\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
+        ab=_rpg_get_ability(char['class_name'],ability_key)
+        if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
+        if ab.get('special') and scd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {scd} turnos."
+        if ab.get('ultimate') and ucd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {ucd} turnos."
+        conn.rollback(); conn.close()
+    dr=send_dice(d['chat_id'],'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
+    with db_lock:
+        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone(); is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); ab=_rpg_get_ability(char['class_name'],ability_key); eff=effective_character_stats(char); oe=effective_character_stats(opp)
+        target_hp=int(d['opponent_hp'] if is_ch else d['challenger_hp']); defending=int(d['opponent_defending'] if is_ch else d['challenger_defending']); dmg=0; heal=0
+        if roll!=1:
+            raw=(eff['atk']*float(ab['power'])*PVP_DICE_MULT[roll])-(oe['defense']*(1.0-float(ab.get('pen',0)))*0.36); dmg=max(1,int(round(raw*0.78)))
+            if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
+            if ab.get('execute') and target_hp<=int(oe['max_hp']*.35): dmg=max(1,int(round(dmg*1.18)))
+            if defending: dmg=max(1,int(round(dmg*.50)))
+            if ab.get('heal_pct'): heal=max(1,int(round(eff['max_hp']*float(ab['heal_pct'])*PVP_DICE_MULT[roll])))
+        target_hp=max(0,target_hp-dmg); own_hp=int(d['challenger_hp'] if is_ch else d['opponent_hp']); own_hp=min(int(eff['max_hp']),own_hp+heal)
+        pref='challenger' if is_ch else 'opponent'; opref='opponent' if is_ch else 'challenger'; scd=int(d[pref+'_special_cd']); ucd=int(d[pref+'_ultimate_cd']); scd=max(0,scd-1); ucd=max(0,ucd-1)
+        if ab.get('special'): scd=int(ab.get('cooldown',2));
+        if ab.get('ultimate'): ucd=int(ab.get('cooldown',4));
+        other=int(d['opponent_id'] if is_ch else d['challenger_id']); status='finished' if target_hp<=0 else 'active'; turn=None if status=='finished' else other
+        conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_hp=?,{opref}_hp=?,{pref}_special_cd=?,{pref}_ultimate_cd=?,{opref}_defending=0,status=?,turn_user_id=?,updated_at=? WHERE id=?",(own_hp,target_hp,scd,ucd,status,turn,int(time.time()),int(duel_id))); conn.commit(); conn.close()
+    nd=_pvp_get(duel_id); crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; heal_txt=f' · ❤️ +{heal}' if heal else ''
+    if nd['status']=='finished': send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n🏆 {_pvp_name(uid)} gana el duelo.\nDuelo amistoso: sin pérdida de HP, EXP ni KW."); return True,''
+    send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
+
+def pvp_surrender(duel_id, uid):
+    d=_pvp_get(duel_id)
+    if not d or d['status']!='active' or int(uid) not in (int(d['challenger_id']),int(d['opponent_id'])): return False,'No participas en ese duelo.'
+    winner=int(d['opponent_id']) if int(uid)==int(d['challenger_id']) else int(d['challenger_id'])
+    with db_lock:
+        conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='finished',turn_user_id=NULL,updated_at=? WHERE id=?",(int(time.time()),int(duel_id))); conn.commit(); conn.close()
+    send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\nSin pérdida de HP, EXP ni KW."); return True,''
+
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("pvp_accept:"):
+        ok,msg2=accept_pvp(int(data.split(":",1)[1]),chat_id,user)
+        if not ok: send_message(chat_id,msg2)
+        return True
+    if data.startswith("pvp_cancel:") or data.startswith("pvp_reject:"):
+        did=int(data.split(":",1)[1]); d=_pvp_get(did)
+        if not d: return True
+        allowed=(uid==int(d['challenger_id'])) if data.startswith('pvp_cancel:') else (d.get('opponent_id') and uid==int(d['opponent_id']))
+        if not allowed: send_message(chat_id,"Ese botón no es para ti. 😌"); return True
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='cancelled',updated_at=? WHERE id=? AND status IN ('open','pending')",(int(time.time()),did)); conn.commit(); conn.close()
+        send_message(chat_id,"❌ Duelo cancelado." if data.startswith('pvp_cancel:') else "❌ Desafío rechazado."); return True
+    if data.startswith("pvp_atk:"):
+        _,did,key=data.split(":",2); ok,msg2=pvp_action(int(did),uid,ability_key=key)
+        if not ok: send_message(chat_id,msg2)
+        return True
+    if data.startswith("pvp_def:"):
+        ok,msg2=pvp_action(int(data.split(":",1)[1]),uid,defend=True)
+        if not ok: send_message(chat_id,msg2)
+        return True
+    if data.startswith("pvp_surrender:"):
+        ok,msg2=pvp_surrender(int(data.split(":",1)[1]),uid)
+        if not ok: send_message(chat_id,msg2)
+        return True
     if data.startswith("rpg_attack:"):
         return resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
     if data=="rpg_defend":
@@ -4621,7 +4831,9 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V5.3\n\n"
+            "⚔️ KIWRPG — V5.4.1\n\n"
+            "/duelo — PvP abierto · /duelo @usuario — reto directo\n"
+            "/rendirse — abandonar un duelo PvP\n"
             "/encuentro — combate y apariciones por rareza\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — objetos con botones\n"
@@ -4632,6 +4844,27 @@ def process_command(
             "En combate elige tus movimientos con botones. KiwBot lanza el dado REAL 🎲 de Telegram automáticamente."
         )
         return True
+
+    if command == "/duelo":
+        user=message.get("from",{})
+        parts=str(text or "").strip().split(maxsplit=1)
+        target=None
+        if len(parts)>1:
+            raw=parts[1].strip().split()[0]
+            if raw.startswith("@"):
+                target=find_cached_user(chat_id,raw)
+                if not target:
+                    send_message(chat_id,"No conozco todavía a ese usuario en este grupo. Que escriba al menos un mensaje y vuelve a intentarlo."); return True
+            else:
+                send_message(chat_id,"Usa /duelo para abrirlo a cualquiera o /duelo @usuario para retar a alguien."); return True
+        ok,msg2=start_pvp_challenge(chat_id,user,target)
+        if not ok: send_message(chat_id,msg2)
+        return True
+
+    if command in ("/rendirse", "/rendicion"):
+        uid=message.get("from",{}).get("id"); d=_pvp_active_for_user(chat_id,uid)
+        if not d or d['status']!='active': send_message(chat_id,"No estás en un duelo PvP activo."); return True
+        pvp_surrender(d['id'],uid); return True
 
     if command in ("/encuentro", "/combatir"):
         user = message.get("from", {})

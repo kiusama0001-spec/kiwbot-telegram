@@ -2062,6 +2062,16 @@ def send_message(
     return result
 
 
+def send_private_message(user_id, text, reply_markup=None):
+    """Envía un DM sin heredar message_thread_id del grupo/topic actual."""
+    old_thread=get_current_message_thread_id()
+    try:
+        set_current_message_thread_id(None)
+        return send_message(int(user_id),text,reply_markup=reply_markup)
+    finally:
+        set_current_message_thread_id(old_thread)
+
+
 def send_dice(chat_id, emoji="🎲", reply_to_message_id=None):
     data = {"chat_id": chat_id, "emoji": emoji}
     if reply_to_message_id:
@@ -5734,18 +5744,19 @@ def _omega_grant_chest(event_id,user_id):
                         ON CONFLICT(event_id,user_id) DO NOTHING""",
                      (int(event_id),int(user_id),now))
         conn.commit(); conn.close()
+    notified=False
     try:
-        send_message(int(user_id),
+        notified=bool(send_private_message(int(user_id),
             "📦 CAJA OMEGA OBTENIDA\n\n"
             "Kenny Omega ha caído y tienes una recompensa esperando.\n"
             "🔒 Su contenido sigue siendo secreto.\n\n"
             "Ábrela cuando quieras.",
             reply_markup={"inline_keyboard":[[
                 {"text":"🎁 Abrir Caja Omega","callback_data":f"omega_chest_open:{int(event_id)}"}
-            ]]})
-    except Exception:
-        # La caja queda guardada aunque Telegram no permita enviar el DM.
-        pass
+            ]]}))
+    except Exception as exc:
+        print(f"[OMEGA] Error notificando Caja Omega a {int(user_id)}: {exc}")
+    # La caja permanece guardada aunque Telegram no pueda mandar el DM.
     return True
 
 def _omega_open_chest(event_id,user_id,chat_id):
@@ -5843,12 +5854,12 @@ def _omega_finalize(event,defeated=False):
             exp_state,levels_gained=grant_rpg_exp(int(r['character_id']),exp)
             if kw_ok and exp_state is not None:
                 try:
-                    send_message(int(r['user_id']),
-                        f"🏆 RECOMPENSA OMEGA ACREDITADA\\n\\n"
-                        f"{medals[i-1]} Puesto #{i}\\n"
-                        f"🪙 +{kw:,} KW\\n"
-                        f"⭐ +{exp:,} EXP\\n"
-                        f"💰 Saldo actual: {int(new_balance):,} KW\\n"
+                    send_private_message(int(r['user_id']),
+                        f"🏆 RECOMPENSA OMEGA ACREDITADA\n\n"
+                        f"{medals[i-1]} Puesto #{i}\n"
+                        f"🪙 +{kw:,} KW\n"
+                        f"⭐ +{exp:,} EXP\n"
+                        f"💰 Saldo actual: {int(new_balance):,} KW\n"
                         f"📈 Nivel actual: {int(exp_state['level'])}")
                 except Exception:
                     pass
@@ -6423,6 +6434,10 @@ def handle_rpg_callback(query):
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
+        char=get_active_character(uid)
+        if _is_private_chat_obj(msg.get("chat")) and char and is_owner(uid) and char['class_name']=='The Cleaner':
+            active=bool(char['secret_blades_active'])
+            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
         text_inv="🎒 INVENTARIO\n\nToca un objeto para administrarlo." if rows else "🎒 INVENTARIO\n\nTodavía está vacío."
         send_message(chat_id,text_inv,reply_markup={"inline_keyboard":kb} if kb else None); return True
     if data=="rpg_toggle_blades":
@@ -6881,6 +6896,10 @@ def process_command(
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
+        char=get_active_character(user_id)
+        if chat.get("type")=="private" and char and is_owner(user_id) and char['class_name']=='The Cleaner':
+            active=bool(char['secret_blades_active'])
+            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
         send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
         return True
 

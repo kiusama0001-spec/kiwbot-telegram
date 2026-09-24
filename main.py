@@ -847,6 +847,7 @@ def init_db():
                 user_id BIGINT PRIMARY KEY, amount BIGINT NOT NULL DEFAULT 0
             )
         """)
+        cur.execute("ALTER TABLE rpg_pets_owned ADD COLUMN IF NOT EXISTS level BIGINT NOT NULL DEFAULT 1")
 
         conn.commit()
         conn.close()
@@ -4894,12 +4895,45 @@ def pvp_surrender(duel_id, uid):
 # =========================================================
 
 RPG_PETS = {
-    "slime_lunar": {"name":"Slime Lunar","icon":"⚪","rarity":"Común","weight":50,"bonus":"exp","pct":2,"desc":"+2% EXP en PvE y Bosses."},
-    "lobo_carmesi": {"name":"Lobo Carmesí","icon":"🔵","rarity":"Rara","weight":28,"bonus":"pve_damage","pct":2,"desc":"+2% daño en encuentros PvE."},
-    "fenix_azur": {"name":"Fénix Azur","icon":"🟣","rarity":"Épica","weight":15,"bonus":"boss_damage","pct":3,"desc":"+3% daño contra Bosses."},
-    "dragon_dorado": {"name":"Dragón Dorado","icon":"🟡","rarity":"Legendaria","weight":6,"bonus":"boss_damage","pct":5,"desc":"+5% daño contra Bosses."},
-    "angel_negro": {"name":"Ángel Negro","icon":"🔴","rarity":"Mítica","weight":1,"bonus":"kiwons","pct":5,"desc":"+5% Kiwons obtenidos en PvE y Bosses."},
+    # COMUNES — 65% total (10)
+    "slime_lunar": {"name":"Slime Lunar","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"exp","pct":2,"desc":"+2% EXP en PvE y Bosses."},
+    "murcielago_cueva": {"name":"Murciélago de Cueva","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"kiwons","pct":2,"desc":"+2% Kiwons obtenidos en PvE y Bosses."},
+    "zorro_ceniza": {"name":"Zorro de Ceniza","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"pve_damage","pct":2,"desc":"+2% daño en encuentros PvE."},
+    "buho_errante": {"name":"Búho Errante","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"exp","pct":2,"desc":"+2% EXP en PvE y Bosses."},
+    "gato_runa": {"name":"Gato de Runa","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"kiwons","pct":2,"desc":"+2% Kiwons obtenidos en PvE y Bosses."},
+    "cuervo_gris": {"name":"Cuervo Gris","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"boss_damage","pct":2,"desc":"+2% daño contra Bosses."},
+    "lagarto_brasa": {"name":"Lagarto de Brasa","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"pve_damage","pct":2,"desc":"+2% daño en encuentros PvE."},
+    "conejo_astral": {"name":"Conejo Astral","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"exp","pct":2,"desc":"+2% EXP en PvE y Bosses."},
+    "escarabajo_hierro": {"name":"Escarabajo de Hierro","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"boss_damage","pct":2,"desc":"+2% daño contra Bosses."},
+    "luci_luna": {"name":"Luciérnaga Lunar","icon":"⚪","rarity":"Común","weight":6.5,"bonus":"kiwons","pct":2,"desc":"+2% Kiwons obtenidos en PvE y Bosses."},
+    # RARAS — 25% total (8)
+    "lobo_carmesi": {"name":"Lobo Carmesí","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"pve_damage","pct":3,"desc":"+3% daño en encuentros PvE."},
+    "pantera_niebla": {"name":"Pantera de Niebla","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"boss_damage","pct":3,"desc":"+3% daño contra Bosses."},
+    "halcon_tempestad": {"name":"Halcón de Tempestad","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"exp","pct":3,"desc":"+3% EXP en PvE y Bosses."},
+    "serpiente_jade": {"name":"Serpiente de Jade","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"kiwons","pct":3,"desc":"+3% Kiwons obtenidos en PvE y Bosses."},
+    "tigre_hielo": {"name":"Tigre de Hielo","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"pve_damage","pct":3,"desc":"+3% daño en encuentros PvE."},
+    "oso_runa": {"name":"Oso Rúnico","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"boss_damage","pct":3,"desc":"+3% daño contra Bosses."},
+    "kitsune_celeste": {"name":"Kitsune Celeste","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"exp","pct":3,"desc":"+3% EXP en PvE y Bosses."},
+    "sabueso_nocturno": {"name":"Sabueso Nocturno","icon":"🔵","rarity":"Rara","weight":3.125,"bonus":"kiwons","pct":3,"desc":"+3% Kiwons obtenidos en PvE y Bosses."},
+    # ÉPICAS — 8% total (5)
+    "fenix_azur": {"name":"Fénix Azur","icon":"🟣","rarity":"Épica","weight":1.6,"bonus":"boss_damage","pct":4,"desc":"+4% daño contra Bosses."},
+    "grifon_real": {"name":"Grifón Real","icon":"🟣","rarity":"Épica","weight":1.6,"bonus":"pve_damage","pct":4,"desc":"+4% daño en encuentros PvE."},
+    "kirin_tormenta": {"name":"Kirin de Tormenta","icon":"🟣","rarity":"Épica","weight":1.6,"bonus":"exp","pct":4,"desc":"+4% EXP en PvE y Bosses."},
+    "cerbero_joven": {"name":"Cerbero Joven","icon":"🟣","rarity":"Épica","weight":1.6,"bonus":"kiwons","pct":4,"desc":"+4% Kiwons obtenidos en PvE y Bosses."},
+    "wyvern_obsidiana": {"name":"Wyvern de Obsidiana","icon":"🟣","rarity":"Épica","weight":1.6,"bonus":"boss_damage","pct":4,"desc":"+4% daño contra Bosses."},
+    # LEGENDARIAS — 1.8% total (4)
+    "dragon_dorado": {"name":"Dragón Dorado","icon":"🟡","rarity":"Legendaria","weight":0.45,"bonus":"boss_damage","pct":6,"desc":"+6% daño contra Bosses."},
+    "fenrir_blanco": {"name":"Fenrir Blanco","icon":"🟡","rarity":"Legendaria","weight":0.45,"bonus":"pve_damage","pct":6,"desc":"+6% daño en encuentros PvE."},
+    "quimera_solar": {"name":"Quimera Solar","icon":"🟡","rarity":"Legendaria","weight":0.45,"bonus":"exp","pct":6,"desc":"+6% EXP en PvE y Bosses."},
+    "leviatan_celeste": {"name":"Leviatán Celeste","icon":"🟡","rarity":"Legendaria","weight":0.45,"bonus":"kiwons","pct":6,"desc":"+6% Kiwons obtenidos en PvE y Bosses."},
+    # MÍTICAS DEMONÍACAS — 0.2% total (3)
+    "angel_negro": {"name":"Ángel Negro del Abismo","icon":"🔴","rarity":"Mítica","weight":0.0666667,"bonus":"kiwons","pct":8,"desc":"+8% Kiwons obtenidos en PvE y Bosses."},
+    "azazel_devoraalmas": {"name":"Azazel, Devorador de Almas","icon":"🔴","rarity":"Mítica","weight":0.0666667,"bonus":"boss_damage","pct":8,"desc":"+8% daño contra Bosses."},
+    "belial_rey_infernal": {"name":"Belial, Rey del Infierno","icon":"🔴","rarity":"Mítica","weight":0.0666666,"bonus":"pve_damage","pct":8,"desc":"+8% daño en encuentros PvE."},
 }
+RPG_PET_LEVEL_COSTS = {1:2, 2:4, 3:7, 4:10}
+RPG_PET_MAX_LEVEL = 5
+
 RPG_GACHA_FANG_COST = 10
 RPG_GACHA_FANG_ITEM = "colmillo_ceniza"
 
@@ -4930,7 +4964,7 @@ def _equipped_pet(user_id):
 
 def _pet_bonus(user_id, kind):
     pet=_equipped_pet(user_id)
-    return int(pet.get('pct',0)) if pet and pet.get('bonus')==kind else 0
+    return float(pet.get('pct',0)) + max(0,int(pet.get('level',1))-1) if pet and pet.get('bonus')==kind else 0
 
 
 def _fang_count(user_id):
@@ -4963,7 +4997,7 @@ def _consume_fangs(user_id, amount):
 def pet_gacha_text(user_id):
     return (f"🎰 COFRE DE FAMILIAR\n\n🦷 Coste: {RPG_GACHA_FANG_COST} Colmillos de Ceniza\n"
             f"🎒 Tienes: {_fang_count(user_id)}\n\n"
-            "⚪ Común 50% · 🔵 Rara 28% · 🟣 Épica 15%\n🟡 Legendaria 6% · 🔴 Mítica 1%\n\n"
+            "⚪ Común 65% · 🔵 Rara 25% · 🟣 Épica 8%\n🟡 Legendaria 1.8% · 🔴 Mítica 0.2%\n\n"
             "Las mascotas son permanentes. Solo una puede estar equipada.\n"
             "Los duplicados se convierten en ✨ Esencia de mascota.")
 
@@ -4974,23 +5008,71 @@ def pet_gacha_keyboard():
                                [{"text":"🏪 TIENDA RPG","callback_data":"rpg_shop"}]]}
 
 
-def pets_text_keyboard(user_id):
-    rows=_pet_owned_rows(user_id)
+def _pet_essence(user_id):
     with db_lock:
         conn=get_db(); er=conn.execute("SELECT amount FROM rpg_pet_essence WHERE user_id=?",(int(user_id),)).fetchone(); conn.close()
-    essence=int(er['amount'] if er else 0)
-    lines=["🐾 TUS MASCOTAS",""]
-    kb=[]
+    return int(er['amount'] if er else 0)
+
+
+def _pet_desc_at_level(cfg, level):
+    pct=float(cfg.get('pct',0))+max(0,int(level)-1)
+    shown=int(pct) if pct.is_integer() else pct
+    labels={"exp":f"+{shown}% EXP en PvE y Bosses.","kiwons":f"+{shown}% Kiwons obtenidos en PvE y Bosses.","pve_damage":f"+{shown}% daño en encuentros PvE.","boss_damage":f"+{shown}% daño contra Bosses."}
+    return labels.get(cfg.get('bonus'),cfg.get('desc',''))
+
+
+def pets_text_keyboard(user_id):
+    rows=_pet_owned_rows(user_id); essence=_pet_essence(user_id)
+    lines=["🐾 TUS MASCOTAS",""]; kb=[]
     if not rows: lines.append("Todavía no tienes mascotas. Abre un Cofre de Familiar.")
     for r in rows:
         cfg=RPG_PETS.get(r['pet_key']);
         if not cfg: continue
-        active=" ✅ EQUIPADA" if int(r['equipped']) else ""
-        lines.append(f"{cfg['icon']} {cfg['name']} — {cfg['rarity']}{active}\n   {cfg['desc']}")
-        kb.append([{"text":f"{'✅ ' if int(r['equipped']) else ''}{cfg['icon']} {cfg['name']}","callback_data":f"pet_equip:{r['pet_key']}"}])
-    lines += ["",f"✨ Esencia de mascota: {essence}"]
+        level=int(r.get('level') or 1); active=" ✅ EQUIPADA" if int(r['equipped']) else ""
+        lines.append(f"{cfg['icon']} {cfg['name']} — {cfg['rarity']} · Nv.{level}{active}\n   {_pet_desc_at_level(cfg,level)}")
+        kb.append([{"text":f"{'✅ ' if int(r['equipped']) else ''}{cfg['icon']} {cfg['name']} · Nv.{level}","callback_data":f"pet_view:{r['pet_key']}"}])
+    lines += ["",f"✨ Esencia de mascota: {essence}",f"📚 Colección: {len(rows)}/{len(RPG_PETS)}"]
     kb.append([{"text":"🎰 Cofre de Familiar","callback_data":"pet_gacha"}])
     return "\n".join(lines),{"inline_keyboard":kb}
+
+
+def pet_detail_keyboard(user_id,key):
+    cfg=RPG_PETS.get(key)
+    if not cfg: return "Mascota desconocida.",None
+    with db_lock:
+        conn=get_db(); r=conn.execute("SELECT * FROM rpg_pets_owned WHERE user_id=? AND pet_key=?",(int(user_id),key)).fetchone(); conn.close()
+    if not r: return "Esa mascota no está en tu colección.",None
+    level=int(r.get('level') or 1); essence=_pet_essence(user_id)
+    lines=[f"{cfg['icon']} {cfg['name']}",f"{cfg['rarity']} · Nivel {level}/{RPG_PET_MAX_LEVEL}","",_pet_desc_at_level(cfg,level),f"✨ Esencia disponible: {essence}"]
+    kb=[]
+    if not int(r['equipped']): kb.append([{"text":"🐾 EQUIPAR","callback_data":f"pet_equip:{key}"}])
+    else: lines.append("✅ Mascota equipada actualmente.")
+    if level<RPG_PET_MAX_LEVEL:
+        cost=RPG_PET_LEVEL_COSTS[level]; kb.append([{"text":f"⬆️ SUBIR A Nv.{level+1} · {cost}✨","callback_data":f"pet_level:{key}"}])
+    else: lines.append("🏆 Nivel máximo alcanzado.")
+    kb.append([{"text":"⬅️ MIS MASCOTAS","callback_data":"pet_list"},{"text":"🎰 GACHA","callback_data":"pet_gacha"}])
+    return "\n".join(lines),{"inline_keyboard":kb}
+
+
+def level_pet(user_id,key):
+    cfg=RPG_PETS.get(key)
+    if not cfg: return False,"Mascota desconocida."
+    with db_lock:
+        conn=get_db()
+        try:
+            r=conn.execute("SELECT * FROM rpg_pets_owned WHERE user_id=? AND pet_key=? FOR UPDATE",(int(user_id),key)).fetchone()
+            if not r: conn.rollback(); conn.close(); return False,"Esa mascota no está en tu colección."
+            level=int(r.get('level') or 1)
+            if level>=RPG_PET_MAX_LEVEL: conn.rollback(); conn.close(); return False,"🏆 Esa mascota ya está en nivel máximo."
+            cost=RPG_PET_LEVEL_COSTS[level]
+            er=conn.execute("SELECT amount FROM rpg_pet_essence WHERE user_id=? FOR UPDATE",(int(user_id),)).fetchone(); essence=int(er['amount'] if er else 0)
+            if essence<cost: conn.rollback(); conn.close(); return False,f"✨ Necesitas {cost} Esencias. Tienes {essence}."
+            conn.execute("UPDATE rpg_pet_essence SET amount=amount-? WHERE user_id=?",(cost,int(user_id)))
+            conn.execute("UPDATE rpg_pets_owned SET level=level+1 WHERE user_id=? AND pet_key=?",(int(user_id),key))
+            conn.commit(); conn.close()
+            return True,f"⬆️ {cfg['name']} subió a Nv.{level+1}.\n{_pet_desc_at_level(cfg,level+1)}"
+        except Exception:
+            conn.rollback(); conn.close(); raise
 
 
 def open_pet_gacha(user_id):
@@ -5009,9 +5091,10 @@ def open_pet_gacha(user_id):
             anypet=conn.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? LIMIT 1",(int(user_id),)).fetchone()
             conn.execute("INSERT INTO rpg_pets_owned(user_id,pet_key,copies,equipped,obtained_at) VALUES(?,?,1,?,?)",(int(user_id),key,0 if anypet else 1,now)); duplicate=False
         conn.commit(); conn.close()
+    fangs=_fang_count(user_id); essence=_pet_essence(user_id)
     if duplicate:
-        return True,f"🎰 El cofre se abre...\n\n{cfg['icon']} {cfg['name']} — {cfg['rarity']}\n♻️ Ya la tenías: el duplicado se convirtió en ✨ 1 Esencia de mascota."
-    return True,f"🎰 El cofre se abre...\n\n{cfg['icon']} ¡{cfg['name']}! — {cfg['rarity']}\n🎁 {cfg['desc']}\n"+("✅ Es tu primera mascota y quedó equipada automáticamente." if not anypet else "🐾 Ya forma parte de tu colección.")
+        return True,f"🎰 El cofre se abre...\n\n{cfg['icon']} {cfg['name']} — {cfg['rarity']}\n♻️ Duplicado convertido en ✨ 1 Esencia.\n✨ Esencias totales: {essence}\n🦷 Colmillos restantes: {fangs}"
+    return True,f"🎰 El cofre se abre...\n\n{cfg['icon']} ¡{cfg['name']}! — {cfg['rarity']}\n🎁 {_pet_desc_at_level(cfg,1)}\n"+("✅ Es tu primera mascota y quedó equipada automáticamente." if not anypet else "🐾 Ya forma parte de tu colección.")+f"\n🦷 Colmillos restantes: {fangs}"
 
 
 def equip_pet(user_id,key):
@@ -5019,6 +5102,8 @@ def equip_pet(user_id,key):
     with db_lock:
         conn=get_db(); own=conn.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? AND pet_key=? FOR UPDATE",(int(user_id),key)).fetchone()
         if not own: conn.rollback(); conn.close(); return False,"Esa mascota no está en tu colección."
+        already=conn.execute("SELECT equipped FROM rpg_pets_owned WHERE user_id=? AND pet_key=?",(int(user_id),key)).fetchone()
+        if already and int(already['equipped']): conn.rollback(); conn.close(); return False,f"🐾 {RPG_PETS[key]['name']} ya está equipada."
         conn.execute("UPDATE rpg_pets_owned SET equipped=0 WHERE user_id=?",(int(user_id),)); conn.execute("UPDATE rpg_pets_owned SET equipped=1 WHERE user_id=? AND pet_key=?",(int(user_id),key)); conn.commit(); conn.close()
     return True,f"🐾 {RPG_PETS[key]['name']} quedó equipada.\n{RPG_PETS[key]['desc']}"
 
@@ -5471,9 +5556,15 @@ def handle_rpg_callback(query):
         if not _is_private_chat_obj(msg.get("chat")):
             send_message(chat_id,"🔒 Tu colección de mascotas es privada.",reply_markup=_private_launch_keyboard("pets")); return True
         txt,kb=pets_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("pet_view:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        txt,kb=pet_detail_keyboard(uid,data.split(":",1)[1]); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("pet_level:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        key=data.split(":",1)[1]; ok,msg2=level_pet(uid,key); txt,kb=pet_detail_keyboard(uid,key); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
     if data.startswith("pet_equip:"):
         if not _is_private_chat_obj(msg.get("chat")): return True
-        ok,msg2=equip_pet(uid,data.split(":",1)[1]); txt,kb=pets_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+        key=data.split(":",1)[1]; ok,msg2=equip_pet(uid,key); txt,kb=pet_detail_keyboard(uid,key); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
     if data.startswith("rpg_shop_item:"):
         key=data.split(":",1)[1]; txt,kb=rpg_shop_item_text(uid,key)
         send_message(chat_id,txt or "Ese objeto ya no está disponible.",reply_markup=kb); return True
@@ -6119,7 +6210,7 @@ def process_command(
         )
         return True
 
-    if command in ("/darcolmillos", "/addcolmillos"):
+    if command in ("/darrcolmillos", "/darcolmillos", "/addcolmillos"):
         if not is_admin(message):
             send_message(chat_id, "Solo un administrador puede entregar Colmillos de Ceniza.")
             return True
@@ -6149,7 +6240,7 @@ def process_command(
             target = user
 
         if not target or not target.get("id") or not amount:
-            send_message(chat_id, "Uso: /darcolmillos 100\nTambién: /darcolmillos 50 @usuario o responde a su mensaje con /darcolmillos 50.")
+            send_message(chat_id, "Uso: /darrcolmillos 100\nTambién: /darrcolmillos 50 @usuario o responde a su mensaje con /darrcolmillos 50.")
             return True
 
         ensure_player(target)

@@ -6496,6 +6496,27 @@ def process_command(
         ok,msg2=toggle_boss_test(chat_id,message.get("from",{}).get("id"))
         send_message(chat_id,msg2); return True
 
+    if command == "/resetomega":
+        uid=message.get("from",{}).get("id")
+        if not is_owner(uid):
+            send_message(chat_id,"Solo Kiu puede usar /resetomega.")
+            return True
+        e=_omega_active(chat_id)
+        if not e:
+            send_message(chat_id,"🧪 No hay una clasificatoria de Kenny Omega activa para reiniciar.")
+            return True
+        eid=int(e["id"])
+        with db_lock:
+            conn=get_db()
+            conn.execute("DELETE FROM rpg_omega_rewards WHERE event_id=?",(eid,))
+            conn.execute("DELETE FROM rpg_omega_runs WHERE event_id=?",(eid,))
+            conn.execute("DELETE FROM rpg_omega_scores WHERE event_id=?",(eid,))
+            conn.execute("UPDATE rpg_omega_events SET status='cancelled',rewards_sent=0 WHERE id=?",(eid,))
+            conn.commit()
+            conn.close()
+        send_message(chat_id,"🧪 EVENTO OMEGA REINICIADO\n\nLa clasificatoria activa fue cancelada sin recompensas.\nRanking, turnos y participantes de esta prueba fueron limpiados.\n\n✅ Ya puedes usar /invocaromega para comenzar desde cero.")
+        return True
+
     if command in ("/invocaromega", "/spawnomega"):
         if not is_owner(message.get("from",{}).get("id")):
             send_message(chat_id,"Solo Kiu puede iniciar el Boss Final."); return True

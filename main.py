@@ -836,6 +836,39 @@ def init_db():
             )
         """)
 
+        # KiwRPG — Boss Final: Kenny Omega, clasificatoria de daño de 12 horas.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_omega_events (
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                started_at BIGINT NOT NULL, ends_at BIGINT NOT NULL, last_announce_at BIGINT NOT NULL DEFAULT 0,
+                rewards_sent BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_omega_active ON rpg_omega_events(chat_id,status,ends_at)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_omega_scores (
+                event_id BIGINT NOT NULL, user_id BIGINT NOT NULL, character_id BIGINT NOT NULL,
+                total_damage BIGINT NOT NULL DEFAULT 0, total_turns BIGINT NOT NULL DEFAULT 0,
+                runs BIGINT NOT NULL DEFAULT 0, last_attack_at BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(event_id,user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_omega_runs (
+                event_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+                run_started_at BIGINT NOT NULL DEFAULT 0, turns_used BIGINT NOT NULL DEFAULT 0,
+                special_cd BIGINT NOT NULL DEFAULT 0, ultimate_cd BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(event_id,user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_omega_rewards (
+                event_id BIGINT NOT NULL, user_id BIGINT NOT NULL, place BIGINT NOT NULL,
+                kw BIGINT NOT NULL DEFAULT 0, exp BIGINT NOT NULL DEFAULT 0, rewarded_at BIGINT NOT NULL,
+                PRIMARY KEY(event_id,user_id)
+            )
+        """)
+
         # KiwRPG V6.1 — mascotas y gacha por Colmillos de Ceniza.
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_pets_owned (
@@ -5307,6 +5340,297 @@ def _boss_phase(b):
     ratio=max(0,float(b['hp'])/max(1,float(b['max_hp'])))
     return 3 if ratio<=.25 else (2 if ratio<=.50 else 1)
 
+
+# =========================================================
+# MODO TEST DE BOSSES + BOSS FINAL KENNY OMEGA
+# =========================================================
+
+_boss_test_users=set()
+_boss_test_lock=RLock()
+
+OMEGA_NAME="Kenny Omega — The Best Bout Machine"
+OMEGA_LEVEL=100
+OMEGA_DEF=38
+OMEGA_EVENT_SECONDS=12*3600
+OMEGA_RETRY_SECONDS=2*3600
+OMEGA_TURNS_PER_RUN=10
+OMEGA_ANNOUNCE_SECONDS=2*3600
+OMEGA_REWARDS={1:(50000,5000),2:(30000,3000),3:(15000,2000)}
+
+def _boss_test_enabled(user_id):
+    with _boss_test_lock:
+        return int(user_id) in _boss_test_users
+
+def _boss_stats_for(user_id,char):
+    eff=effective_character_stats(char)
+    if _boss_test_enabled(user_id):
+        eff=dict(eff)
+        eff['max_hp']=1000; eff['atk']=250; eff['defense']=50
+    return eff
+
+def toggle_boss_test(chat_id,user_id):
+    if not is_owner(user_id):
+        return False,"Solo Kiu puede usar /modotest."
+    with _boss_test_lock:
+        if int(user_id) in _boss_test_users:
+            _boss_test_users.remove(int(user_id)); enabled=False
+        else:
+            _boss_test_users.add(int(user_id)); enabled=True
+    # Si ya está dentro de un Boss, el cambio se refleja inmediatamente.
+    b=_boss_active(chat_id)
+    if b:
+        p=_boss_participant(b['id'],user_id)
+        char=get_active_character(user_id)
+        if p and char:
+            eff=_boss_stats_for(user_id,char)
+            new_max=int(eff['max_hp'])
+            new_hp=new_max if enabled else min(new_max,int(p['hp']))
+            with db_lock:
+                conn=get_db()
+                conn.execute("UPDATE rpg_boss_participants SET hp=?,max_hp=? WHERE boss_id=? AND user_id=?",
+                             (new_hp,new_max,int(b['id']),int(user_id)))
+                conn.commit(); conn.close()
+    if enabled:
+        return True,"🧪 Modo Boss de prueba ACTIVADO.\n❤️ 1000 HP · ⚔️ 250 ATK · 🛡️ 50 DEF\nSolo afecta combates contra Bosses y Kenny Omega."
+    return True,"🧪 Modo Boss de prueba DESACTIVADO.\nTus estadísticas normales vuelven a usarse."
+
+def _omega_active(chat_id):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("SELECT * FROM rpg_omega_events WHERE chat_id=? AND status='active' ORDER BY id DESC LIMIT 1",
+                         (int(chat_id),)).fetchone()
+        conn.close()
+    if not row: return None
+    return dict(row)
+
+def _omega_score(event_id,user_id):
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("SELECT * FROM rpg_omega_scores WHERE event_id=? AND user_id=?",
+                         (int(event_id),int(user_id))).fetchone()
+        run=conn.execute("SELECT * FROM rpg_omega_runs WHERE event_id=? AND user_id=?",
+                         (int(event_id),int(user_id))).fetchone()
+        conn.close()
+    return (dict(row) if row else None,dict(run) if run else None)
+
+def _omega_ranking(event_id,limit=10):
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""
+            SELECT s.*,COALESCE(NULLIF(p.display_name,''),CAST(s.user_id AS TEXT)) display_name
+            FROM rpg_omega_scores s LEFT JOIN players p ON p.user_id=s.user_id
+            WHERE s.event_id=? ORDER BY s.total_damage DESC,s.total_turns ASC,s.last_attack_at ASC LIMIT ?
+        """,(int(event_id),int(limit))).fetchall()
+        conn.close()
+    return [dict(x) for x in rows]
+
+def _omega_time_text(seconds):
+    seconds=max(0,int(seconds)); h=seconds//3600; m=(seconds%3600)//60
+    return f"{h}h {m:02d}m"
+
+def _omega_card(event,user_id=None):
+    now=int(time.time()); left=max(0,int(event['ends_at'])-now)
+    rows=_omega_ranking(event['id'],10)
+    lines=[
+        "🌟 BOSS FINAL — KENNY OMEGA",
+        "⚡ THE BEST BOUT MACHINE",
+        f"⭐ Nv. {OMEGA_LEVEL}",
+        "",
+        "🏆 CLASIFICATORIA DE DAÑO · 12 HORAS",
+        f"⏳ Termina en: {_omega_time_text(left)}",
+        f"🎲 Cada intento: {OMEGA_TURNS_PER_RUN} turnos",
+        "♻️ Nuevo intento cada 2 horas",
+    ]
+    if user_id is not None:
+        score,run=_omega_score(event['id'],user_id)
+        if score:
+            turns=int(run['turns_used']) if run else 0
+            wait=0
+            if run and turns>=OMEGA_TURNS_PER_RUN:
+                wait=max(0,int(run['run_started_at'])+OMEGA_RETRY_SECONDS-now)
+            lines += ["","⚔️ TU MARCA",f"💥 Daño total: {int(score['total_damage']):,}",f"🎯 Turnos totales: {int(score['total_turns'])}"]
+            if wait: lines.append(f"🔒 Próximo intento: {_omega_time_text(wait)}")
+            else: lines.append(f"🎮 Turnos disponibles: {max(0,OMEGA_TURNS_PER_RUN-turns)}/{OMEGA_TURNS_PER_RUN}")
+    lines += ["","📊 CLASIFICACIÓN"]
+    medals=["🥇","🥈","🥉"]
+    if not rows: lines.append("Todavía nadie ha atacado.")
+    for i,r in enumerate(rows,1):
+        tag=medals[i-1] if i<=3 else f"{i}."
+        lines.append(f"{tag} {r['display_name']} — {int(r['total_damage']):,} daño")
+    lines += ["","🎁 PREMIOS","🥇 50,000 KW + 5,000 EXP","🥈 30,000 KW + 3,000 EXP","🥉 15,000 KW + 2,000 EXP"]
+    return "\n".join(lines)
+
+def _omega_keyboard(event,user_id):
+    score,run=_omega_score(event['id'],user_id)
+    now=int(time.time())
+    if not score:
+        return {"inline_keyboard":[[{"text":"⚡ ENTRAR A LA CLASIFICATORIA","callback_data":f"omega_join:{event['id']}"}],
+                                   [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]]}
+    turns=int(run['turns_used']) if run else 0
+    if turns>=OMEGA_TURNS_PER_RUN:
+        wait=max(0,int(run['run_started_at'])+OMEGA_RETRY_SECONDS-now) if run else 0
+        if wait>0:
+            return {"inline_keyboard":[[{"text":f"🔒 Regresas en {_omega_time_text(wait)}","callback_data":f"omega_refresh:{event['id']}"}],
+                                       [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]]}
+        # La siguiente pulsación de atacar reiniciará la tanda.
+        turns=0
+    char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
+    sc=int(run['special_cd']) if run and int(run['turns_used'])<OMEGA_TURNS_PER_RUN else 0
+    uc=int(run['ultimate_cd']) if run and int(run['turns_used'])<OMEGA_TURNS_PER_RUN else 0
+    return {"inline_keyboard":[
+        [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"omega_atk:{event['id']}:{a[0]['key']}"},
+         {"text":f"{a[1]['emoji']} {a[1]['name']}" if sc<=0 else f"⏳ {a[1]['name']} ({sc})","callback_data":f"omega_atk:{event['id']}:{a[1]['key']}"}],
+        [{"text":f"{a[2]['emoji']} {a[2]['name']}" if uc<=0 else f"⏳ {a[2]['name']} ({uc})","callback_data":f"omega_atk:{event['id']}:{a[2]['key']}"}],
+        [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
+    ]}
+
+def spawn_omega(chat_id):
+    old=_omega_active(chat_id)
+    if old and int(old['ends_at'])>int(time.time()):
+        return False,"Kenny Omega ya tiene una clasificatoria activa."
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        conn.execute("UPDATE rpg_omega_events SET status='expired' WHERE chat_id=? AND status='active'",(int(chat_id),))
+        row=conn.execute("""INSERT INTO rpg_omega_events(chat_id,status,started_at,ends_at,last_announce_at)
+                            VALUES(?,'active',?,?,?) RETURNING *""",
+                         (int(chat_id),now,now+OMEGA_EVENT_SECONDS,now)).fetchone()
+        conn.commit(); conn.close()
+    return True,dict(row)
+
+def omega_join(chat_id,user_id,event_id):
+    e=_omega_active(chat_id)
+    if not e or int(e['id'])!=int(event_id) or int(time.time())>=int(e['ends_at']):
+        return False,"La clasificatoria de Kenny Omega ya terminó."
+    char=get_active_character(user_id)
+    if not char: return False,"Necesitas un personaje activo."
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_omega_scores(event_id,user_id,character_id,last_attack_at)
+                        VALUES(?,?,?,0) ON CONFLICT(event_id,user_id) DO NOTHING""",
+                     (int(event_id),int(user_id),int(char['id'])))
+        conn.execute("""INSERT INTO rpg_omega_runs(event_id,user_id,run_started_at,turns_used,special_cd,ultimate_cd)
+                        VALUES(?,?,?,0,0,0) ON CONFLICT(event_id,user_id) DO NOTHING""",
+                     (int(event_id),int(user_id),now))
+        conn.commit(); conn.close()
+    return True,"⚡ Entraste a la clasificatoria contra Kenny Omega.\nTienes 10 turnos. Haz todo el daño que puedas."
+
+def omega_attack(chat_id,user_id,event_id,ability_key):
+    e=_omega_active(chat_id); now=int(time.time())
+    if not e or int(e['id'])!=int(event_id) or now>=int(e['ends_at']):
+        return False,"La clasificatoria de Kenny Omega ya terminó."
+    score,run=_omega_score(event_id,user_id)
+    if not score or not run: return False,"Primero entra a la clasificatoria."
+    char=get_active_character(user_id)
+    if not char or int(char['id'])!=int(score['character_id']): return False,"Debes usar el mismo personaje durante este evento."
+    turns=int(run['turns_used'])
+    run_started=int(run['run_started_at'])
+    if turns>=OMEGA_TURNS_PER_RUN:
+        ready=run_started+OMEGA_RETRY_SECONDS
+        if now<ready:
+            left=ready-now
+            return False,f"🔒 Ya gastaste tus 10 turnos.\n⏳ Podrás volver a atacar en {_omega_time_text(left)}."
+        with db_lock:
+            conn=get_db()
+            conn.execute("UPDATE rpg_omega_runs SET run_started_at=?,turns_used=0,special_cd=0,ultimate_cd=0 WHERE event_id=? AND user_id=?",
+                         (now,int(event_id),int(user_id)))
+            conn.execute("UPDATE rpg_omega_scores SET runs=runs+1 WHERE event_id=? AND user_id=?",(int(event_id),int(user_id)))
+            conn.commit(); conn.close()
+        run={'turns_used':0,'special_cd':0,'ultimate_cd':0,'run_started_at':now}; turns=0
+    ab=_rpg_get_ability(char['class_name'],ability_key)
+    if not ab: return False,"Movimiento no válido."
+    if ab.get('special') and int(run['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['special_cd']} turnos."
+    if ab.get('ultimate') and int(run['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['ultimate_cd']} turnos."
+    dr=send_dice(chat_id,'🎲')
+    roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+    if not roll: return False,"Telegram no devolvió el dado. Intenta otra vez."
+    eff=_boss_stats_for(user_id,char); dmg=0
+    if roll!=1:
+        raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(OMEGA_DEF*(1-float(ab.get('pen',0)))*.40)
+        dmg=max(1,int(round(raw)))
+        pet_pct=_pet_bonus(user_id,'boss_damage')
+        if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
+        if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
+    sc=max(0,int(run['special_cd'])-1); uc=max(0,int(run['ultimate_cd'])-1)
+    if ab.get('special'): sc=int(ab.get('cooldown',2))
+    if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
+    new_turns=turns+1
+    with db_lock:
+        conn=get_db()
+        conn.execute("""UPDATE rpg_omega_runs SET turns_used=?,special_cd=?,ultimate_cd=?
+                        WHERE event_id=? AND user_id=?""",(new_turns,sc,uc,int(event_id),int(user_id)))
+        conn.execute("""UPDATE rpg_omega_scores SET total_damage=total_damage+?,total_turns=total_turns+1,last_attack_at=?
+                        WHERE event_id=? AND user_id=?""",(dmg,now,int(event_id),int(user_id)))
+        conn.commit(); conn.close()
+    crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''
+    text=f"⚡ KENNY OMEGA — TURNO {new_turns}/{OMEGA_TURNS_PER_RUN}\n🎲 {roll} · {ab['name']}{crit}{miss}\n💥 {dmg:,} daño"
+    if new_turns>=OMEGA_TURNS_PER_RUN:
+        text+="\n\n🔒 Tanda terminada. Podrás volver a atacar dentro de 2 horas."
+    e=_omega_active(chat_id) or e
+    send_message(chat_id,text+"\n\n"+_omega_card(e,user_id),reply_markup=_omega_keyboard(e,user_id))
+    return True,""
+
+def _omega_finalize(event):
+    if not event or event.get('status')!='active': return False
+    now=int(time.time())
+    if now<int(event['ends_at']): return False
+    rows=_omega_ranking(event['id'],3)
+    with db_lock:
+        conn=get_db()
+        fresh=conn.execute("SELECT * FROM rpg_omega_events WHERE id=? FOR UPDATE",(int(event['id']),)).fetchone()
+        if not fresh or fresh['status']!='active':
+            conn.rollback(); conn.close(); return False
+        conn.execute("UPDATE rpg_omega_events SET status='finished' WHERE id=?",(int(event['id']),))
+        conn.commit(); conn.close()
+    lines=["🏁 TERMINÓ LA CLASIFICATORIA — KENNY OMEGA","","🏆 PODIO FINAL"]
+    medals=["🥇","🥈","🥉"]
+    if not rows: lines.append("Nadie participó esta vez.")
+    for i,r in enumerate(rows,1):
+        kw,exp=OMEGA_REWARDS[i]
+        with db_lock:
+            conn=get_db()
+            exists=conn.execute("SELECT 1 FROM rpg_omega_rewards WHERE event_id=? AND user_id=?",(int(event['id']),int(r['user_id']))).fetchone()
+            if not exists:
+                conn.execute("INSERT INTO rpg_omega_rewards(event_id,user_id,place,kw,exp,rewarded_at) VALUES(?,?,?,?,?,?)",
+                             (int(event['id']),int(r['user_id']),i,kw,exp,now))
+                conn.commit()
+            conn.close()
+        if not exists:
+            change_kiwons(int(r['user_id']),kw,'omega_reward',note=f"Kenny Omega puesto {i}")
+            grant_rpg_exp(int(r['character_id']),exp)
+        lines.append(f"{medals[i-1]} {r['display_name']} — {int(r['total_damage']):,} daño · +{kw:,} KW · +{exp:,} EXP")
+    send_message(int(event['chat_id']),"\n".join(lines))
+    return True
+
+def omega_tick():
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("SELECT * FROM rpg_omega_events WHERE status='active'").fetchall()
+        conn.close()
+    for rr in rows:
+        e=dict(rr)
+        if now>=int(e['ends_at']):
+            _omega_finalize(e); continue
+        if now-int(e.get('last_announce_at') or 0)>=OMEGA_ANNOUNCE_SECONDS:
+            ranking=_omega_ranking(e['id'],3)
+            top=(f"\n👑 Líder actual: {ranking[0]['display_name']} — {int(ranking[0]['total_damage']):,} daño" if ranking else "")
+            send_message(int(e['chat_id']),
+                "⚡ KENNY OMEGA SIGUE ESPERANDO RETADORES\n\n"
+                f"⏳ Quedan {_omega_time_text(int(e['ends_at'])-now)} de la clasificatoria."
+                f"{top}\n\n🎯 Tienes 10 turnos por intento y puedes regresar cada 2 horas.\nUsa /omega para participar.")
+            with db_lock:
+                conn=get_db(); conn.execute("UPDATE rpg_omega_events SET last_announce_at=? WHERE id=?",(now,int(e['id']))); conn.commit(); conn.close()
+
+def _omega_announcer_loop():
+    while True:
+        try: omega_tick()
+        except Exception: logger.exception("Error en anuncios/finalización de Kenny Omega")
+        time.sleep(60)
+
+
 def _boss_card(b,user_id=None):
     with db_lock:
         conn=get_db(); rows=conn.execute("SELECT p.user_id,p.damage,p.defeated,p.defeated_until,p.hp,p.max_hp,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name FROM rpg_boss_participants p LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? ORDER BY p.damage DESC",(int(b['id']),)).fetchall(); conn.close()
@@ -5400,7 +5724,7 @@ def boss_join(chat_id,user_id,boss_id):
     if _boss_participant(boss_id,user_id): return True,"Ya estás participando."
     char=get_active_character(user_id)
     if not char: return False,"Necesitas un personaje activo para entrar."
-    eff=effective_character_stats(char)
+    eff=_boss_stats_for(user_id,char)
     with db_lock:
         conn=get_db(); conn.execute("INSERT INTO rpg_boss_participants(boss_id,user_id,character_id,hp,max_hp,joined_at) VALUES(?,?,?,?,?,?) ON CONFLICT(boss_id,user_id) DO NOTHING",(int(boss_id),int(user_id),int(char['id']),int(eff['max_hp']),int(eff['max_hp']),int(time.time()))); conn.commit(); conn.close()
     return True,f"⚔️ {_pvp_name(user_id)} entró al combate contra {b['name']}."
@@ -5535,7 +5859,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
         if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
-        eff=effective_character_stats(char); dmg=0; heal=0; boss_was_defending=int(b.get('defending') or 0)
+        eff=_boss_stats_for(user_id,char); dmg=0; heal=0; boss_was_defending=int(b.get('defending') or 0)
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
             pet_pct=_pet_bonus(user_id,'boss_damage')
@@ -5620,7 +5944,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET hp=?,heals_used=heals_used+1 WHERE id=?",(nh,int(boss_id))); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
-        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=_boss_stats_for(user_id,char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
         key=str(b.get('boss_key') or '')
         # Identidad mecánica de los Bosses sin añadir estados frágiles a la BD.
         if phase==3 and key in ('fenrir','behemoth'): damage=max(0,int(round(damage*1.18)))
@@ -5653,6 +5977,22 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("omega_join:"):
+        eid=int(data.split(":",1)[1]); ok,msg2=omega_join(chat_id,uid,eid); e=_omega_active(chat_id)
+        send_message(chat_id,msg2+("\n\n"+_omega_card(e,uid) if e else ""),
+                     reply_markup=_omega_keyboard(e,uid) if e else None); return True
+    if data.startswith("omega_refresh:"):
+        e=_omega_active(chat_id)
+        if not e:
+            send_message(chat_id,"La clasificatoria de Kenny Omega terminó."); return True
+        if int(time.time())>=int(e['ends_at']):
+            _omega_finalize(e); return True
+        send_message(chat_id,_omega_card(e,uid),reply_markup=_omega_keyboard(e,uid)); return True
+    if data.startswith("omega_atk:"):
+        _,eid,key=data.split(":",2); ok,msg2=omega_attack(chat_id,uid,int(eid),key)
+        if not ok: send_message(chat_id,msg2)
+        return True
+
     if data.startswith("boss_delete_offer:"):
         bid=int(data.split(":",1)[1]); b=_boss_active(chat_id)
         if not is_owner(uid):
@@ -6063,6 +6403,36 @@ def process_command(
             lines.append(f"{icon} {row['display_name']} — {wins}V/{losses}D · {rate:.0f}%")
         lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
         send_message(chat_id,"\n".join(lines)); return True
+
+    if command == "/modotest":
+        ok,msg2=toggle_boss_test(chat_id,message.get("from",{}).get("id"))
+        send_message(chat_id,msg2); return True
+
+    if command in ("/invocaromega", "/spawnomega"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede iniciar el Boss Final."); return True
+        ok,res=spawn_omega(chat_id)
+        if not ok: send_message(chat_id,res); return True
+        send_message(chat_id,
+            "⚡⚡⚡ EVENTO FINAL ACTIVADO ⚡⚡⚡\n\n"
+            "🌟 KENNY OMEGA — THE BEST BOUT MACHINE\n"
+            "⭐ NIVEL 100\n\n"
+            "Durante 12 horas competirán por causar el mayor daño posible.\n"
+            "🎲 10 turnos por intento · ♻️ puedes regresar cada 2 horas.\n"
+            "🏆 Los 3 mejores recibirán premio.\n\n"+_omega_card(res,message.get("from",{}).get("id")),
+            reply_markup=_omega_keyboard(res,message.get("from",{}).get("id")))
+        return True
+
+    if command in ("/omega", "/kennyomega", "/rankingomega"):
+        e=_omega_active(chat_id)
+        if not e:
+            send_message(chat_id,"⚡ Kenny Omega no tiene una clasificatoria activa ahora mismo."); return True
+        if int(time.time())>=int(e['ends_at']):
+            _omega_finalize(e)
+            send_message(chat_id,"🏁 La clasificatoria de Kenny Omega ya terminó."); return True
+        send_message(chat_id,_omega_card(e,message.get("from",{}).get("id")),
+                     reply_markup=_omega_keyboard(e,message.get("from",{}).get("id")))
+        return True
 
     if command in ("/quitarboss", "/eliminarboss"):
         if not is_owner(message.get("from",{}).get("id")):
@@ -7975,6 +8345,9 @@ if __name__ == "__main__":
     )
 
     configure_webhook()
+
+    # Recordatorios de Kenny Omega y cierre automático del ranking.
+    threading.Thread(target=_omega_announcer_loop,daemon=True,name="omega-announcer").start()
 
     app.run(
         host="0.0.0.0",

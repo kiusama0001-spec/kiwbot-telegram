@@ -6119,6 +6119,57 @@ def process_command(
         )
         return True
 
+    if command in ("/darcolmillos", "/addcolmillos"):
+        if not is_admin(message):
+            send_message(chat_id, "Solo un administrador puede entregar Colmillos de Ceniza.")
+            return True
+
+        user = message.get("from", {})
+        parts = str(text or "").split()
+        target = None
+        amount = None
+
+        # /darcolmillos 100 -> para ti
+        # /darcolmillos 50 @usuario -> para otro jugador
+        # Respondiendo: /darcolmillos 50
+        for part in parts[1:]:
+            if part.startswith("@"):
+                target = find_cached_user(chat_id, part)
+            else:
+                try:
+                    n = int(part)
+                    if n > 0:
+                        amount = min(n, 10000)
+                except Exception:
+                    pass
+
+        if message.get("reply_to_message"):
+            target = (message.get("reply_to_message") or {}).get("from")
+        if target is None:
+            target = user
+
+        if not target or not target.get("id") or not amount:
+            send_message(chat_id, "Uso: /darcolmillos 100\nTambién: /darcolmillos 50 @usuario o responde a su mensaje con /darcolmillos 50.")
+            return True
+
+        ensure_player(target)
+        char = get_active_character(target.get("id"))
+        if not char:
+            send_message(chat_id, "Ese jugador necesita un personaje activo para recibir Colmillos de Ceniza.")
+            return True
+
+        delivered = 0
+        for _ in range(int(amount)):
+            if grant_rpg_item(target.get("id"), int(char["id"]), RPG_GACHA_FANG_ITEM, "admin_fangs"):
+                delivered += 1
+
+        if delivered <= 0:
+            send_message(chat_id, "No pude entregar los Colmillos de Ceniza.")
+            return True
+
+        send_message(chat_id, f"🦷 {player_display_name(target)} recibió {delivered} Colmillos de Ceniza.\n🎒 Total: {_fang_count(target.get('id'))}")
+        return True
+
     if command in ("/darr", "/darkiwons", "/darskiwons", "/addkiwons"):
         if not is_admin(message):
             send_message(chat_id, "Solo un administrador puede entregar Kiwons.")

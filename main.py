@@ -5243,34 +5243,50 @@ RPG_BOSSES = {
     "rey_demonio": {"name":"Rey Demonio","level":12,"hp":3200,"atk":29,"defense":16,"style":"tactical","hours":3},
     "lich": {"name":"Lich del Vacío","level":14,"hp":3000,"atk":27,"defense":13,"style":"healer","hours":3},
     "leviatan": {"name":"Leviatán Abisal","level":16,"hp":4600,"atk":30,"defense":15,"style":"colossus","hours":3},
-    "angel_caido": {"name":"Ángel Caído","level":18,"hp":3800,"atk":34,"defense":17,"style":"hybrid","hours":3},
+    "angel_caido": {"name":"Ángel Caído","level":18,"hp":3800,"atk":34,"defense":17,"style":"counter","hours":3},
     "hidra": {"name":"Hidra de las Nueve Fauces","level":20,"hp":4300,"atk":35,"defense":14,"style":"regenerator","hours":3},
     "emperador_caos": {"name":"Emperador del Caos","level":25,"hp":5500,"atk":40,"defense":19,"style":"chaos","hours":4},
+    "arachne": {"name":"Arachne, Reina de la Seda Negra","level":27,"hp":4800,"atk":38,"defense":16,"style":"control","hours":3},
+    "behemoth": {"name":"Behemoth de Hueso","level":29,"hp":6200,"atk":42,"defense":21,"style":"berserker","hours":4},
+    "vlad": {"name":"Vlad, Señor de la Sangre","level":31,"hp":5200,"atk":43,"defense":17,"style":"vampire","hours":4},
+    "raijin": {"name":"Raijin, Dios de la Tormenta","level":33,"hp":5000,"atk":46,"defense":16,"style":"storm","hours":4},
+    "nidhogg": {"name":"Nidhogg, Devorador de Mundos","level":36,"hp":7200,"atk":48,"defense":22,"style":"dragon","hours":4},
+    "chronos": {"name":"Chronos, Guardián del Tiempo","level":39,"hp":6400,"atk":47,"defense":20,"style":"time","hours":4},
+    "azath": {"name":"Azath, Dios del Abismo","level":45,"hp":9000,"atk":54,"defense":24,"style":"abyss","hours":5},
 }
 
 RPG_BOSS_ATTACKS = {
- "golem":{"attack":[("👊 Puño de Piedra",.82),("🪨 Embestida de Granito",1.00)],"special":[("🔨 Martillo Sísmico",1.38),("💥 Aplastamiento",1.62)]},
- "fenrir":{"attack":[("🐾 Zarpazo Carmesí",.92),("🦷 Mordida Salvaje",1.08)],"special":[("🌙 Cacería Lunar",1.42),("🩸 Desgarro Carmesí",1.58)]},
- "rey_demonio":{"attack":[("🔥 Garra Infernal",.95),("⚔️ Tajo Demoníaco",1.08)],"special":[("👹 Llama del Averno",1.45),("☄️ Castigo del Rey Demonio",1.62)]},
- "lich":{"attack":[("💀 Toque Marchito",.88),("🔮 Proyectil del Vacío",1.04)],"special":[("🕯️ Maldición Sepulcral",1.36),("☠️ Explosión de Almas",1.55)]},
- "leviatan":{"attack":[("🌊 Coletazo Abisal",.98),("🦷 Mordida de las Profundidades",1.10)],"special":[("🌪️ Marea Devastadora",1.48),("🌊 Furia del Abismo",1.68)]},
- "angel_caido":{"attack":[("🪽 Pluma Cortante",.94),("⚔️ Espada Profana",1.10)],"special":[("🌑 Juicio Caído",1.48),("🩸 Castigo Celestial",1.64)]},
- "hidra":{"attack":[("🐲 Mordida de la Hidra",.92),("☣️ Aliento Venenoso",1.06)],"special":[("🐉 Frenesí de Fauces",1.46),("☠️ Nueve Fauces",1.66)]},
- "emperador_caos":{"attack":[("🌀 Corte del Caos",1.00),("👑 Golpe Imperial",1.12)],"special":[("🌌 Ruptura de la Realidad",1.55),("💀 Decreto del Fin",1.78)]},
+ "golem":{"attack":[("👊 Puño de Piedra",.82),("🪨 Embestida de Granito",1.00)],"special":[("🔨 Martillo Sísmico",1.38),("🌍 Terremoto",1.50),("💥 Aplastamiento",1.62)]},
+ "fenrir":{"attack":[("🐾 Zarpazo Carmesí",.92),("🦷 Mordida Salvaje",1.08)],"special":[("🌙 Cacería Lunar",1.42),("🩸 Desgarro Carmesí",1.58),("🐺 Frenesí Carmesí",1.68)]},
+ "rey_demonio":{"attack":[("🔥 Garra Infernal",.95),("⚔️ Tajo Demoníaco",1.08)],"special":[("👹 Llama del Averno",1.45),("☄️ Castigo del Rey Demonio",1.62),("🔥 Trono Infernal",1.70)]},
+ "lich":{"attack":[("💀 Toque Marchito",.88),("🔮 Proyectil del Vacío",1.04)],"special":[("🕯️ Maldición Sepulcral",1.36),("☠️ Explosión de Almas",1.55),("🌑 Réquiem del Vacío",1.66)]},
+ "leviatan":{"attack":[("🌊 Coletazo Abisal",.98),("🦷 Mordida de las Profundidades",1.10)],"special":[("🌪️ Marea Devastadora",1.48),("🌊 Furia del Abismo",1.68),("🐋 Diluvio Primordial",1.76)]},
+ "angel_caido":{"attack":[("🪽 Pluma Cortante",.94),("⚔️ Espada Profana",1.10)],"special":[("🌑 Juicio Caído",1.48),("🩸 Castigo Celestial",1.64),("🪽 Réquiem de Luz Negra",1.74)]},
+ "hidra":{"attack":[("🐲 Mordida de la Hidra",.92),("☣️ Aliento Venenoso",1.06)],"special":[("🐉 Frenesí de Fauces",1.46),("☠️ Nueve Fauces",1.66),("🧪 Sangre Regenerativa",1.52)]},
+ "emperador_caos":{"attack":[("🌀 Corte del Caos",1.00),("👑 Golpe Imperial",1.12)],"special":[("🌌 Ruptura de la Realidad",1.55),("💀 Decreto del Fin",1.78),("👑 Dominio Absoluto",1.88)]},
+ "arachne":{"attack":[("🕷️ Colmillo Negro",.96),("🕸️ Latigazo de Seda",1.08)],"special":[("🕸️ Prisión de Seda",1.42),("☠️ Veneno de la Reina",1.60),("🕷️ Banquete de Arachne",1.72)]},
+ "behemoth":{"attack":[("🦴 Embestida Ósea",1.02),("💀 Garra de Marfil",1.12)],"special":[("🦴 Quebrantahuesos",1.50),("🌋 Pisotón del Coloso",1.68),("💀 Furia del Behemoth",1.82)]},
+ "vlad":{"attack":[("🧛 Garra Carmesí",.98),("🩸 Mordida Nocturna",1.10)],"special":[("🩸 Banquete de Sangre",1.48),("🌙 Noche Eterna",1.64),("🧛 Frenesí Carmesí",1.78)]},
+ "raijin":{"attack":[("⚡ Chispa Divina",.98),("🥁 Golpe del Trueno",1.10)],"special":[("⚡ Cadena de Rayos",1.48),("🌩️ Tormenta Celestial",1.66),("⚡ Ira de Raijin",1.80)]},
+ "nidhogg":{"attack":[("🐉 Garra del Devorador",1.04),("🔥 Aliento Negro",1.14)],"special":[("🔥 Incendio del Mundo",1.54),("🌍 Devoramundos",1.72),("🐉 Ragnarok",1.88)]},
+ "chronos":{"attack":[("⏳ Corte Temporal",.98),("⌛ Arena del Tiempo",1.10)],"special":[("🕰️ Distorsión Temporal",1.44),("⏱️ Tiempo Robado",1.62),("⌛ Fin de los Tiempos",1.82)]},
+ "azath":{"attack":[("🌑 Garra del Abismo",1.06),("👁️ Mirada Imposible",1.16)],"special":[("🕳️ Colapso del Abismo",1.62),("🌌 Vacío Absoluto",1.82),("☠️ Fin de la Existencia",2.00)]},
 }
 
 def _boss_attack_move(b,choice):
-    if b.get('boss_key')=='golem':
-        phase=_boss_phase(b)
-        basic=RPG_BOSS_ATTACKS['golem']['attack']
-        if phase==1:
-            pool=basic
-        elif phase==2:
-            pool=[('🔨 Martillo Sísmico',1.38),('🌍 Terremoto',1.50)] if choice=='special' else basic
-        else:
-            pool=[('🔨 Martillo Sísmico',1.38),('🌍 Terremoto',1.50),('💥 Aplastamiento',1.62)] if choice=='special' else basic
-        return random.choice(pool)
-    pool=RPG_BOSS_ATTACKS.get(str(b.get('boss_key')),{}).get('special' if choice=='special' else 'attack')
+    key=str(b.get('boss_key') or '')
+    data=RPG_BOSS_ATTACKS.get(key,{})
+    basic=list(data.get('attack') or [])
+    specials=list(data.get('special') or [])
+    phase=_boss_phase(b)
+    if choice!='special':
+        pool=basic
+    elif phase==1:
+        pool=specials[:1]
+    elif phase==2:
+        pool=specials[:2]
+    else:
+        pool=specials
     return random.choice(pool) if pool else (("💥 Habilidad especial",1.35) if choice=='special' else ("⚔️ Ataque",1.0))
 
 def _boss_active(chat_id):
@@ -5372,7 +5388,7 @@ def spawn_boss(chat_id,key=None):
     if _boss_active(chat_id): return False,"Ya hay un Boss activo en este chat."
     if not key: key=random.choice(list(RPG_BOSSES))
     key=str(key).lower().strip(); cfg=RPG_BOSSES.get(key)
-    if not cfg: return False,"Boss desconocido. Disponibles: golem, fenrir, rey_demonio, lich, leviatan, angel_caido, hidra, emperador_caos."
+    if not cfg: return False,"Boss desconocido. Disponibles: " + ", ".join(RPG_BOSSES.keys()) + "."
     now=int(time.time())
     with db_lock:
         conn=get_db(); r=conn.execute("INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",(int(chat_id),key,cfg['name'],cfg['level'],cfg['hp'],cfg['hp'],cfg['atk'],cfg['defense'],now,now+cfg['hours']*3600)).fetchone(); conn.commit(); conn.close()
@@ -5448,31 +5464,35 @@ def boss_use_potion(chat_id,user_id,boss_id,inventory_id):
     return True,f"🧪 Usaste {row['name']}.\n❤️ +{restored} HP → {newhp}/{p['max_hp']}"
 
 def _boss_ai_choice(b,p):
-    cfg=RPG_BOSSES.get(b['boss_key'],{}); style=cfg.get('style','tactical'); phase=_boss_phase(b); hp_ratio=float(b['hp'])/max(1,float(b['max_hp'])); player_ratio=float(p['hp'])/max(1,float(p['max_hp']))
-    if b['boss_key']=='golem':
-        # Núcleo Inestable corresponde a phase=3, persistida en la aparición.
-        # No se cura ni desbloquea especiales antes de su fase correspondiente.
-        choices=({1:['defend']*5+['attack']*5,
-                  2:['defend']*2+['attack']*5+['special']*5,
-                  3:['defend']+['attack']*4+['special']*9})[phase]
-        if int(b.get('defending') or 0) or int(b.get('defends_used') or 0)>=3:
-            choices=[move for move in choices if move!='defend']
-        return random.choice(choices)
-    choices=[]
-    if style=='tank': choices=['defend']*4+['attack']*4+['special']*2
-    elif style=='aggressive': choices=['attack']*6+['special']*4+['defend']
-    elif style=='healer': choices=['attack']*3+['special']*3+['defend']*2+['heal']*3
-    elif style=='colossus': choices=['attack']*5+['special']*3+['defend']*2
-    elif style=='hybrid': choices=['attack']*4+['special']*4+['defend']*3+['heal']
-    elif style=='regenerator': choices=['attack']*4+['special']*3+['defend']*2+['heal']*2
-    elif style=='chaos': choices=['attack']*4+['special']*5+['defend']*3+['heal']*2
-    else: choices=['attack']*4+['special']*3+['defend']*2+['heal']
+    cfg=RPG_BOSSES.get(b['boss_key'],{}); style=cfg.get('style','tactical')
+    phase=_boss_phase(b); hp_ratio=float(b['hp'])/max(1,float(b['max_hp']))
+    player_ratio=float(p['hp'])/max(1,float(p['max_hp']))
+    profiles={
+        'tank':       ['defend']*5+['attack']*5+['special']*2,
+        'aggressive': ['attack']*7+['special']*5+['defend'],
+        'tactical':   ['attack']*4+['special']*4+['defend']*3+['heal'],
+        'healer':     ['attack']*3+['special']*3+['defend']*2+['heal']*4,
+        'colossus':   ['attack']*6+['special']*4+['defend']*2,
+        'counter':    ['attack']*4+['special']*4+['defend']*4+['heal'],
+        'regenerator':['attack']*4+['special']*4+['defend']*2+['heal']*3,
+        'chaos':      ['attack']*4+['special']*6+['defend']*2+['heal']*2,
+        'control':    ['attack']*4+['special']*6+['defend']*2,
+        'berserker':  ['attack']*6+['special']*5+['defend'],
+        'vampire':    ['attack']*4+['special']*5+['defend']+['heal']*2,
+        'storm':      ['attack']*6+['special']*6+['defend'],
+        'dragon':     ['attack']*5+['special']*6+['defend']*2,
+        'time':       ['attack']*4+['special']*6+['defend']*3,
+        'abyss':      ['attack']*4+['special']*8+['defend']*2+['heal']*2,
+    }
+    choices=list(profiles.get(style,profiles['tactical']))
     if phase>=2: choices += ['special']*3
-    if phase>=3 and style in ('aggressive','colossus','hybrid','chaos'): choices += ['special']*3+['attack']*2
-    heal_limit=3 if style in ('healer','regenerator','chaos') else 2
-    if hp_ratio<.45 and int(b.get('heals_used') or 0)<heal_limit: choices += ['heal']*(4 if style in ('healer','regenerator') else 2)
-    if player_ratio<.30: choices += ['special']*2
-    # La guardia del Boss es global para toda la aparición: máximo 3 usos.
+    if phase>=3:
+        choices += ['special']*5+['attack']*2
+        if style in ('aggressive','berserker','storm','dragon','abyss'): choices += ['special']*3
+    heal_limit=3 if style in ('healer','regenerator','chaos','vampire','abyss') else 2
+    if hp_ratio<.45 and int(b.get('heals_used') or 0)<heal_limit:
+        choices += ['heal']*(5 if style in ('healer','regenerator','vampire') else 2)
+    if player_ratio<.30: choices += ['special']*3
     if int(b.get('defending') or 0) or int(b.get('defends_used') or 0)>=3:
         choices=[x for x in choices if x!='defend'] or ['attack']
     return random.choice(choices)
@@ -5515,31 +5535,68 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
         if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
-        eff=effective_character_stats(char); dmg=0; heal=0
+        eff=effective_character_stats(char); dmg=0; heal=0; boss_was_defending=int(b.get('defending') or 0)
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
             pet_pct=_pet_bonus(user_id,'boss_damage')
             if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
             if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
-            if int(b.get('defending') or 0): dmg=max(1,int(round(dmg*.5)))
+            if boss_was_defending: dmg=max(1,int(round(dmg*.5)))
             if ab.get('heal_pct'): heal=max(1,int(round(int(p['max_hp'])*float(ab['heal_pct'])*RPG_DICE_MULT[roll])))
         with db_lock:
             conn=get_db(); fresh=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(int(boss_id),)).fetchone()
             if not fresh or fresh['status']!='active': conn.rollback(); conn.close(); return False,"El Boss ya fue derrotado."
             nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(p['special_cd'])-1); uc=max(0,int(p['ultimate_cd'])-1)
-            golem_phase_change=(fresh['boss_key']=='golem' and nh>0 and phase>int(fresh['phase']))
+            old_phase=int(fresh['phase'])
+            boss_phase_change=(nh>0 and phase>old_phase)
             if ab.get('special'): sc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
             ownhp=min(int(p['max_hp']),int(p['hp'])+heal)
+            counter=0
+            if fresh['boss_key']=='angel_caido' and boss_was_defending and dmg>0 and nh>0:
+                counter=max(1,int(round(dmg*.15)))
+                ownhp=max(0,ownhp-counter)
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
-        if golem_phase_change:
-            if phase==2:
-                player_text+='\n\n🌍 FASE 2 — La tierra tiembla. El Gólem desbloquea Martillo Sísmico y Terremoto.'
-            else:
-                player_text+='\n\n🔥 FASE 3 — NÚCLEO INESTABLE. Su núcleo se agrieta: el Gólem desbloquea Aplastamiento y atacará con mayor agresividad hasta caer.'
+        if counter:
+            player_text+=f"\n🪽 CONTRAATAQUE — El Ángel Caído devuelve {counter} de daño."
+        if boss_phase_change:
+            phase_texts={
+                'golem': {2:'🌍 FASE 2 — La tierra tiembla. El Gólem desbloquea Martillo Sísmico y Terremoto.',
+                          3:'🔥 FASE 3 — NÚCLEO INESTABLE. Su núcleo se agrieta: el Gólem desbloquea Aplastamiento y atacará con mayor agresividad hasta caer.'},
+                'fenrir': {2:'🌙 FASE 2 — Fenrir entra en Cacería Lunar. Sus ataques especiales aparecen con mayor frecuencia.',
+                           3:'🩸 FASE 3 — FRENESÍ CARMESÍ. Fenrir abandona casi toda cautela y busca despedazar a su presa.'},
+                'rey_demonio': {2:'🔥 FASE 2 — El trono infernal despierta. El Rey Demonio libera Llama del Averno.',
+                                3:'👹 FASE 3 — DOMINIO DEMONÍACO. El Rey deja de contener su verdadero poder.'},
+                'lich': {2:'🕯️ FASE 2 — Las almas responden al Lich. Sus maldiciones y curación se vuelven más frecuentes.',
+                         3:'🌑 FASE 3 — RÉQUIEM DEL VACÍO. La muerte misma alimenta su magia.'},
+                'leviatan': {2:'🌊 FASE 2 — Las aguas se levantan. Leviatán desata Marea Devastadora.',
+                             3:'🌪️ FASE 3 — DILUVIO PRIMORDIAL. El Abismo intenta tragarse el campo de batalla.'},
+                'angel_caido': {2:'🪽 FASE 2 — Sus alas negras se abren. El Ángel Caído adopta una postura de contraataque.',
+                                3:'🌑 FASE 3 — RÉQUIEM DE LUZ NEGRA. Ya no queda misericordia.'},
+                'hidra': {2:'🐲 FASE 2 — Más cabezas despiertan. La Hidra acelera sus ataques y regeneración.',
+                          3:'☠️ FASE 3 — NUEVE FAUCES. Todas las cabezas atacan como una sola criatura.'},
+                'emperador_caos': {2:'🌀 FASE 2 — La realidad empieza a romperse alrededor del Emperador.',
+                                   3:'👑 FASE 3 — DOMINIO ABSOLUTO. El Caos gobierna cada movimiento.'},
+                'arachne': {2:'🕸️ FASE 2 — El campo queda cubierto de seda negra. Arachne comienza a controlar el ritmo del combate.',
+                            3:'🕷️ FASE 3 — BANQUETE DE ARACHNE. La Reina sale de su telaraña para terminar la cacería.'},
+                'behemoth': {2:'🦴 FASE 2 — Los huesos del Behemoth crujen y se reconstruyen. Cada golpe lo enfurece.',
+                             3:'💀 FASE 3 — FURIA DEL BEHEMOTH. El coloso deja de defenderse y solo quiere aplastar.'},
+                'vlad': {2:'🩸 FASE 2 — Vlad huele la sangre. Sus técnicas vampíricas se vuelven más agresivas.',
+                         3:'🧛 FASE 3 — NOCHE ETERNA. El Señor de la Sangre entra en frenesí.'},
+                'raijin': {2:'⚡ FASE 2 — Los tambores del cielo retumban. Raijin encadena rayos con mayor frecuencia.',
+                           3:'🌩️ FASE 3 — IRA DE RAIJIN. La tormenta cae sin descanso.'},
+                'nidhogg': {2:'🔥 FASE 2 — Nidhogg extiende sus alas y el cielo se oscurece.',
+                            3:'🐉 FASE 3 — RAGNAROK. El Devorador de Mundos intenta reducirlo todo a cenizas.'},
+                'chronos': {2:'🕰️ FASE 2 — El tiempo empieza a fracturarse alrededor de Chronos.',
+                            3:'⌛ FASE 3 — FIN DE LOS TIEMPOS. Cada segundo juega en contra de los héroes.'},
+                'azath': {2:'🌌 FASE 2 — El Abismo ha abierto los ojos.',
+                          3:'☠️ FASE 3 — FIN DE LA EXISTENCIA. Azath deja de obedecer las reglas del mundo.'},
+            }
+            msg=phase_texts.get(str(fresh['boss_key']),{}).get(phase)
+            if msg: player_text+='\n\n'+msg
         b=_boss_active(chat_id)
         if not b:
             with db_lock:
@@ -5564,11 +5621,31 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
         phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        key=str(b.get('boss_key') or '')
+        # Identidad mecánica de los Bosses sin añadir estados frágiles a la BD.
+        if phase==3 and key in ('fenrir','behemoth'): damage=max(0,int(round(damage*1.18)))
+        if phase>=2 and key=='raijin' and choice=='special' and roll>=5:
+            damage=max(0,int(round(damage*1.30))); move_name+=' ⚡ COMBO'
+        if phase==3 and key=='nidhogg' and choice=='special':
+            damage=max(0,int(round(damage*1.15)))
+        if key=='azath' and choice=='special' and roll==6:
+            damage=max(0,int(round(damage*1.25))); move_name+=' 🌑 ABISMO'
         if int(p['defending']): damage=max(1,int(round(damage*.5))) if damage else 0
         php=max(0,int(p['hp'])-damage)
+        extra_sc=1 if (key in ('arachne','chronos') and choice=='special' and roll>=4) else 0
+        extra_uc=1 if (key=='chronos' and phase==3 and choice=='special' and roll>=5) else 0
         with db_lock:
-            conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET hp=?,defending=0,defeated=?,defeated_until=? WHERE boss_id=? AND user_id=?",(php,1 if php<=0 else 0,(int(time.time())+BOSS_RECOVERY_SECONDS) if php<=0 else 0,int(boss_id),int(user_id))); conn.commit(); conn.close()
+            conn=get_db()
+            conn.execute("UPDATE rpg_boss_participants SET hp=?,defending=0,defeated=?,defeated_until=?,special_cd=special_cd+?,ultimate_cd=ultimate_cd+? WHERE boss_id=? AND user_id=?",(php,1 if php<=0 else 0,(int(time.time())+BOSS_RECOVERY_SECONDS) if php<=0 else 0,extra_sc,extra_uc,int(boss_id),int(user_id)))
+            if key=='vlad' and choice=='special' and damage>0:
+                steal=max(1,int(round(damage*.22)))
+                conn.execute("UPDATE rpg_boss_instances SET hp=LEAST(max_hp,hp+?) WHERE id=?",(steal,int(boss_id)))
+            conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} prepara su movimiento.\n🎲 {roll} · {move_name}: {damage} daño a {_pvp_name(user_id)}."
+        if extra_sc or extra_uc:
+            ai_text+="\n⏳ El Boss altera tus cooldowns."
+        if key=='vlad' and choice=='special' and damage>0:
+            ai_text+=f"\n🩸 Vlad roba {max(1,int(round(damage*.22)))} HP."
         if php<=0: ai_text+=f"\n💀 {_pvp_name(user_id)} cayó, pero el Boss sigue disponible para el grupo.\n⏳ Recuperación: 5m 00s."
     b=_boss_active(chat_id) or b
     send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b,user_id),reply_markup=_boss_keyboard(b,user_id)); return True,''

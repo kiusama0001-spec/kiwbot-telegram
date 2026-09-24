@@ -6597,11 +6597,24 @@ def handle_rpg_callback(query):
         if not b: send_message(chat_id,"No hay un Boss activo."); return True
         send_message(chat_id,_boss_card(b,uid),reply_markup=_boss_keyboard(b,uid)); return True
     if data.startswith("boss_blades:"):
-        bid=int(data.split(":",1)[1]); char=get_active_character(uid)
-        if not char or not is_owner(uid) or char['class_name']!='The Cleaner': send_message(chat_id,"Esa habilidad no te pertenece. 😌"); return True
-        active=bool(char['secret_blades_active']); ok,msg2=toggle_secret_blades(uid,activate=not active)
-        notice=("🗡️🗡️ Espadas del Ángel activadas · +6 ATK" if not active and ok else "🗡️ Espadas del Ángel guardadas" if active and ok else msg2)
-        telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":notice,"show_alert":False}); return True
+        bid=int(data.split(":",1)[1])
+        b=_boss_active(chat_id)
+        if not b or int(b.get("id") or 0)!=bid:
+            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"Ese Boss ya terminó.","show_alert":False}); return True
+        char=get_active_character(uid)
+        if not char or not is_owner(uid) or char['class_name']!='The Cleaner':
+            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"Esa habilidad no te pertenece. 😌","show_alert":False}); return True
+        active=bool(char['secret_blades_active'])
+        ok,msg2=toggle_secret_blades(uid,activate=not active)
+        notice=("🗡️🗡️ Espadas del Ángel activadas · +6 ATK" if not active and ok else "🗡️ Espadas del Ángel guardadas · +6 ATK desactivado" if active and ok else msg2)
+        # El callback ya fue respondido al entrar al handler; refrescamos la tarjeta
+        # para que el botón y el ATK visible cambien inmediatamente.
+        b=_boss_active(chat_id)
+        if b:
+            send_message(chat_id,notice+"\n\n"+_boss_card(b,uid),reply_markup=_boss_keyboard(b,uid))
+        else:
+            send_message(chat_id,notice)
+        return True
     if data.startswith("boss_rejoin:"):
         bid=int(data.split(":",1)[1]); ok,msg2=boss_rejoin(chat_id,uid,bid); b=_boss_active(chat_id)
         send_message(chat_id,msg2+("\n\n"+_boss_card(b,uid) if b else ""),reply_markup=_boss_keyboard(b,uid) if b else None); return True

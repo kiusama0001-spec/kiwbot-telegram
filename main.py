@@ -3794,6 +3794,18 @@ def cancel_rpg_encounter(chat_id, user_id):
     return changed
 
 
+def get_rpg_battle(chat_id, user_id):
+    """Obtiene el encuentro activo para la capa visual de KiwRPG."""
+    with db_lock:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=?",
+            (int(chat_id), int(user_id))
+        ).fetchone()
+        conn.close()
+    return row
+
+
 def _rpg_asset_get(key):
     with db_lock:
         conn=get_db(); row=conn.execute("SELECT telegram_file_id FROM rpg_assets WHERE asset_key=?",(key,)).fetchone(); conn.close()

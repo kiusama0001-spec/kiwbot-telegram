@@ -793,6 +793,35 @@ def init_db():
             )
         """)
 
+        # KiwRPG V5.7 — Bosses cooperativos con IA de combate.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_boss_instances (
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, boss_key TEXT NOT NULL,
+                name TEXT NOT NULL, level BIGINT NOT NULL, max_hp BIGINT NOT NULL, hp BIGINT NOT NULL,
+                atk BIGINT NOT NULL, defense BIGINT NOT NULL, phase BIGINT NOT NULL DEFAULT 1,
+                defending BIGINT NOT NULL DEFAULT 0, heals_used BIGINT NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active', spawned_at BIGINT NOT NULL, expires_at BIGINT NOT NULL,
+                defeated_at BIGINT, last_hit_user_id BIGINT
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_boss_active ON rpg_boss_instances(chat_id,status,expires_at)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_boss_participants (
+                boss_id BIGINT NOT NULL, user_id BIGINT NOT NULL, character_id BIGINT NOT NULL,
+                hp BIGINT NOT NULL, max_hp BIGINT NOT NULL, damage BIGINT NOT NULL DEFAULT 0,
+                special_cd BIGINT NOT NULL DEFAULT 0, ultimate_cd BIGINT NOT NULL DEFAULT 0,
+                defending BIGINT NOT NULL DEFAULT 0, defends_used BIGINT NOT NULL DEFAULT 0,
+                joined_at BIGINT NOT NULL, last_action_at BIGINT NOT NULL DEFAULT 0, defeated BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(boss_id,user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_boss_rewards (
+                boss_id BIGINT NOT NULL, user_id BIGINT NOT NULL, kw BIGINT NOT NULL DEFAULT 0,
+                exp BIGINT NOT NULL DEFAULT 0, rewarded_at BIGINT NOT NULL, PRIMARY KEY(boss_id,user_id)
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -3521,7 +3550,7 @@ def character_card(row):
     eff=effective_character_stats(row)
     b=eff["bonus"]
     extra=""
-    if row["name"].lower()=="one winged angel" and bool(row["secret_blades_active"]):
+    if row["class_name"]=="The Cleaner" and is_owner(row["user_id"]) and bool(row["secret_blades_active"]):
         extra="\n🗡️🗡️ Estado especial: Doble Espada — ACTIVO"
     atk=f"{row['atk']}"+(f" + {b['atk']} = {eff['atk']}" if b['atk'] else "")
     deff=f"{row['defense']}"+(f" + {b['defense']} = {eff['defense']}" if b['defense'] else "")
@@ -3542,9 +3571,9 @@ def toggle_secret_blades(user_id, activate=True):
             LIMIT 1
         """, (user_id,)).fetchone()
 
-        if not row or row["name"].lower() != "one winged angel":
+        if not row or not is_owner(user_id) or row["class_name"] != "The Cleaner":
             conn.close()
-            return False, "Esta habilidad solo pertenece a One Winged Angel."
+            return False, "Esta habilidad secreta solo pertenece a Kiu / The Cleaner."
 
         desired = 1 if activate else 0
         if int(row["secret_blades_active"] or 0) == desired:
@@ -4829,9 +4858,193 @@ def pvp_surrender(duel_id, uid):
     _pvp_record_result(duel_id,winner,int(uid),'surrender')
     send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\n" + ("Resultado registrado en la clasificatoria." if d.get("duel_mode")=="ranked" else "Duelo amistoso: sin pérdida de HP, EXP ni KW.")); return True,''
 
+# =========================================================
+# KIWRPG V5.7 — BOSSES COOPERATIVOS
+# =========================================================
+
+RPG_BOSSES = {
+    "golem": {"name":"Gólem de Hierro","level":5,"hp":1800,"atk":18,"defense":14,"style":"tank","hours":2},
+    "fenrir": {"name":"Fenrir Carmesí","level":8,"hp":2400,"atk":25,"defense":10,"style":"aggressive","hours":2},
+    "rey_demonio": {"name":"Rey Demonio","level":12,"hp":3200,"atk":29,"defense":16,"style":"tactical","hours":3},
+}
+
+def _boss_active(chat_id):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_boss_instances WHERE chat_id=? AND status='active' ORDER BY id DESC LIMIT 1",(int(chat_id),)).fetchone()
+        if row and int(row['expires_at'])<=now:
+            conn.execute("UPDATE rpg_boss_instances SET status='expired' WHERE id=?",(int(row['id']),)); conn.commit(); row=None
+        conn.close()
+    return dict(row) if row else None
+
+def _boss_participant(boss_id,user_id):
+    with db_lock:
+        conn=get_db(); r=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND user_id=?",(int(boss_id),int(user_id))).fetchone(); conn.close()
+    return dict(r) if r else None
+
+def _boss_phase(b):
+    ratio=max(0,float(b['hp'])/max(1,float(b['max_hp'])))
+    return 3 if ratio<=.25 else (2 if ratio<=.50 else 1)
+
+def _boss_card(b):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT p.user_id,p.damage,p.defeated,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name FROM rpg_boss_participants p LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? ORDER BY p.damage DESC",(int(b['id']),)).fetchall(); conn.close()
+    phase=_boss_phase(b); left=max(0,int(b['expires_at'])-int(time.time())); mins=left//60
+    lines=[f"👹 BOSS — {b['name']}",f"⭐ Nv. {b['level']} · Fase {phase}/3",f"❤️ {b['hp']}/{b['max_hp']}",f"⚔️ ATK {b['atk']} · 🛡️ DEF {b['defense']}",f"👥 Participantes: {len(rows)} · ⏳ {mins//60}h {mins%60}m"]
+    if rows:
+        lines += ["","📊 Daño:"]+[f"{i}. {r['display_name']} — {r['damage']}" for i,r in enumerate(rows[:5],1)]
+    return "\n".join(lines)
+
+def _boss_keyboard(b,user_id):
+    p=_boss_participant(b['id'],user_id)
+    if not p:
+        return {"inline_keyboard":[[{"text":"⚔️ ENTRAR AL COMBATE","callback_data":f"boss_join:{b['id']}"}],[{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]}
+    char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
+    scd=int(p['special_cd']); ucd=int(p['ultimate_cd'])
+    rows=[[{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"boss_atk:{b['id']}:{a[0]['key']}"},
+           {"text":f"{a[1]['emoji']} {a[1]['name']}" if scd<=0 else f"⏳ {a[1]['name']} ({scd})","callback_data":f"boss_atk:{b['id']}:{a[1]['key']}"}],
+          [{"text":f"{a[2]['emoji']} {a[2]['name']}" if ucd<=0 else f"⏳ {a[2]['name']} ({ucd})","callback_data":f"boss_atk:{b['id']}:{a[2]['key']}"}],
+          [{"text":"🛡️ Defender","callback_data":f"boss_def:{b['id']}"},{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]
+    if char and is_owner(user_id) and char['class_name']=='The Cleaner':
+        active=bool(char['secret_blades_active']); rows.append([{"text":"🗡️🗡️ Guardar Espadas" if active else "🗡️🗡️ Sacar Espadas","callback_data":f"boss_blades:{b['id']}"}])
+    return {"inline_keyboard":rows}
+
+def spawn_boss(chat_id,key=None):
+    if _boss_active(chat_id): return False,"Ya hay un Boss activo en este chat."
+    if not key: key=random.choice(list(RPG_BOSSES))
+    key=str(key).lower().strip(); cfg=RPG_BOSSES.get(key)
+    if not cfg: return False,"Boss desconocido. Disponibles: golem, fenrir, rey_demonio."
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); r=conn.execute("INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",(int(chat_id),key,cfg['name'],cfg['level'],cfg['hp'],cfg['hp'],cfg['atk'],cfg['defense'],now,now+cfg['hours']*3600)).fetchone(); conn.commit(); conn.close()
+    b=dict(r); return True,b
+
+def boss_join(chat_id,user_id,boss_id):
+    b=_boss_active(chat_id)
+    if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya no está disponible."
+    if _boss_participant(boss_id,user_id): return True,"Ya estás participando."
+    char=get_active_character(user_id)
+    if not char: return False,"Necesitas un personaje activo para entrar."
+    eff=effective_character_stats(char)
+    with db_lock:
+        conn=get_db(); conn.execute("INSERT INTO rpg_boss_participants(boss_id,user_id,character_id,hp,max_hp,joined_at) VALUES(?,?,?,?,?,?) ON CONFLICT(boss_id,user_id) DO NOTHING",(int(boss_id),int(user_id),int(char['id']),int(eff['max_hp']),int(eff['max_hp']),int(time.time()))); conn.commit(); conn.close()
+    return True,f"⚔️ {_pvp_name(user_id)} entró al combate contra {b['name']}."
+
+def _boss_ai_choice(b,p):
+    cfg=RPG_BOSSES.get(b['boss_key'],{}); style=cfg.get('style','tactical'); phase=_boss_phase(b); hp_ratio=float(b['hp'])/max(1,float(b['max_hp'])); player_ratio=float(p['hp'])/max(1,float(p['max_hp']))
+    choices=[]
+    if style=='tank': choices=['defend']*4+['attack']*4+['special']*2
+    elif style=='aggressive': choices=['attack']*5+['special']*4+['defend']
+    else: choices=['attack']*4+['special']*3+['defend']*2+['heal']
+    if phase>=2: choices += ['special']*3
+    if hp_ratio<.35 and int(b.get('heals_used') or 0)<2: choices += ['heal']*3
+    if player_ratio<.30: choices += ['special']*2
+    if int(b.get('defending') or 0): choices=[x for x in choices if x!='defend'] or ['attack']
+    return random.choice(choices)
+
+def _boss_reward_all(b):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(b['id']),)).fetchall(); conn.close()
+    for p in rows:
+        uid=int(p['user_id']); dmg=int(p['damage']); kw=500+min(2500,dmg*2); exp=150+min(1000,dmg)
+        with db_lock:
+            conn=get_db(); exists=conn.execute("SELECT 1 FROM rpg_boss_rewards WHERE boss_id=? AND user_id=?",(int(b['id']),uid)).fetchone()
+            if exists: conn.close(); continue
+            conn.execute("INSERT INTO rpg_boss_rewards(boss_id,user_id,kw,exp,rewarded_at) VALUES(?,?,?,?,?)",(int(b['id']),uid,kw,exp,int(time.time()))); conn.commit(); conn.close()
+        change_kiwons(uid,kw,'boss_reward',note=f"Boss {b['name']}"); grant_rpg_exp(int(p['character_id']),exp)
+    return len(rows)
+
+def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
+    b=_boss_active(chat_id)
+    if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya terminó o expiró."
+    p=_boss_participant(boss_id,user_id)
+    if not p: return False,"Primero entra al combate."
+    if int(p['defeated']): return False,"Tu personaje ya cayó en este Boss."
+    char=get_active_character(user_id)
+    if not char or int(char['id'])!=int(p['character_id']): return False,"No puedes cambiar de personaje durante el Boss."
+    if defend:
+        if int(p['defends_used'])>=3: return False,"🛡️ Ya usaste tus 3 defensas contra este Boss."
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET defending=1,defends_used=defends_used+1,special_cd=GREATEST(0,special_cd-1),ultimate_cd=GREATEST(0,ultimate_cd-1),last_action_at=? WHERE boss_id=? AND user_id=?",(int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+        player_text=f"🛡️ {_pvp_name(user_id)} se prepara para resistir."
+    else:
+        ab=_rpg_get_ability(char['class_name'],ability_key)
+        if not ab: return False,"Movimiento no válido."
+        if ab.get('special') and int(p['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['special_cd']} turnos."
+        if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
+        dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+        if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
+        eff=effective_character_stats(char); dmg=0; heal=0
+        if roll!=1:
+            raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
+            if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
+            if int(b.get('defending') or 0): dmg=max(1,int(round(dmg*.5)))
+            if ab.get('heal_pct'): heal=max(1,int(round(int(p['max_hp'])*float(ab['heal_pct'])*RPG_DICE_MULT[roll])))
+        with db_lock:
+            conn=get_db(); fresh=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(int(boss_id),)).fetchone()
+            if not fresh or fresh['status']!='active': conn.rollback(); conn.close(); return False,"El Boss ya fue derrotado."
+            nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(p['special_cd'])-1); uc=max(0,int(p['ultimate_cd'])-1)
+            if ab.get('special'): sc=int(ab.get('cooldown',2))
+            if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
+            ownhp=min(int(p['max_hp']),int(p['hp'])+heal)
+            status='defeated' if nh<=0 else 'active'
+            conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
+            conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+        crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
+        b=_boss_active(chat_id)
+        if not b:
+            with db_lock:
+                conn=get_db(); dead=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(boss_id),)).fetchone(); conn.close()
+            dead=dict(dead); n=_boss_reward_all(dead); send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes.")
+            if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel': send_one_winged_angel_finisher(chat_id)
+            return True,''
+    # IA decide DESPUÉS de la acción del jugador y antes de resolver su propio resultado.
+    b=_boss_active(chat_id); p=_boss_participant(boss_id,user_id)
+    if not b: return True,''
+    choice=_boss_ai_choice(b,p); ai_text=''
+    if choice=='defend':
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET defending=1 WHERE id=?",(int(boss_id),)); conn.commit(); conn.close()
+        ai_text=f"🧠 {b['name']} analiza el peligro.\n🛡️ Se pone en guardia: el próximo golpe recibido hará 50% menos daño."
+    elif choice=='heal' and int(b['heals_used'])<2:
+        amount=max(1,int(int(b['max_hp'])*.06)); nh=min(int(b['max_hp']),int(b['hp'])+amount)
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET hp=?,heals_used=heals_used+1 WHERE id=?",(nh,int(boss_id))); conn.commit(); conn.close()
+        ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
+    else:
+        phase=_boss_phase(b); mult=1.35 if choice=='special' else 1.0; mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        if int(p['defending']): damage=max(1,int(round(damage*.5))) if damage else 0
+        php=max(0,int(p['hp'])-damage)
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET hp=?,defending=0,defeated=? WHERE boss_id=? AND user_id=?",(php,1 if php<=0 else 0,int(boss_id),int(user_id))); conn.commit(); conn.close()
+        label='💥 Habilidad especial' if choice=='special' else '⚔️ Ataque'; ai_text=f"🧠 {b['name']} elige {label.lower()}.\n🎲 {roll} · {label}: {damage} daño a {_pvp_name(user_id)}."
+        if php<=0: ai_text+=f"\n💀 {_pvp_name(user_id)} cayó, pero el Boss sigue disponible para el grupo."
+    b=_boss_active(chat_id) or b
+    send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b),reply_markup=_boss_keyboard(b,user_id)); return True,''
+
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("boss_join:"):
+        bid=int(data.split(":",1)[1]); ok,msg2=boss_join(chat_id,uid,bid); b=_boss_active(chat_id)
+        send_message(chat_id,msg2+("\n\n"+_boss_card(b) if b else ""),reply_markup=_boss_keyboard(b,uid) if b else None); return True
+    if data.startswith("boss_refresh:"):
+        b=_boss_active(chat_id)
+        if not b: send_message(chat_id,"No hay un Boss activo."); return True
+        send_message(chat_id,_boss_card(b),reply_markup=_boss_keyboard(b,uid)); return True
+    if data.startswith("boss_blades:"):
+        bid=int(data.split(":",1)[1]); char=get_active_character(uid)
+        if not char or not is_owner(uid) or char['class_name']!='The Cleaner': send_message(chat_id,"Esa habilidad no te pertenece. 😌"); return True
+        active=bool(char['secret_blades_active']); ok,msg2=toggle_secret_blades(uid,activate=not active)
+        send_message(chat_id,("🗡️🗡️ Espadas del Ángel activadas. +6 ATK." if not active and ok else "🗡️🗡️ Espadas del Ángel guardadas." if active and ok else msg2)); return True
+    if data.startswith("boss_def:"):
+        ok,msg2=boss_action(chat_id,uid,int(data.split(":",1)[1]),defend=True)
+        if not ok: send_message(chat_id,msg2); return True
+        return True
+    if data.startswith("boss_atk:"):
+        _,bid,key=data.split(":",2); ok,msg2=boss_action(chat_id,uid,int(bid),ability_key=key)
+        if not ok: send_message(chat_id,msg2)
+        return True
     if data.startswith("pvp_accept:"):
         ok,msg2=accept_pvp(int(data.split(":",1)[1]),chat_id,user)
         if not ok: send_message(chat_id,msg2)
@@ -5120,6 +5333,23 @@ def process_command(
             lines.append(f"{icon} {row['display_name']} — {wins}V/{losses}D · {rate:.0f}%")
         lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
         send_message(chat_id,"\n".join(lines)); return True
+
+    if command in ("/boss", "/bosses"):
+        uid=int(message.get("from",{}).get("id")); b=_boss_active(chat_id)
+        if not b:
+            send_message(chat_id,"👹 BOSS\n\nNo hay ningún Boss activo ahora mismo.\nKiu puede invocar uno con /invocarboss.")
+        else:
+            send_message(chat_id,_boss_card(b),reply_markup=_boss_keyboard(b,uid))
+        return True
+
+    if command in ("/invocarboss", "/spawnboss"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede invocar manualmente un Boss."); return True
+        parts=str(text).split(maxsplit=1); key=parts[1].strip().lower() if len(parts)>1 else None
+        ok,res=spawn_boss(chat_id,key)
+        if not ok: send_message(chat_id,res); return True
+        send_message(chat_id,"🔥 UNA PRESENCIA ENORME HA APARECIDO...\n\n"+_boss_card(res),reply_markup=_boss_keyboard(res,message.get("from",{}).get("id")))
+        return True
 
     if command in ("/encuentro", "/combatir"):
         user = message.get("from", {})

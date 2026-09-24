@@ -3420,6 +3420,33 @@ def send_rpg_image(chat_id, asset_key, caption="", reply_markup=None):
         logger.exception("No pude enviar asset RPG %s: %s", asset_key, e)
         return None
 
+def send_boss_victory_animation(chat_id):
+    """Animación universal de victoria para cualquier Boss."""
+    cache_key = "anim:boss_victory"
+    cached = _rpg_asset_get(cache_key)
+    if cached:
+        return telegram("sendAnimation", {"chat_id": chat_id, "animation": cached})
+    path = RPG_ASSETS_DIR / "boss_victory.gif"
+    if not path.exists() or not TELEGRAM_API:
+        return None
+    try:
+        data = apply_current_topic({"chat_id": str(chat_id)})
+        with path.open("rb") as fh:
+            resp = TELEGRAM_SESSION.post(
+                f"{TELEGRAM_API}/sendAnimation",
+                data=data,
+                files={"animation": (path.name, fh, "image/gif")},
+                timeout=TELEGRAM_TIMEOUT,
+            )
+        payload = resp.json() if resp.ok else {}
+        file_id = ((payload.get("result") or {}).get("animation") or {}).get("file_id")
+        if file_id:
+            _rpg_asset_set(cache_key, file_id)
+        return payload
+    except Exception as e:
+        logger.exception("No pude enviar la animación universal de victoria: %s", e)
+        return None
+
 def rpg_class_asset_key(class_name):
     key = str(class_name or "").strip().lower()
     key = key.replace("í", "i").replace("á", "a").replace("é", "e").replace("ó", "o").replace("ú", "u")
@@ -5545,7 +5572,10 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if not b:
             with db_lock:
                 conn=get_db(); dead=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(boss_id),)).fetchone(); conn.close()
-            dead=dict(dead); n=_boss_reward_all(dead); send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes.")
+            dead=dict(dead); n=_boss_reward_all(dead)
+            send_boss_victory_animation(chat_id)
+            reward_kb={"inline_keyboard":[[{"text":"🎁 Ver mi recompensa","callback_data":f"boss_reward:{boss_id}"}]]}
+            send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes.",reply_markup=reward_kb)
             if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel': send_one_winged_angel_finisher(chat_id)
             return True,''
     # IA decide DESPUÉS de la acción del jugador y antes de resolver su propio resultado.
@@ -5576,6 +5606,20 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
+    if data.startswith("boss_reward:"):
+        bid=int(data.split(":",1)[1])
+        with db_lock:
+            conn=get_db()
+            reward=conn.execute("SELECT kw,exp FROM rpg_boss_rewards WHERE boss_id=? AND user_id=?",(bid,int(uid))).fetchone()
+            boss=conn.execute("SELECT name FROM rpg_boss_instances WHERE id=?",(bid,)).fetchone()
+            conn.close()
+        if not reward:
+            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"No tienes una recompensa registrada en esta batalla.","show_alert":True})
+            return True
+        boss_name=(boss['name'] if boss else 'Boss')
+        text=f"🎁 {boss_name}\n💰 +{int(reward['kw']):,} Kiwons\n⭐ +{int(reward['exp']):,} EXP"
+        telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":text,"show_alert":True})
+        return True
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
     if data.startswith("boss_delete_offer:"):
         bid=int(data.split(":",1)[1]); b=_boss_active(chat_id)

@@ -1,0 +1,54 @@
+{
+  "universe": {
+    "name": "Aster",
+    "era": "Mundo 2 — El Despertar",
+    "public_summary": "Aster sobrevivió al Primer Eclipse y a la aparición de las Fisuras. Selene Negra ha vuelto al cielo y las criaturas del Eclipse están despertando.",
+    "core_rule": "Nosotros escribimos el pasado; los jugadores escriben el presente."
+  },
+  "classes": {
+    "guerrero": {
+      "label": "Guerrero",
+      "order": "Herederos de la Ceniza",
+      "theme": "resistencia, presión física y supervivencia"
+    },
+    "mago": {
+      "label": "Mago",
+      "order": "Círculo de la Fisura",
+      "theme": "conocimiento arcano, cristales y poder peligroso"
+    },
+    "picaro": {
+      "label": "Pícaro",
+      "order": "Velos de Medianoche",
+      "theme": "sigilo, información y golpes oportunistas"
+    },
+    "paladin": {
+      "label": "Paladín",
+      "order": "Custodios del Alba Rota",
+      "theme": "protección, juramentos y restauración"
+    },
+    "arquero": {
+      "label": "Arquero",
+      "order": "Vigías de la Frontera",
+      "theme": "caza, precisión y territorios salvajes"
+    },
+    "the_cleaner": {
+      "label": "The Cleaner",
+      "order": "The Cleaners",
+      "theme": "último recurso contra amenazas que las demás órdenes no pueden contener",
+      "secret": true
+    }
+  },
+  "factions": {
+    "cultistas_carmesi": {
+      "public": "Una secta que busca reliquias y conocimiento ligado al Eclipse."
+    },
+    "ordenes_de_aster": {
+      "public": "Las órdenes nacidas o transformadas durante la Caída de Aster."
+    }
+  },
+  "story_hooks": {
+    "selene_negra": "La segunda luna de Aster ha reaparecido.",
+    "la_herida": "La mayor Fisura registrada durante la Caída.",
+    "segundo_eclipse": "Los estudiosos creen que se aproxima un nuevo Eclipse."
+  }
+}

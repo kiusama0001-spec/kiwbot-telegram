@@ -6318,11 +6318,12 @@ def process_command(
                                  (new_hp,new_max,int(b['id']),uid))
                     conn.commit(); conn.close()
 
-        if chat.get("type") == "private":
-            if enabling:
-                send_message(chat_id, f"🧪 Modo Boss de prueba ACTIVADO.\n❤️ {BOSS_TEST_HP} HP · ⚔️ {BOSS_TEST_ATK} ATK · 🛡️ {BOSS_TEST_DEF} DEF\nSolo afecta combates contra Bosses.")
-            else:
-                send_message(chat_id, "🧪 Modo Boss de prueba DESACTIVADO. Tus estadísticas normales vuelven a usarse.")
+        # Confirmar siempre, también en grupos. Antes el comando sí cambiaba el
+        # estado, pero no respondía fuera del chat privado y parecía no funcionar.
+        if enabling:
+            send_message(chat_id, f"🧪 Modo Boss de prueba ACTIVADO.\n❤️ {BOSS_TEST_HP} HP · ⚔️ {BOSS_TEST_ATK} ATK · 🛡️ {BOSS_TEST_DEF} DEF\nSolo afecta combates contra Bosses.")
+        else:
+            send_message(chat_id, "🧪 Modo Boss de prueba DESACTIVADO. Tus estadísticas normales vuelven a usarse.")
         return True
 
     if command in ("/espadas", "/doble_espada"):

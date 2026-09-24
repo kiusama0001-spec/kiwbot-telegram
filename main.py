@@ -814,6 +814,8 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_boss_active ON rpg_boss_instances(chat_id,status,expires_at)")
+        # KiwRPG V6.2.3 — cada Boss solo puede usar 3 guardias en toda su aparición.
+        cur.execute("ALTER TABLE rpg_boss_instances ADD COLUMN IF NOT EXISTS defends_used BIGINT NOT NULL DEFAULT 0")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_boss_participants (
                 boss_id BIGINT NOT NULL, user_id BIGINT NOT NULL, character_id BIGINT NOT NULL,
@@ -5259,6 +5261,19 @@ def _boss_card(b,user_id=None):
             now=int(time.time()); until=int(mine.get('defeated_until') or 0)
             state=' 💀 CAÍDO' if int(mine['defeated']) else ''
             lines += ["", "⚔️ TU ESTADO", f"{_pvp_name(user_id)} — {cname}{state}", f"❤️ {mine['hp']}/{mine['max_hp']}"]
+            pet=_equipped_pet(user_id)
+            if pet:
+                pet_level=max(1,int(pet.get('level',1)))
+                pet_pct=float(pet.get('pct',0))+max(0,pet_level-1)
+                bonus_labels={
+                    'boss_damage': f"+{pet_pct:g}% daño contra Bosses",
+                    'pve_damage': f"+{pet_pct:g}% daño en PvE",
+                    'exp': f"+{pet_pct:g}% EXP en PvE y Bosses",
+                    'kiwons': f"+{pet_pct:g}% Kiwons en PvE y Bosses",
+                }
+                lines.append(f"🐾 {pet.get('name','Mascota')} · Nv. {pet_level}")
+                lines.append(f"✨ {bonus_labels.get(pet.get('bonus'), pet.get('desc','Bonus activo'))}")
+            lines.append(f"💥 Tu daño aportado: {int(mine['damage'])}")
             if int(mine['defeated']):
                 left_recovery=max(0,until-now)
                 if left_recovery>0:
@@ -5270,6 +5285,14 @@ def _boss_card(b,user_id=None):
         lines += ["","📊 Daño:"]+[f"{i}. {r['display_name']} — {r['damage']}" for i,r in enumerate(rows[:8],1)]
     return "\n".join(lines)
 
+def _boss_vital_inventory_id(user_id):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("SELECT id FROM rpg_inventory WHERE user_id=? AND world_id=? AND item_key='esencia_vital' AND quantity>0 ORDER BY id LIMIT 1",(int(user_id),world)).fetchone()
+        conn.close()
+    return int(row['id']) if row else None
+
 def _boss_keyboard(b,user_id):
     p=_boss_participant(b['id'],user_id)
     if not p:
@@ -5277,7 +5300,10 @@ def _boss_keyboard(b,user_id):
     if int(p.get('defeated') or 0):
         left=max(0,int(p.get('defeated_until') or 0)-int(time.time()))
         if left>0:
-            return {"inline_keyboard":[[{"text":f"⏳ Recuperando {left//60}m {left%60:02d}s","callback_data":f"boss_refresh:{b['id']}"}],[{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]}
+            rows=[[{"text":f"⏳ Recuperando {left//60}m {left%60:02d}s","callback_data":f"boss_refresh:{b['id']}"}],
+                  [{"text":"✨ Consumir Esencia Vital","callback_data":f"boss_vital_offer:{b['id']}"}],
+                  [{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]
+            return {"inline_keyboard":rows}
         return {"inline_keyboard":[[{"text":"♻️ VOLVER AL COMBATE","callback_data":f"boss_rejoin:{b['id']}"}],[{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]}
     char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
     scd=int(p['special_cd']); ucd=int(p['ultimate_cd'])
@@ -5385,7 +5411,9 @@ def _boss_ai_choice(b,p):
     heal_limit=3 if style in ('healer','regenerator','chaos') else 2
     if hp_ratio<.45 and int(b.get('heals_used') or 0)<heal_limit: choices += ['heal']*(4 if style in ('healer','regenerator') else 2)
     if player_ratio<.30: choices += ['special']*2
-    if int(b.get('defending') or 0): choices=[x for x in choices if x!='defend'] or ['attack']
+    # La guardia del Boss es global para toda la aparición: máximo 3 usos.
+    if int(b.get('defending') or 0) or int(b.get('defends_used') or 0)>=3:
+        choices=[x for x in choices if x!='defend'] or ['attack']
     return random.choice(choices)
 
 def _boss_reward_all(b):
@@ -5458,7 +5486,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
     choice=_boss_ai_choice(b,p); ai_text=''
     if choice=='defend':
         with db_lock:
-            conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET defending=1 WHERE id=?",(int(boss_id),)); conn.commit(); conn.close()
+            conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET defending=1,defends_used=defends_used+1 WHERE id=? AND defends_used<3",(int(boss_id),)); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} analiza el peligro.\n🛡️ Se pone en guardia: el próximo golpe recibido hará 50% menos daño."
     elif choice=='heal' and int(b['heals_used']) < (3 if RPG_BOSSES.get(b['boss_key'],{}).get('style') in ('healer','regenerator','chaos') else 2):
         style=RPG_BOSSES.get(b['boss_key'],{}).get('style','tactical')
@@ -5497,6 +5525,26 @@ def handle_rpg_callback(query):
     if data.startswith("boss_rejoin:"):
         bid=int(data.split(":",1)[1]); ok,msg2=boss_rejoin(chat_id,uid,bid); b=_boss_active(chat_id)
         send_message(chat_id,msg2+("\n\n"+_boss_card(b,uid) if b else ""),reply_markup=_boss_keyboard(b,uid) if b else None); return True
+    if data.startswith("boss_vital_offer:"):
+        bid=int(data.split(":",1)[1]); b=_boss_active(chat_id); p=_boss_participant(bid,uid)
+        if not b or int(b['id'])!=bid or not p or not int(p.get('defeated') or 0):
+            send_message(chat_id,"Ya no necesitas una Esencia Vital para este Boss.",reply_markup=_boss_keyboard(b,uid) if b else None); return True
+        iid=_boss_vital_inventory_id(uid)
+        if not iid:
+            send_message(chat_id,"✨ No tienes Esencia Vital.\n\nPuedes comprarla en la Tienda RPG por 2,500 KW.",reply_markup=_private_launch_keyboard("shop")); return True
+        hp=max(1,int(round(int(p['max_hp'])*.50)))
+        kb={"inline_keyboard":[[{"text":f"✨ Usar Esencia · volver con {hp}/{p['max_hp']} HP","callback_data":f"boss_vital_use:{bid}"}],
+                               [{"text":"❌ Cancelar","callback_data":f"boss_refresh:{bid}"}]]}
+        send_message(chat_id,f"✨ ESENCIA VITAL\n\nConsumirás 1 Esencia Vital y te levantarás inmediatamente con {hp}/{p['max_hp']} HP.\n\n¿Quieres usarla?",reply_markup=kb); return True
+    if data.startswith("boss_vital_use:"):
+        bid=int(data.split(":",1)[1]); iid=_boss_vital_inventory_id(uid)
+        if not iid:
+            send_message(chat_id,"✨ Ya no tienes Esencia Vital. Puedes conseguir otra en la Tienda RPG.",reply_markup=_private_launch_keyboard("shop")); return True
+        ok,msg2=boss_use_potion(chat_id,uid,bid,iid); b=_boss_active(chat_id)
+        if not ok:
+            send_message(chat_id,msg2,reply_markup=_boss_keyboard(b,uid) if b else None); return True
+        kb={"inline_keyboard":[[{"text":"⚔️ REGRESAR AL BOSS","callback_data":f"boss_refresh:{bid}"}]]}
+        send_message(chat_id,msg2+"\n\n⚔️ ¿Quieres regresar al combate?",reply_markup=kb); return True
     if data.startswith("boss_potions:"):
         bid=int(data.split(":",1)[1]); b=_boss_active(chat_id); p=_boss_participant(bid,uid)
         if not b or int(b['id'])!=bid or not p: send_message(chat_id,"No estás participando en ese Boss."); return True

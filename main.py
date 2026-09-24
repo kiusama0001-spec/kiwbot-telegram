@@ -724,6 +724,25 @@ def init_db():
                   tradeable=excluded.tradeable, equip_slot=excluded.equip_slot, allowed_classes=excluded.allowed_classes, min_level=excluded.min_level
             """, (key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,classes,minlvl))
 
+        # KiwRPG V6.2 — equipo de Forja. Los materiales/Omega ahora tienen uso real.
+        forge_items = [
+            ('hoja_ceniza_reforzada','Hoja de Ceniza Reforzada','raro','arma','Una hoja rehecha con hierro y colmillos de ceniza.',4,1,0,None,1,'arma','Guerrero,Pícaro,The Cleaner',5),
+            ('coraza_guardian','Coraza del Guardián','raro','armadura','Cuero, hierro y cristal unidos para resistir golpes de Boss.',0,4,18,None,1,'armadura','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',5),
+            ('amuleto_sombra','Amuleto de Sombra','ultra_raro','accesorio','Un núcleo de sombra estabilizado dentro de un cristal.',3,2,15,None,1,'accesorio','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',10),
+            ('guantes_vtrigger','Guantes V-Trigger','ultra_raro','guantes','Guantes cargados con una Chispa Omega. El impacto se siente distinto.',5,2,10,None,1,'guantes','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',15),
+            ('cinturon_best_bout','Cinturón Best Bout Machine','legendario','accesorio','Reliquia forjada con recuerdos de la caída de Kenny Omega.',6,4,30,None,0,'accesorio','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',20),
+            ('arma_omega','Arma Omega','legendario','arma','Un arma excepcional alimentada por un Fragmento Omega y un Núcleo Best Bout Machine.',9,2,20,None,0,'arma','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',25),
+        ]
+        for key,name,rarity,itype,desc,atk,defn,hp,limit,trade,slot,classes,minlvl in forge_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(item_key) DO UPDATE SET
+                  name=excluded.name, rarity=excluded.rarity, item_type=excluded.item_type, description=excluded.description,
+                  atk_bonus=excluded.atk_bonus, def_bonus=excluded.def_bonus, hp_bonus=excluded.hp_bonus,
+                  tradeable=excluded.tradeable, equip_slot=excluded.equip_slot, allowed_classes=excluded.allowed_classes, min_level=excluded.min_level
+            """, (key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,classes,minlvl))
+
         # KiwRPG V5.4.1 — PvP amistoso, retos directos y duelos abiertos.
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_pvp_duels (
@@ -5235,6 +5254,162 @@ def equip_pet(user_id,key):
     return True,f"🐾 {RPG_PETS[key]['name']} quedó equipada.\n{RPG_PETS[key]['desc']}"
 
 # =========================================================
+# KIWRPG V6.2 — FORJA / EQUIPAMIENTO
+# =========================================================
+
+RPG_FORGE_RECIPES = {
+    "hoja_ceniza_reforzada": {
+        "name":"Hoja de Ceniza Reforzada","cost":3500,
+        "materials":{"colmillo_ceniza":4,"fragmento_hierro":3,"madera_vieja":1},
+    },
+    "coraza_guardian": {
+        "name":"Coraza del Guardián","cost":4500,
+        "materials":{"fragmento_hierro":5,"retazo_tela":4,"cristal_opaco":2},
+    },
+    "amuleto_sombra": {
+        "name":"Amuleto de Sombra","cost":8000,
+        "materials":{"nucleo_sombra":2,"cristal_opaco":4},
+    },
+    "guantes_vtrigger": {
+        "name":"Guantes V-Trigger","cost":12000,
+        "materials":{"chispa_omega":1,"fragmento_hierro":4,"retazo_tela":3},
+    },
+    "cinturon_best_bout": {
+        "name":"Cinturón Best Bout Machine","cost":20000,
+        "materials":{"cinta_campeon":1,"placa_vtrigger":1,"chispa_omega":1},
+    },
+    "arma_omega": {
+        "name":"Arma Omega","cost":30000,
+        "materials":{"fragmento_omega":1,"nucleo_best_bout":1,"placa_vtrigger":1},
+    },
+}
+
+def _forge_owned_materials(user_id):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""SELECT i.item_key,COALESCE(SUM(i.quantity),0) qty
+            FROM rpg_inventory i
+            WHERE i.user_id=? AND i.world_id=? AND i.equipped=0
+            GROUP BY i.item_key""",(int(user_id),world)).fetchall()
+        conn.close()
+    return {str(r["item_key"]):int(r["qty"] or 0) for r in rows}
+
+def forge_keyboard(user_id):
+    owned=_forge_owned_materials(user_id); bal=get_kiwons(user_id)
+    rows=[]
+    for key,cfg in RPG_FORGE_RECIPES.items():
+        ready=bal>=int(cfg["cost"]) and all(owned.get(k,0)>=int(q) for k,q in cfg["materials"].items())
+        rows.append([{"text":f"{'🔥' if ready else '🔒'} {cfg['name']} · {cfg['cost']:,} KW","callback_data":f"forge_view:{key}"}])
+    rows.append([{"text":"🎽 Ver equipo","callback_data":"rpg_show_equipment"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}])
+    return {"inline_keyboard":rows}
+
+def forge_text(user_id):
+    char=get_active_character(user_id)
+    if not char: return "Necesitas un personaje activo para usar la Forja."
+    return (f"🔥 FORJA DE KIWRPG\n\n"
+            f"Convierte materiales y reliquias en equipo real.\n"
+            f"El equipo modifica de verdad ATK, DEF y HP en combate.\n\n"
+            f"🪙 Saldo: {get_kiwons(user_id):,} KW\n"
+            f"🎽 Usa /equipo para ver lo que llevas puesto.\n\n"
+            f"🔥 = puedes fabricarlo ahora · 🔒 = te falta algo")
+
+def forge_recipe_text(user_id,key):
+    cfg=RPG_FORGE_RECIPES.get(key)
+    if not cfg: return None,None
+    owned=_forge_owned_materials(user_id)
+    with db_lock:
+        conn=get_db()
+        item=conn.execute("SELECT * FROM rpg_items WHERE item_key=?",(key,)).fetchone()
+        names={}
+        for mk in cfg["materials"]:
+            r=conn.execute("SELECT name FROM rpg_items WHERE item_key=?",(mk,)).fetchone()
+            names[mk]=r["name"] if r else mk
+        conn.close()
+    if not item: return None,None
+    lines=[f"🔥 FORJA — {item['name']}",f"{RPG_RARITY_ICON.get(item['rarity'],'⚪')} {item['rarity'].replace('_',' ').title()} · {str(item['equip_slot']).title()}","",str(item['description']),"",
+           f"⚔️ ATK +{int(item['atk_bonus'])} · 🛡️ DEF +{int(item['def_bonus'])} · ❤️ HP +{int(item['hp_bonus'])}",
+           f"📈 Nivel requerido: {int(item['min_level'])}","", "🧱 MATERIALES:"]
+    ready=True
+    for mk,need in cfg["materials"].items():
+        have=owned.get(mk,0); ok=have>=int(need); ready=ready and ok
+        lines.append(f"{'✅' if ok else '❌'} {names[mk]} ×{need}  ({have}/{need})")
+    bal=get_kiwons(user_id); money=bal>=int(cfg["cost"]); ready=ready and money
+    lines += ["",f"{'✅' if money else '❌'} Forja: {int(cfg['cost']):,} KW  (saldo {bal:,})"]
+    kb={"inline_keyboard":[
+        [{"text":"🔥 FORJAR" if ready else "🔒 Faltan requisitos","callback_data":f"forge_make:{key}" if ready else f"forge_locked:{key}"}],
+        [{"text":"◀️ Volver a la Forja","callback_data":"forge_home"}]
+    ]}
+    return "\n".join(lines),kb
+
+def _consume_forge_materials(conn,user_id,world,materials):
+    # Bloquea y consume cantidades reales, nunca objetos equipados.
+    for item_key,need in materials.items():
+        need=int(need)
+        rows=conn.execute("""SELECT id,quantity FROM rpg_inventory
+            WHERE user_id=? AND world_id=? AND item_key=? AND equipped=0
+            ORDER BY id FOR UPDATE""",(int(user_id),int(world),item_key)).fetchall()
+        if sum(int(r["quantity"] or 0) for r in rows)<need:
+            return False
+        left=need
+        for r in rows:
+            if left<=0: break
+            qty=int(r["quantity"] or 0); take=min(qty,left)
+            if take>=qty: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(int(r["id"]),))
+            else: conn.execute("UPDATE rpg_inventory SET quantity=quantity-? WHERE id=?",(take,int(r["id"])))
+            left-=take
+    return True
+
+def forge_make(user_id,key,chat_id=None):
+    cfg=RPG_FORGE_RECIPES.get(key); char=get_active_character(user_id)
+    if not cfg: return False,"Esa receta no existe."
+    if not char: return False,"Necesitas un personaje activo."
+    # Compatibilidad/nivel se comprueban antes de gastar nada.
+    with db_lock:
+        conn=get_db(); item=conn.execute("SELECT * FROM rpg_items WHERE item_key=?",(key,)).fetchone(); conn.close()
+    if not item: return False,"El objeto de esta receta no está registrado."
+    ok,reason=item_compatibility(dict(item),char)
+    if not ok: return False,f"🔒 Aún no puedes usar esta pieza: {reason}"
+
+    owned=_forge_owned_materials(user_id)
+    if any(owned.get(k,0)<int(q) for k,q in cfg["materials"].items()):
+        return False,"🧱 Ya no tienes todos los materiales necesarios."
+    cost=int(cfg["cost"])
+    ok,balance,error=change_kiwons(user_id,-cost,"rpg_forge",chat_id=chat_id,note=f"Forja {key}")
+    if not ok: return False,f"🪙 Necesitas {cost:,} KW para esta receta."
+
+    world=current_rpg_world()
+    try:
+        with db_lock:
+            conn=get_db()
+            try:
+                if not _consume_forge_materials(conn,user_id,world,cfg["materials"]):
+                    conn.rollback(); conn.close()
+                    change_kiwons(user_id,cost,"rpg_forge_refund",chat_id=chat_id,note=f"Reembolso forja {key}")
+                    return False,"🧱 Tus materiales cambiaron antes de completar la forja. No se consumió nada y tus KW fueron devueltos."
+                conn.commit(); conn.close()
+            except Exception:
+                conn.rollback(); conn.close(); raise
+        granted=grant_rpg_item(user_id,int(char["id"]),key,"forja")
+        if not granted:
+            # Caso extremadamente raro: se devuelve KW. Los materiales no se recrean automáticamente
+            # para evitar duplicaciones silenciosas; se deja registro explícito en logs.
+            change_kiwons(user_id,cost,"rpg_forge_refund",chat_id=chat_id,note=f"Fallo entrega {key}")
+            print(f"[FORGE] ALERTA: fallo de entrega tras consumir materiales user={user_id} item={key}")
+            return False,"⚠️ La entrega falló y tus KW fueron devueltos. Revisa el log de Forja."
+    except Exception as exc:
+        try: change_kiwons(user_id,cost,"rpg_forge_refund",chat_id=chat_id,note=f"Error forja {key}")
+        except Exception: pass
+        print(f"[FORGE] Error user={user_id} item={key}: {exc}")
+        return False,"⚠️ La forja no pudo completarse. Tus KW fueron devueltos."
+
+    return True,(f"🔥 FORJA COMPLETADA\n\n"
+                 f"{RPG_RARITY_ICON.get(item['rarity'],'⚪')} {item['name']}\n"
+                 f"💸 -{cost:,} KW · 🪙 Saldo: {balance:,} KW\n\n"
+                 f"🎒 El objeto ya está en tu inventario.\n"
+                 f"Tócalo y pulsa ⚔️ Equipar para usar sus estadísticas.")
+
+# =========================================================
 # KIWRPG V6.1 — TIENDA RPG / CONSUMIBLES
 # =========================================================
 
@@ -6430,7 +6605,7 @@ def handle_rpg_callback(query):
         world=current_rpg_world()
         with db_lock:
             conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
-        kb=[[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
+        kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
@@ -6500,6 +6675,23 @@ def handle_rpg_callback(query):
         ok,msg2=_omega_open_chest(event_id,uid,chat_id)
         send_message(chat_id,msg2)
         return True
+    if data=="forge_home":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 La Forja se administra en privado.",reply_markup=_private_launch_keyboard("forge")); return True
+        send_message(chat_id,forge_text(uid),reply_markup=forge_keyboard(uid)); return True
+    if data.startswith("forge_view:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        txt,kb=forge_recipe_text(uid,data.split(":",1)[1])
+        send_message(chat_id,txt or "Esa receta ya no existe.",reply_markup=kb); return True
+    if data.startswith("forge_make:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        key=data.split(":",1)[1]; ok,msg2=forge_make(uid,key,chat_id)
+        txt,kb=forge_recipe_text(uid,key)
+        send_message(chat_id,msg2,reply_markup=kb if txt else forge_keyboard(uid)); return True
+    if data.startswith("forge_locked:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        txt,kb=forge_recipe_text(uid,data.split(":",1)[1])
+        send_message(chat_id,txt or "Esa receta ya no existe.",reply_markup=kb); return True
     if data.startswith("rpg_item:"):
         show_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
     if data.startswith("rpg_equip:"):
@@ -6892,7 +7084,7 @@ def process_command(
         with db_lock:
             conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(user_id),world)).fetchall(); conn.close()
         lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."] if rows else ["🎒 INVENTARIO","","Todavía está vacío."]
-        kb=[[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
+        kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
@@ -6901,6 +7093,13 @@ def process_command(
             active=bool(char['secret_blades_active'])
             kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
         send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
+        return True
+
+    if command in ("/forja", "/forge"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private":
+            send_message(chat_id,"🔒 La Forja de KiwRPG se usa en privado.",reply_markup=_private_launch_keyboard("forge")); return True
+        send_message(chat_id,forge_text(user_id),reply_markup=forge_keyboard(user_id))
         return True
 
     if command in ("/materiales", "/mats"):

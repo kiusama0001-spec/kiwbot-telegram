@@ -5360,13 +5360,32 @@ def spawn_boss(chat_id,key=None):
         conn=get_db(); r=conn.execute("INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",(int(chat_id),key,cfg['name'],cfg['level'],cfg['hp'],cfg['hp'],cfg['atk'],cfg['defense'],now,now+cfg['hours']*3600)).fetchone(); conn.commit(); conn.close()
     b=dict(r); return True,b
 
+# Modo secreto de pruebas de Bosses. Solo Kiu puede activarlo y solo afecta combates contra Bosses.
+# Es temporal: se reinicia apagado cuando Render reinicia el proceso.
+BOSS_TEST_MODE_USERS = set()
+BOSS_TEST_HP = 1000
+BOSS_TEST_ATK = 250
+BOSS_TEST_DEF = 50
+
+def _boss_test_mode(user_id):
+    return int(user_id) == int(OWNER_TELEGRAM_ID) and int(user_id) in BOSS_TEST_MODE_USERS
+
+def _boss_test_stats(eff, user_id):
+    if not _boss_test_mode(user_id):
+        return eff
+    boosted = dict(eff)
+    boosted['max_hp'] = BOSS_TEST_HP
+    boosted['atk'] = BOSS_TEST_ATK
+    boosted['defense'] = BOSS_TEST_DEF
+    return boosted
+
 def boss_join(chat_id,user_id,boss_id):
     b=_boss_active(chat_id)
     if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya no está disponible."
     if _boss_participant(boss_id,user_id): return True,"Ya estás participando."
     char=get_active_character(user_id)
     if not char: return False,"Necesitas un personaje activo para entrar."
-    eff=effective_character_stats(char)
+    eff=_boss_test_stats(effective_character_stats(char),user_id)
     with db_lock:
         conn=get_db(); conn.execute("INSERT INTO rpg_boss_participants(boss_id,user_id,character_id,hp,max_hp,joined_at) VALUES(?,?,?,?,?,?) ON CONFLICT(boss_id,user_id) DO NOTHING",(int(boss_id),int(user_id),int(char['id']),int(eff['max_hp']),int(eff['max_hp']),int(time.time()))); conn.commit(); conn.close()
     return True,f"⚔️ {_pvp_name(user_id)} entró al combate contra {b['name']}."
@@ -5497,7 +5516,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
         if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
-        eff=effective_character_stats(char); dmg=0; heal=0
+        eff=_boss_test_stats(effective_character_stats(char),user_id); dmg=0; heal=0
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
             pet_pct=_pet_bonus(user_id,'boss_damage')
@@ -5545,7 +5564,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET hp=?,heals_used=heals_used+1 WHERE id=?",(nh,int(boss_id))); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
-        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=_boss_test_stats(effective_character_stats(char),user_id); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
         if int(p['defending']): damage=max(1,int(round(damage*.5))) if damage else 0
         php=max(0,int(p['hp'])-damage)
         with db_lock:
@@ -6268,6 +6287,42 @@ def process_command(
             chat_id,
             f"⭐ Ahora tu personaje activo es {selected}.\n\n{character_card(char)}"
         )
+        return True
+
+    if command == "/modotest":
+        user = message.get("from", {})
+        uid = user.get("id")
+        if not is_owner(uid):
+            send_message(chat_id, "No puedes usar ese comando.")
+            return True
+
+        uid = int(uid)
+        enabling = uid not in BOSS_TEST_MODE_USERS
+        if enabling:
+            BOSS_TEST_MODE_USERS.add(uid)
+        else:
+            BOSS_TEST_MODE_USERS.discard(uid)
+
+        # Si Kiu ya está dentro de un Boss, ajusta su HP inmediatamente.
+        b = _boss_active(chat_id)
+        if b:
+            p = _boss_participant(b['id'], uid)
+            if p:
+                char = get_active_character(uid)
+                normal_max = int(effective_character_stats(char)['max_hp']) if char else int(p['max_hp'])
+                new_max = BOSS_TEST_HP if enabling else normal_max
+                new_hp = new_max if enabling else min(int(p['hp']), new_max)
+                with db_lock:
+                    conn = get_db()
+                    conn.execute("UPDATE rpg_boss_participants SET hp=?,max_hp=? WHERE boss_id=? AND user_id=?",
+                                 (new_hp,new_max,int(b['id']),uid))
+                    conn.commit(); conn.close()
+
+        if chat.get("type") == "private":
+            if enabling:
+                send_message(chat_id, f"🧪 Modo Boss de prueba ACTIVADO.\n❤️ {BOSS_TEST_HP} HP · ⚔️ {BOSS_TEST_ATK} ATK · 🛡️ {BOSS_TEST_DEF} DEF\nSolo afecta combates contra Bosses.")
+            else:
+                send_message(chat_id, "🧪 Modo Boss de prueba DESACTIVADO. Tus estadísticas normales vuelven a usarse.")
         return True
 
     if command in ("/espadas", "/doble_espada"):

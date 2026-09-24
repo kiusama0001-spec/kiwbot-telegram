@@ -5230,6 +5230,21 @@ RPG_BOSSES = {
     "emperador_caos": {"name":"Emperador del Caos","level":25,"hp":5500,"atk":40,"defense":19,"style":"chaos","hours":4},
 }
 
+RPG_BOSS_ATTACKS = {
+ "golem":{"attack":[("👊 Puño de Piedra",.82),("🪨 Embestida de Granito",1.00)],"special":[("🔨 Martillo Sísmico",1.38),("💥 Aplastamiento",1.62)]},
+ "fenrir":{"attack":[("🐾 Zarpazo Carmesí",.92),("🦷 Mordida Salvaje",1.08)],"special":[("🌙 Cacería Lunar",1.42),("🩸 Desgarro Carmesí",1.58)]},
+ "rey_demonio":{"attack":[("🔥 Garra Infernal",.95),("⚔️ Tajo Demoníaco",1.08)],"special":[("👹 Llama del Averno",1.45),("☄️ Castigo del Rey Demonio",1.62)]},
+ "lich":{"attack":[("💀 Toque Marchito",.88),("🔮 Proyectil del Vacío",1.04)],"special":[("🕯️ Maldición Sepulcral",1.36),("☠️ Explosión de Almas",1.55)]},
+ "leviatan":{"attack":[("🌊 Coletazo Abisal",.98),("🦷 Mordida de las Profundidades",1.10)],"special":[("🌪️ Marea Devastadora",1.48),("🌊 Furia del Abismo",1.68)]},
+ "angel_caido":{"attack":[("🪽 Pluma Cortante",.94),("⚔️ Espada Profana",1.10)],"special":[("🌑 Juicio Caído",1.48),("🩸 Castigo Celestial",1.64)]},
+ "hidra":{"attack":[("🐲 Mordida de la Hidra",.92),("☣️ Aliento Venenoso",1.06)],"special":[("🐉 Frenesí de Fauces",1.46),("☠️ Nueve Fauces",1.66)]},
+ "emperador_caos":{"attack":[("🌀 Corte del Caos",1.00),("👑 Golpe Imperial",1.12)],"special":[("🌌 Ruptura de la Realidad",1.55),("💀 Decreto del Fin",1.78)]},
+}
+
+def _boss_attack_move(b,choice):
+    pool=RPG_BOSS_ATTACKS.get(str(b.get('boss_key')),{}).get('special' if choice=='special' else 'attack')
+    return random.choice(pool) if pool else (("💥 Habilidad especial",1.35) if choice=='special' else ("⚔️ Ataque",1.0))
+
 def _boss_active(chat_id):
     now=int(time.time())
     with db_lock:
@@ -5293,7 +5308,7 @@ def _boss_vital_inventory_id(user_id):
         conn.close()
     return int(row['id']) if row else None
 
-def _boss_keyboard(b,user_id):
+def _boss_keyboard_base(b,user_id):
     p=_boss_participant(b['id'],user_id)
     if not p:
         return {"inline_keyboard":[[{"text":"⚔️ ENTRAR AL COMBATE","callback_data":f"boss_join:{b['id']}"}],[{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]}
@@ -5315,6 +5330,15 @@ def _boss_keyboard(b,user_id):
     if char and is_owner(user_id) and char['class_name']=='The Cleaner':
         active=bool(char['secret_blades_active']); rows.append([{"text":"🗡️🗡️ Guardar Espadas" if active else "🗡️🗡️ Sacar Espadas","callback_data":f"boss_blades:{b['id']}"}])
     return {"inline_keyboard":rows}
+
+
+def _boss_keyboard(b,user_id):
+    kb=_boss_keyboard_base(b,user_id)
+    if is_owner(user_id):
+        rows=list(kb.get("inline_keyboard") or [])
+        rows.append([{"text":"🗑️ Eliminar Boss","callback_data":f"boss_delete_offer:{b['id']}"}])
+        return {"inline_keyboard":rows}
+    return kb
 
 def spawn_boss(chat_id,key=None):
     if _boss_active(chat_id): return False,"Ya hay un Boss activo en este chat."
@@ -5496,12 +5520,12 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET hp=?,heals_used=heals_used+1 WHERE id=?",(nh,int(boss_id))); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
-        phase=_boss_phase(b); mult=1.35 if choice=='special' else 1.0; mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=effective_character_stats(char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
         if int(p['defending']): damage=max(1,int(round(damage*.5))) if damage else 0
         php=max(0,int(p['hp'])-damage)
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET hp=?,defending=0,defeated=?,defeated_until=? WHERE boss_id=? AND user_id=?",(php,1 if php<=0 else 0,(int(time.time())+BOSS_RECOVERY_SECONDS) if php<=0 else 0,int(boss_id),int(user_id))); conn.commit(); conn.close()
-        label='💥 Habilidad especial' if choice=='special' else '⚔️ Ataque'; ai_text=f"🧠 {b['name']} elige {label.lower()}.\n🎲 {roll} · {label}: {damage} daño a {_pvp_name(user_id)}."
+        ai_text=f"🧠 {b['name']} prepara su movimiento.\n🎲 {roll} · {move_name}: {damage} daño a {_pvp_name(user_id)}."
         if php<=0: ai_text+=f"\n💀 {_pvp_name(user_id)} cayó, pero el Boss sigue disponible para el grupo.\n⏳ Recuperación: 5m 00s."
     b=_boss_active(chat_id) or b
     send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b,user_id),reply_markup=_boss_keyboard(b,user_id)); return True,''
@@ -5509,6 +5533,22 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("boss_delete_offer:"):
+        bid=int(data.split(":",1)[1]); b=_boss_active(chat_id)
+        if not is_owner(uid):
+            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"Solo Kiu puede eliminar un Boss.","show_alert":True}); return True
+        if not b or int(b['id'])!=bid: send_message(chat_id,"Ese Boss ya no está activo."); return True
+        kb={"inline_keyboard":[[{"text":"✅ Sí, eliminar","callback_data":f"boss_delete_confirm:{bid}"},{"text":"❌ Cancelar","callback_data":f"boss_refresh:{bid}"}]]}
+        send_message(chat_id,f"⚠️ ¿Eliminar a {b['name']}?\n\nLa batalla terminará para todos. No dará EXP, Kiwons, drops ni contará como victoria.",reply_markup=kb); return True
+    if data.startswith("boss_delete_confirm:"):
+        bid=int(data.split(":",1)[1])
+        if not is_owner(uid):
+            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"Solo Kiu puede eliminar un Boss.","show_alert":True}); return True
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT name,status FROM rpg_boss_instances WHERE id=? AND chat_id=? FOR UPDATE",(bid,int(chat_id))).fetchone()
+            if row and row['status']=='active': conn.execute("UPDATE rpg_boss_instances SET status='cancelled' WHERE id=?",(bid,)); conn.commit()
+            conn.close()
+        send_message(chat_id,f"🗑️ {row['name']} fue eliminado por el administrador.\nLa batalla terminó sin recompensas." if row else "Ese Boss ya no existe."); return True
     if data.startswith("boss_join:"):
         bid=int(data.split(":",1)[1]); ok,msg2=boss_join(chat_id,uid,bid); b=_boss_active(chat_id)
         send_message(chat_id,msg2+("\n\n"+_boss_card(b,uid) if b else ""),reply_markup=_boss_keyboard(b,uid) if b else None); return True
@@ -5903,6 +5943,14 @@ def process_command(
             lines.append(f"{icon} {row['display_name']} — {wins}V/{losses}D · {rate:.0f}%")
         lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
         send_message(chat_id,"\n".join(lines)); return True
+
+    if command in ("/quitarboss", "/eliminarboss"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede eliminar manualmente un Boss."); return True
+        b=_boss_active(chat_id)
+        if not b: send_message(chat_id,"No hay ningún Boss activo para eliminar."); return True
+        kb={"inline_keyboard":[[{"text":"✅ Sí, eliminar","callback_data":f"boss_delete_confirm:{b['id']}"},{"text":"❌ Cancelar","callback_data":f"boss_refresh:{b['id']}"}]]}
+        send_message(chat_id,f"⚠️ ¿Eliminar a {b['name']}?\n\nNo entregará recompensas ni contará como victoria.",reply_markup=kb); return True
 
     if command == "/boss":
         uid=int(message.get("from",{}).get("id")); b=_boss_active(chat_id)

@@ -870,6 +870,17 @@ def init_db():
         """)
 
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_omega_chests (
+                event_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+                claimed_at BIGINT NOT NULL DEFAULT 0,
+                opened_at BIGINT NOT NULL DEFAULT 0,
+                item_key TEXT NOT NULL DEFAULT '',
+                rarity TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(event_id,user_id)
+            )
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_boss_test_users (
                 user_id BIGINT PRIMARY KEY, enabled BIGINT NOT NULL DEFAULT 1, updated_at BIGINT NOT NULL DEFAULT 0
             )
@@ -5713,31 +5724,91 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
     _omega_track_combat_message(chat_id,user_id,event_id,dice_mid,_telegram_message_id(battle_msg))
     return True,""
 
-def _omega_give_chest(event_id,user_id):
-    # Caja Omega: selección secreta. Se usa el inventario RPG existente.
-    legendary=[
-        ("fragmento_omega","Fragmento Omega"),
-        ("nucleo_best_bout","Núcleo Best Bout Machine"),
-    ]
-    epic=[
-        ("cinta_campeon","Cinta del Campeón"),
-        ("chispa_omega","Chispa Omega"),
-        ("placa_vtrigger","Placa V-Trigger"),
-    ]
-    rarity="Legendario" if random.random()<0.25 else "Épico"
-    item_id,item_name=random.choice(legendary if rarity=="Legendario" else epic)
-    char=get_active_character(int(user_id))
-    if not char:
-        return None,None
-    granted=grant_rpg_item(int(user_id),int(char['id']),item_id,source=f"omega:{int(event_id)}")
-    if not granted:
-        return None,None
+def _omega_grant_chest(event_id,user_id):
+    """Entrega una Caja Omega cerrada. No decide el premio todavía."""
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_omega_chests(event_id,user_id,claimed_at,opened_at,item_key,rarity)
+                        VALUES(?,?,?,0,'','')
+                        ON CONFLICT(event_id,user_id) DO NOTHING""",
+                     (int(event_id),int(user_id),now))
+        conn.commit(); conn.close()
     try:
         send_message(int(user_id),
-            f"📦 CAJA OMEGA ABIERTA\n\n🎁 OBJETO OBTENIDO\n{'🟡' if rarity=='Legendario' else '🟣'} {item_name} ×1\n⭐ {rarity}\n\nSolo tú puedes ver el contenido de tu caja.")
+            "📦 CAJA OMEGA OBTENIDA\n\n"
+            "Kenny Omega ha caído y tienes una recompensa esperando.\n"
+            "🔒 Su contenido sigue siendo secreto.\n\n"
+            "Ábrela cuando quieras.",
+            reply_markup={"inline_keyboard":[[
+                {"text":"🎁 Abrir Caja Omega","callback_data":f"omega_chest_open:{int(event_id)}"}
+            ]]})
     except Exception:
+        # La caja queda guardada aunque Telegram no permita enviar el DM.
         pass
-    return rarity,item_name
+    return True
+
+def _omega_open_chest(event_id,user_id,chat_id):
+    """Abre una Caja Omega solo en privado y una sola vez."""
+    if int(chat_id)!=int(user_id):
+        return False,"🔒 La Caja Omega solo puede abrirse en el chat privado del bot."
+
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("""SELECT * FROM rpg_omega_chests
+                            WHERE event_id=? AND user_id=? FOR UPDATE""",
+                         (int(event_id),int(user_id))).fetchone()
+        if not row:
+            conn.rollback(); conn.close()
+            return False,"📦 No tienes una Caja Omega de este evento."
+        if int(row["opened_at"] or 0)>0:
+            item_name=row["item_key"] or "recompensa"
+            conn.rollback(); conn.close()
+            return False,f"🔒 Esa Caja Omega ya fue abierta ({item_name})."
+
+        legendary=[
+            ("fragmento_omega","Fragmento Omega"),
+            ("nucleo_best_bout","Núcleo Best Bout Machine"),
+        ]
+        epic=[
+            ("cinta_campeon","Cinta del Campeón"),
+            ("chispa_omega","Chispa Omega"),
+            ("placa_vtrigger","Placa V-Trigger"),
+        ]
+        rarity="Legendario" if random.random()<0.25 else "Épico"
+        item_id,item_name=random.choice(legendary if rarity=="Legendario" else epic)
+        char=get_active_character(int(user_id))
+        if not char:
+            conn.rollback(); conn.close()
+            return False,"Necesitas un personaje activo para abrir la Caja Omega."
+
+        # Reservamos la apertura antes de otorgar para impedir dobles clics.
+        now=int(time.time())
+        conn.execute("""UPDATE rpg_omega_chests
+                        SET opened_at=?,item_key=?,rarity=?
+                        WHERE event_id=? AND user_id=? AND opened_at=0""",
+                     (now,item_id,rarity,int(event_id),int(user_id)))
+        conn.commit(); conn.close()
+
+    granted=grant_rpg_item(int(user_id),int(char["id"]),item_id,
+                           source=f"omega:{int(event_id)}")
+    if not granted:
+        # Si el inventario falla, devolvemos la caja al estado cerrado.
+        with db_lock:
+            conn=get_db()
+            conn.execute("""UPDATE rpg_omega_chests
+                            SET opened_at=0,item_key='',rarity=''
+                            WHERE event_id=? AND user_id=? AND item_key=?""",
+                         (int(event_id),int(user_id),item_id))
+            conn.commit(); conn.close()
+        return False,"⚠️ No pude entregar el objeto. Tu Caja Omega sigue cerrada; inténtalo otra vez."
+
+    return True,(f"✨ CAJA OMEGA ABIERTA ✨\n\n"
+                 f"🎁 OBJETO OBTENIDO\n"
+                 f"{'🟡' if rarity=='Legendario' else '🟣'} {item_name} ×1\n"
+                 f"⭐ {rarity}\n\n"
+                 f"El objeto ya está en tu inventario.")
+
 
 def _omega_finalize(event,defeated=False):
     if not event or event.get('status')!='active': return False
@@ -5768,9 +5839,24 @@ def _omega_finalize(event,defeated=False):
                 conn.commit()
             conn.close()
         if not exists:
-            change_kiwons(int(r['user_id']),kw,'omega_reward',note=f"Kenny Omega puesto {i}")
-            grant_rpg_exp(int(r['character_id']),exp)
+            kw_ok,new_balance,kw_error=change_kiwons(int(r['user_id']),kw,'omega_reward',note=f"Kenny Omega puesto {i}")
+            exp_state,levels_gained=grant_rpg_exp(int(r['character_id']),exp)
+            if kw_ok and exp_state is not None:
+                try:
+                    send_message(int(r['user_id']),
+                        f"🏆 RECOMPENSA OMEGA ACREDITADA\\n\\n"
+                        f"{medals[i-1]} Puesto #{i}\\n"
+                        f"🪙 +{kw:,} KW\\n"
+                        f"⭐ +{exp:,} EXP\\n"
+                        f"💰 Saldo actual: {int(new_balance):,} KW\\n"
+                        f"📈 Nivel actual: {int(exp_state['level'])}")
+                except Exception:
+                    pass
+            else:
+                print(f"[OMEGA] Advertencia recompensa user={int(r['user_id'])}: KW={kw_ok} EXP={exp_state is not None} {kw_error}")
         lines.append(f"{medals[i-1]} {r['display_name']} — {int(r['total_damage']):,} daño · +{kw:,} KW · +{exp:,} EXP")
+    if rows:
+        lines += ["", "✅ Las recompensas de KW y EXP del podio fueron procesadas."]
     if defeated:
         with db_lock:
             conn=get_db()
@@ -5779,13 +5865,13 @@ def _omega_finalize(event,defeated=False):
         chest_count=0
         for pr in participants:
             try:
-                rarity,item_name=_omega_give_chest(int(event['id']),int(pr['user_id']))
-                if rarity and item_name:
+                if _omega_grant_chest(int(event['id']),int(pr['user_id'])):
                     chest_count+=1
             except Exception as exc:
-                print(f"[OMEGA] Error entregando caja a {int(pr['user_id'])}: {exc}")
+                print(f"[OMEGA] Error guardando caja para {int(pr['user_id'])}: {exc}")
         lines += ["",f"📦 Caja Omega entregada a {chest_count} participantes.",
-                  "🎁 Cada caja contiene en secreto un objeto Épico o Legendario."]
+                  "🔒 Su contenido permanece en secreto.",
+                  "🎁 Ábrela en privado con el bot para descubrir tu objeto Épico o Legendario."]
     send_message(int(event['chat_id']),"\n".join(lines))
     return True
 
@@ -6337,10 +6423,6 @@ def handle_rpg_callback(query):
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
-        char=get_active_character(uid)
-        if char and is_owner(uid) and char['class_name']=='The Cleaner':
-            active=bool(char['secret_blades_active'])
-            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
         text_inv="🎒 INVENTARIO\n\nToca un objeto para administrarlo." if rows else "🎒 INVENTARIO\n\nTodavía está vacío."
         send_message(chat_id,text_inv,reply_markup={"inline_keyboard":kb} if kb else None); return True
     if data=="rpg_toggle_blades":
@@ -6387,6 +6469,21 @@ def handle_rpg_callback(query):
         if int(origin_chat_id)!=int(chat_id):
             u=(query.get("from") or {}); username=u.get("username"); mention=("@"+username) if username else (u.get("first_name") or "Jugador")
             send_message(origin_chat_id,f"✨ UN NUEVO AVENTURERO HA LLEGADO\n\n{info.get('emoji','🧙')} {info['label']} {mention}\n{st['name']} — Nivel 1\n\nBienvenido al Mundo {current_rpg_world()}.")
+        return True
+    if data.startswith("omega_chest_open:"):
+        try:
+            event_id=int(data.split(":",1)[1])
+        except Exception:
+            return True
+        if not _is_private_chat_obj(msg.get("chat")):
+            telegram("answerCallbackQuery",{
+                "callback_query_id":query.get("id"),
+                "text":"🔒 Abre tu Caja Omega en el chat privado del bot.",
+                "show_alert":True
+            })
+            return True
+        ok,msg2=_omega_open_chest(event_id,uid,chat_id)
+        send_message(chat_id,msg2)
         return True
     if data.startswith("rpg_item:"):
         show_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
@@ -6638,6 +6735,7 @@ def process_command(
         with db_lock:
             conn=get_db()
             conn.execute("DELETE FROM rpg_omega_rewards WHERE event_id=?",(eid,))
+            conn.execute("DELETE FROM rpg_omega_chests WHERE event_id=?",(eid,))
             conn.execute("DELETE FROM rpg_omega_runs WHERE event_id=?",(eid,))
             conn.execute("DELETE FROM rpg_omega_scores WHERE event_id=?",(eid,))
             conn.execute("UPDATE rpg_omega_events SET status='cancelled',rewards_sent=0 WHERE id=?",(eid,))
@@ -6783,10 +6881,6 @@ def process_command(
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
-        char=get_active_character(user_id)
-        if char and is_owner(user_id) and char['class_name']=='The Cleaner':
-            active=bool(char['secret_blades_active'])
-            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
         send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
         return True
 

@@ -724,7 +724,58 @@ def init_db():
                   tradeable=excluded.tradeable, equip_slot=excluded.equip_slot, allowed_classes=excluded.allowed_classes, min_level=excluded.min_level
             """, (key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,classes,minlvl))
 
+        # KiwRPG V6.3 — reliquias exclusivas de los 15 Bosses.
+        boss_drop_items = [
+            ('nucleo_golem','Núcleo de Hierro del Gólem','raro','material','Un núcleo metálico arrancado al Gólem de Hierro.'),
+            ('colmillo_fenrir','Colmillo Carmesí de Fenrir','raro','material','Un colmillo impregnado con la furia de Fenrir.'),
+            ('sello_demonio','Sello del Rey Demonio','raro','material','Un sello todavía caliente con poder infernal.'),
+            ('filacteria_lich','Fragmento de Filacteria','raro','material','Un fragmento oscuro de la filacteria del Lich.'),
+            ('escama_leviatan','Escama del Leviatán','raro','material','Una escama endurecida por las profundidades.'),
+            ('pluma_caida','Pluma de Luz Negra','raro','material','Una pluma del Ángel Caído que absorbe la luz.'),
+            ('sangre_hidra','Sangre Regenerativa de Hidra','raro','material','Sangre espesa que parece negarse a morir.'),
+            ('fragmento_caos','Fragmento del Caos','ultra_raro','material','Materia inestable desprendida del Emperador del Caos.'),
+            ('seda_arachne','Seda Negra de Arachne','raro','material','Seda extremadamente resistente de la Reina Arachne.'),
+            ('hueso_behemoth','Hueso del Behemoth','raro','material','Un fragmento óseo pesado del coloso.'),
+            ('rubi_vlad','Rubí de Sangre de Vlad','ultra_raro','material','Una gema carmesí saturada con esencia vampírica.'),
+            ('tambor_raijin','Fragmento del Tambor de Raijin','ultra_raro','material','Una pieza cargada con electricidad divina.'),
+            ('escama_nidhogg','Escama Negra de Nidhogg','ultra_raro','material','Una escama del Devorador de Mundos.'),
+            ('arena_chronos','Arena Eterna de Chronos','ultra_raro','material','Granos que parecen caer fuera del tiempo.'),
+            ('ojo_azath','Ojo del Abismo de Azath','legendario','material','Una reliquia imposible que todavía parece observarte.'),
+        ]
+        for key,name,rarity,itype,desc in boss_drop_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                VALUES (?,?,?,?,?,0,0,0,NULL,1,?,'','',1)
+                ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,description=excluded.description
+            """,(key,name,rarity,itype,desc,now_seed))
+
         # KiwRPG V6.2 — equipo de Forja. Los materiales/Omega ahora tienen uso real.
+        boss_equipment_items = [
+            ('martillo_golem','Martillo del Gólem','raro','arma','Un arma pesada nacida del núcleo del Gólem.',5,2,10,'arma',5),
+            ('garras_fenrir','Garras de Fenrir','raro','arma','Hojas veloces inspiradas en la cacería carmesí.',6,0,5,'arma',8),
+            ('corona_demonio','Corona Infernal','raro','casco','Una corona que conserva el calor del Averno.',3,3,10,'casco',12),
+            ('amuleto_lich','Amuleto del Vacío','raro','accesorio','La muerte susurra desde su interior.',4,3,15,'accesorio',14),
+            ('coraza_leviatan','Coraza Abisal','raro','armadura','Protección forjada con una escama de las profundidades.',2,6,25,'armadura',16),
+            ('alas_caidas','Manto de Luz Negra','raro','armadura','Un manto tejido alrededor de una pluma caída.',5,4,20,'armadura',18),
+            ('botas_hidra','Botas de las Nueve Fauces','raro','botas','Botas marcadas con sangre regenerativa.',4,3,25,'botas',20),
+            ('anillo_caos','Anillo del Caos','ultra_raro','accesorio','La realidad parece doblarse alrededor de esta pieza.',6,4,25,'accesorio',25),
+            ('guantes_arachne','Guantes de Seda Negra','raro','guantes','Seda negra reforzada para golpes precisos.',6,3,15,'guantes',27),
+            ('yelmo_behemoth','Yelmo del Behemoth','raro','casco','Pesado, brutal y casi imposible de romper.',3,7,30,'casco',29),
+            ('capa_vlad','Capa del Señor de la Sangre','ultra_raro','armadura','Una capa carmesí digna del Señor de la Sangre.',7,5,30,'armadura',31),
+            ('guantes_raijin','Guantes del Trueno','ultra_raro','guantes','Electricidad divina recorre sus placas.',8,4,20,'guantes',33),
+            ('armadura_nidhogg','Armadura Devoramundos','ultra_raro','armadura','Escamas negras preparadas para el Ragnarok.',7,8,40,'armadura',36),
+            ('reloj_chronos','Reloj de Chronos','ultra_raro','accesorio','Un reloj que parece latir entre segundos.',8,6,35,'accesorio',39),
+            ('reliquia_azath','Reliquia del Abismo','legendario','accesorio','Una reliquia nacida donde las reglas dejan de existir.',10,8,50,'accesorio',45),
+        ]
+        for key,name,rarity,itype,desc,atk,defn,hp,slot,minlvl in boss_equipment_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                VALUES (?,?,?,?,?,?,?,?,NULL,1,?,?,?,?)
+                ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,
+                  description=excluded.description,atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,
+                  equip_slot=excluded.equip_slot,allowed_classes=excluded.allowed_classes,min_level=excluded.min_level
+            """,(key,name,rarity,itype,desc,atk,defn,hp,now_seed,slot,'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',minlvl))
+
         forge_items = [
             ('hoja_ceniza_reforzada','Hoja de Ceniza Reforzada','raro','arma','Una hoja rehecha con hierro y colmillos de ceniza.',4,1,0,None,1,'arma','Guerrero,Pícaro,The Cleaner',5),
             ('coraza_guardian','Coraza del Guardián','raro','armadura','Cuero, hierro y cristal unidos para resistir golpes de Boss.',0,4,18,None,1,'armadura','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',5),
@@ -5282,6 +5333,21 @@ RPG_FORGE_RECIPES = {
         "name":"Arma Omega","cost":30000,
         "materials":{"fragmento_omega":1,"nucleo_best_bout":1,"placa_vtrigger":1},
     },
+    "martillo_golem":{"name":"Martillo del Gólem","cost":6000,"materials":{"nucleo_golem":1,"fragmento_hierro":4}},
+    "garras_fenrir":{"name":"Garras de Fenrir","cost":7500,"materials":{"colmillo_fenrir":1,"colmillo_ceniza":5}},
+    "corona_demonio":{"name":"Corona Infernal","cost":9000,"materials":{"sello_demonio":1,"fragmento_hierro":3}},
+    "amuleto_lich":{"name":"Amuleto del Vacío","cost":10000,"materials":{"filacteria_lich":1,"nucleo_sombra":2}},
+    "coraza_leviatan":{"name":"Coraza Abisal","cost":11000,"materials":{"escama_leviatan":1,"cristal_opaco":3}},
+    "alas_caidas":{"name":"Manto de Luz Negra","cost":12000,"materials":{"pluma_caida":1,"retazo_tela":4}},
+    "botas_hidra":{"name":"Botas de las Nueve Fauces","cost":13000,"materials":{"sangre_hidra":1,"nucleo_sombra":2}},
+    "anillo_caos":{"name":"Anillo del Caos","cost":15000,"materials":{"fragmento_caos":1,"cristal_opaco":4}},
+    "guantes_arachne":{"name":"Guantes de Seda Negra","cost":16000,"materials":{"seda_arachne":1,"retazo_tela":5}},
+    "yelmo_behemoth":{"name":"Yelmo del Behemoth","cost":18000,"materials":{"hueso_behemoth":1,"fragmento_hierro":5}},
+    "capa_vlad":{"name":"Capa del Señor de la Sangre","cost":20000,"materials":{"rubi_vlad":1,"retazo_tela":5}},
+    "guantes_raijin":{"name":"Guantes del Trueno","cost":22000,"materials":{"tambor_raijin":1,"fragmento_hierro":5}},
+    "armadura_nidhogg":{"name":"Armadura Devoramundos","cost":25000,"materials":{"escama_nidhogg":1,"cristal_opaco":5}},
+    "reloj_chronos":{"name":"Reloj de Chronos","cost":28000,"materials":{"arena_chronos":1,"cristal_opaco":5}},
+    "reliquia_azath":{"name":"Reliquia del Abismo","cost":35000,"materials":{"ojo_azath":1,"nucleo_sombra":3}},
 }
 
 def _forge_owned_materials(user_id):
@@ -6284,6 +6350,44 @@ def _boss_ai_choice(b,p):
         choices=[x for x in choices if x!='defend'] or ['attack']
     return random.choice(choices)
 
+RPG_BOSS_DROPS = {
+    "golem":("nucleo_golem","fragmento_hierro"),
+    "fenrir":("colmillo_fenrir","colmillo_ceniza"),
+    "rey_demonio":("sello_demonio","fragmento_hierro"),
+    "lich":("filacteria_lich","nucleo_sombra"),
+    "leviatan":("escama_leviatan","cristal_opaco"),
+    "angel_caido":("pluma_caida","retazo_tela"),
+    "hidra":("sangre_hidra","nucleo_sombra"),
+    "emperador_caos":("fragmento_caos","cristal_opaco"),
+    "arachne":("seda_arachne","retazo_tela"),
+    "behemoth":("hueso_behemoth","fragmento_hierro"),
+    "vlad":("rubi_vlad","cristal_opaco"),
+    "raijin":("tambor_raijin","fragmento_hierro"),
+    "nidhogg":("escama_nidhogg","cristal_opaco"),
+    "chronos":("arena_chronos","cristal_opaco"),
+    "azath":("ojo_azath","nucleo_sombra"),
+}
+
+def _boss_grant_loot(b,p):
+    """Drop individual: 1 reliquia del Boss garantizada + 1-3 materiales base."""
+    uid=int(p["user_id"]); cid=int(p["character_id"]); key=str(b.get("boss_key") or "")
+    spec=RPG_BOSS_DROPS.get(key)
+    if not spec: return []
+    unique_key,base_key=spec
+    got=[]
+    unique=grant_rpg_item(uid,cid,unique_key,source=f"boss:{key}")
+    if unique: got.append((unique,1))
+    qty=random.randint(1,3)
+    actual=0
+    for _ in range(qty):
+        item=grant_rpg_item(uid,cid,base_key,source=f"boss:{key}")
+        if item: actual+=1
+    if actual:
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT * FROM rpg_items WHERE item_key=?",(base_key,)).fetchone(); conn.close()
+        if row: got.append((dict(row),actual))
+    return got
+
 def _boss_reward_all(b):
     with db_lock:
         conn=get_db(); rows=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(b['id']),)).fetchall(); conn.close()
@@ -6297,6 +6401,19 @@ def _boss_reward_all(b):
             if exists: conn.close(); continue
             conn.execute("INSERT INTO rpg_boss_rewards(boss_id,user_id,kw,exp,rewarded_at) VALUES(?,?,?,?,?)",(int(b['id']),uid,kw,exp,int(time.time()))); conn.commit(); conn.close()
         change_kiwons(uid,kw,'boss_reward',note=f"Boss {b['name']}"); grant_rpg_exp(int(p['character_id']),exp)
+        loot=_boss_grant_loot(b,p)
+        if loot:
+            parts=[]
+            for item,qty in loot:
+                icon=RPG_RARITY_ICON.get(item.get("rarity"),"⚪")
+                parts.append(f"{icon} {item.get('name','Objeto')} ×{qty}")
+            try:
+                send_private_message(uid,
+                    f"🎁 BOTÍN DE BOSS — {b['name']}\n\n"+
+                    "\n".join(parts)+
+                    "\n\n🔥 Estos materiales pueden usarse en la Forja.")
+            except Exception as exc:
+                print(f"[BOSS DROP] DM falló user={uid} boss={b.get('boss_key')}: {exc}")
     return len(rows)
 
 def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):

@@ -666,6 +666,15 @@ def init_db():
                 'Reanima inmediatamente a un personaje derrotado con 50% de su HP máximo.',
                 0,0,0,None,1,now_seed,50))
 
+        # KiwRPG V6.0 — consumibles de tienda.
+        cur.execute("""INSERT INTO rpg_items
+            (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,heal_percent)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(item_key) DO UPDATE SET description=excluded.description, heal_percent=excluded.heal_percent
+        """, ('pocion_mayor','Poción Mayor','poco_comun','consumible',
+                'Restaura el 45% del HP máximo del personaje.',
+                0,0,0,None,1,now_seed,45))
+
         v2_items = [
             ('colmillo_ceniza','Colmillo de Ceniza','comun','material','Un colmillo aún tibio de una criatura de ceniza.',0,0,0,None,1),
             ('venda_viajero','Venda del Viajero','poco_comun','consumible','Una venda tratada que ayuda a recuperar fuerzas.',0,0,0,None,1),
@@ -4862,6 +4871,93 @@ def pvp_surrender(duel_id, uid):
     send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\n" + ("Resultado registrado en la clasificatoria." if d.get("duel_mode")=="ranked" else "Duelo amistoso: sin pérdida de HP, EXP ni KW.")); return True,''
 
 # =========================================================
+# KIWRPG V6.0 — TIENDA RPG / CONSUMIBLES
+# =========================================================
+
+RPG_SHOP = {
+    "pocion_menor": {"price": 350, "label": "Poción menor", "desc": "Restaura 20% del HP máximo."},
+    "pocion_mayor": {"price": 800, "label": "Poción Mayor", "desc": "Restaura 45% del HP máximo."},
+    "esencia_vital": {"price": 2500, "label": "Esencia Vital", "desc": "En Bosses te levanta antes de los 5 min con 50% HP."},
+    "espada_recluta": {"price": 1800, "label": "Espada del Recluta", "desc": "Equipo básico para clases compatibles."},
+    "baston_aprendiz": {"price": 1800, "label": "Bastón del Aprendiz", "desc": "Equipo básico para Mago."},
+    "dagas_desgastadas": {"price": 1800, "label": "Dagas Desgastadas", "desc": "Equipo básico para Pícaro/The Cleaner."},
+    "arco_cazador": {"price": 1800, "label": "Arco del Cazador", "desc": "Equipo básico para Arquero."},
+    "pechera_cuero": {"price": 1500, "label": "Pechera de Cuero", "desc": "Armadura básica."},
+    "capucha_viajero": {"price": 1100, "label": "Capucha del Viajero", "desc": "Casco básico."},
+    "guantes_viajero": {"price": 900, "label": "Guantes del Viajero", "desc": "Guantes básicos."},
+    "botas_sendero": {"price": 900, "label": "Botas del Sendero", "desc": "Botas básicas."},
+}
+
+def rpg_shop_keyboard(user_id):
+    balance=get_kiwons(user_id)
+    rows=[]
+    for key,cfg in RPG_SHOP.items():
+        rows.append([{"text":f"{cfg['label']} · {cfg['price']:,} KW","callback_data":f"rpg_shop_item:{key}"}])
+    rows.append([{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}])
+    return balance,{"inline_keyboard":rows}
+
+def rpg_shop_item_text(user_id,key):
+    cfg=RPG_SHOP.get(key)
+    if not cfg: return None,None
+    with db_lock:
+        conn=get_db(); item=conn.execute("SELECT * FROM rpg_items WHERE item_key=?",(key,)).fetchone(); conn.close()
+    if not item: return None,None
+    bal=get_kiwons(user_id)
+    text=(f"🏪 TIENDA RPG\n\n{RPG_RARITY_ICON.get(item['rarity'],'⚪')} {item['name']}\n"
+          f"{item['description']}\n\n💰 Precio: {cfg['price']:,} KW\n🪙 Tu saldo: {bal:,} KW")
+    kb={"inline_keyboard":[[{"text":f"🛒 Comprar · {cfg['price']:,} KW","callback_data":f"rpg_buy:{key}"}],
+                           [{"text":"◀️ Volver a la tienda","callback_data":"rpg_shop"}]]}
+    return text,kb
+
+def buy_rpg_shop_item(user_id,key,chat_id=None):
+    cfg=RPG_SHOP.get(key)
+    char=get_active_character(user_id)
+    if not cfg: return False,"Ese objeto no está a la venta."
+    if not char: return False,"Necesitas un personaje activo para comprar objetos RPG."
+    price=int(cfg['price'])
+    ok,balance,error=change_kiwons(user_id,-price,"rpg_shop_purchase",chat_id=chat_id,note=f"Compra {key}")
+    if not ok: return False,f"🪙 No tienes suficientes Kiwons. Necesitas {price:,} KW."
+    item=grant_rpg_item(user_id,int(char['id']),key,"tienda")
+    if not item:
+        change_kiwons(user_id,price,"rpg_shop_refund",chat_id=chat_id,note=f"Reembolso {key}")
+        return False,"No pude entregar el objeto. La compra fue reembolsada."
+    return True,f"🛒 Compraste {item['name']}.\n💸 -{price:,} KW\n🪙 Saldo: {balance:,} KW\n🎒 Ya está en tu inventario."
+
+def admin_grant_potion(chat_id,message,text):
+    if not is_admin(message):
+        send_message(chat_id,"Solo un administrador puede entregar pociones."); return True
+    parts=str(text or '').split()
+    # Formas: /darpocion menor 5 (respondiendo) | /darpocion @user mayor 3
+    target=None; rest=parts[1:]
+    if rest and rest[0].startswith('@'):
+        target=find_cached_user(chat_id,rest[0]); rest=rest[1:]
+    elif message.get('reply_to_message'):
+        target=(message.get('reply_to_message') or {}).get('from')
+    else:
+        target=message.get('from')
+    aliases={'menor':'pocion_menor','pocion':'pocion_menor','mayor':'pocion_mayor','vital':'esencia_vital','esencia':'esencia_vital'}
+    kind=(rest[0].lower() if rest else 'menor'); qty=1
+    if len(rest)>1:
+        try: qty=max(1,min(50,int(rest[1])))
+        except Exception: qty=1
+    key=aliases.get(kind,kind)
+    if key not in ('pocion_menor','pocion_mayor','esencia_vital'):
+        send_message(chat_id,"Uso: /darpocion [@usuario] menor|mayor|vital [cantidad]\nTambién puedes responder al usuario."); return True
+    if not target or not target.get('id'):
+        send_message(chat_id,"No encontré al jugador."); return True
+    char=get_active_character(target['id'])
+    if not char:
+        send_message(chat_id,"Ese jugador necesita un personaje activo."); return True
+    given=0; last=None
+    for _ in range(qty):
+        last=grant_rpg_item(target['id'],int(char['id']),key,'admin_potion')
+        if last: given+=1
+    if not given:
+        send_message(chat_id,"No pude entregar la poción."); return True
+    send_message(chat_id,f"🧪 {player_display_name(target)} recibió {given} × {last['name']}.")
+    return True
+
+# =========================================================
 # KIWRPG V5.9 — BOSSES X8 + RECUPERACIÓN + POCIONES
 # =========================================================
 
@@ -5201,13 +5297,22 @@ def handle_rpg_callback(query):
         if cancel_rpg_encounter(chat_id,uid): send_message(chat_id,"🏃 Has abandonado el encuentro. No hay recompensa ni penalización.")
         else: send_message(chat_id,"No tienes un encuentro activo.")
         return True
+    if data=="rpg_shop":
+        balance,kb=rpg_shop_keyboard(uid)
+        send_message(chat_id,f"🏪 TIENDA RPG\n\nCompra consumibles y equipo básico con Kiwons.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb); return True
+    if data.startswith("rpg_shop_item:"):
+        key=data.split(":",1)[1]; txt,kb=rpg_shop_item_text(uid,key)
+        send_message(chat_id,txt or "Ese objeto ya no está disponible.",reply_markup=kb); return True
+    if data.startswith("rpg_buy:"):
+        key=data.split(":",1)[1]; ok,msg2=buy_rpg_shop_item(uid,key,chat_id)
+        send_message(chat_id,msg2,reply_markup={"inline_keyboard":[[{"text":"🏪 Volver a la tienda","callback_data":"rpg_shop"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]}); return True
     if data=="rpg_show_equipment":
         send_message(chat_id,equipment_text(uid)); return True
     if data=="rpg_show_inventory":
         world=current_rpg_world()
         with db_lock:
             conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
-        kb=[]
+        kb=[[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
             kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
@@ -5397,7 +5502,7 @@ def process_command(
     if command in ("/rpg", "/kiwrpg"):
         send_message(
             chat_id,
-            "⚔️ KIWRPG — V5.6\n\n"
+            "⚔️ KIWRPG — V6.0\n\n"
             "/duelo — duelo amistoso (no afecta ranking)\n"
             "/duelo @usuario — amistoso directo\n"
             "/duelopvp — clasificatoria abierta · /duelopvp @usuario — reto clasificatorio\n"
@@ -5406,6 +5511,7 @@ def process_command(
             "/encuentro — combate y apariciones por rareza\n"
             "/huir — abandona el encuentro actual\n"
             "/inventario — objetos con botones\n"
+            "/tienda — compra consumibles y equipo básico con Kiwons\n"
             "/materiales — materiales reunidos\n"
             "/equipo — equipo y estadísticas totales\n"
             "/personaje — muestra tu personaje\n"
@@ -5510,20 +5616,30 @@ def process_command(
             send_message(chat_id, "No tienes un encuentro activo.")
         return True
 
+    if command in ("/tienda", "/shop"):
+        user_id=message.get("from",{}).get("id"); ensure_player(message.get("from",{}))
+        balance,kb=rpg_shop_keyboard(user_id)
+        send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico. Los objetos raros siguen siendo de drops, Bosses y recompensas.\n\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
+        return True
+
+    if command in ("/darpocion", "/dar_pocion"):
+        return admin_grant_potion(chat_id,message,text)
+
     if command in ("/inventario", "/inv"):
         user_id = message.get("from", {}).get("id")
         world=current_rpg_world()
         with db_lock:
             conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(user_id),world)).fetchall(); conn.close()
-        if not rows:
-            send_message(chat_id,"🎒 INVENTARIO\n\nTodavía está vacío.")
-        else:
-            lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."]
-            kb=[]
-            for r in rows:
-                serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
-                kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
-            send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
+        lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."] if rows else ["🎒 INVENTARIO","","Todavía está vacío."]
+        kb=[[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
+        for r in rows:
+            serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
+            kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
+        char=get_active_character(user_id)
+        if char and is_owner(user_id) and char['class_name']=='The Cleaner':
+            active=bool(char['secret_blades_active'])
+            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
+        send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
         return True
 
     if command in ("/materiales", "/mats"):

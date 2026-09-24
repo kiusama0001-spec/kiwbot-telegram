@@ -742,6 +742,9 @@ def init_db():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_pvp_chat_status ON rpg_pvp_duels(chat_id,status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_pvp_users ON rpg_pvp_duels(challenger_id,opponent_id,status)")
+        # V5.4.1 PATCH — límite de 3 defensas por jugador en cada duelo.
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS challenger_defends_used BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_pvp_duels ADD COLUMN IF NOT EXISTS opponent_defends_used BIGINT NOT NULL DEFAULT 0")
 
         conn.commit()
         conn.close()
@@ -4490,10 +4493,13 @@ def _pvp_keyboard(duel, viewer_turn=True):
     ucd=int(duel['challenger_ultimate_cd'] if turn==int(duel['challenger_id']) else duel['opponent_ultimate_cd'])
     st=f"{abilities[1]['emoji']} {abilities[1]['name']}" if scd<=0 else f"⏳ {abilities[1]['name']} ({scd})"
     ut=f"{abilities[2]['emoji']} {abilities[2]['name']}" if ucd<=0 else f"⏳ {abilities[2]['name']} ({ucd})"
+    used=int(duel['challenger_defends_used'] if turn==int(duel['challenger_id']) else duel['opponent_defends_used'])
+    remaining=max(0,3-used)
+    defend_text=f"🛡️ Defender ({remaining}/3)"
     return {'inline_keyboard':[
       [{'text':f"{abilities[0]['emoji']} {abilities[0]['name']}",'callback_data':f"pvp_atk:{duel['id']}:{abilities[0]['key']}"}, {'text':st,'callback_data':f"pvp_atk:{duel['id']}:{abilities[1]['key']}"}],
       [{'text':ut,'callback_data':f"pvp_atk:{duel['id']}:{abilities[2]['key']}"}],
-      [{'text':'🛡️ Defender','callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}]
+      [{'text':defend_text,'callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}]
     ]}
 
 def _pvp_card(duel):
@@ -4542,7 +4548,14 @@ def accept_pvp(duel_id, chat_id, user):
     uid=int(user['id']); ensure_player(user); ensure_owner_secret_character(user)
     with db_lock:
         conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
-        if not d or d['status'] not in ('open','pending'): conn.rollback(); conn.close(); return False,'Ese desafío ya no está disponible.'
+        if not d:
+            conn.rollback(); conn.close(); return False,'Ese desafío ya no está disponible.'
+        # Telegram puede entregar callbacks repetidos mientras se lanzan los dados de iniciativa.
+        # Si el duelo ya fue aceptado, ignoramos silenciosamente el callback duplicado.
+        if d['status'] in ('initiative','active'):
+            conn.rollback(); conn.close(); return True,''
+        if d['status'] not in ('open','pending'):
+            conn.rollback(); conn.close(); return False,'Ese desafío ya no está disponible.'
         if int(d['chat_id'])!=int(chat_id): conn.rollback(); conn.close(); return False,'Ese duelo pertenece a otro chat.'
         if int(d['challenger_id'])==uid: conn.rollback(); conn.close(); return False,'No puedes aceptar tu propio duelo. 😂'
         if d['status']=='pending' and int(d['opponent_id'])!=uid: conn.rollback(); conn.close(); return False,'Ese desafío no es para ti.'
@@ -4565,7 +4578,11 @@ def accept_pvp(duel_id, chat_id, user):
     first=int(d['challenger_id']) if v1>v2 else uid
     with db_lock:
         conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='active',turn_user_id=?,updated_at=? WHERE id=?",(first,int(time.time()),int(duel_id))); conn.commit(); conn.close()
-    duel=_pvp_get(duel_id); send_message(chat_id,f"🎲 Iniciativa: {_pvp_name(d['challenger_id'])} {v1} — { _pvp_name(uid)} {v2}\n\n"+_pvp_card(duel),reply_markup=_pvp_keyboard(duel)); return True,''
+    duel=_pvp_get(duel_id)
+    # Entrada oficial del PvP: el video de One Winged Angel/Kenny se muestra en TODOS los duelos.
+    # La función reutiliza el file_id cacheado de Telegram, así que no vuelve a subir el MP4 cada vez.
+    send_one_winged_angel_finisher(chat_id)
+    send_message(chat_id,f"🎲 Iniciativa: {_pvp_name(d['challenger_id'])} {v1} — { _pvp_name(uid)} {v2}\n\n"+_pvp_card(duel),reply_markup=_pvp_keyboard(duel)); return True,''
 
 def pvp_action(duel_id, uid, ability_key=None, defend=False):
     uid=int(uid)
@@ -4576,9 +4593,14 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); char=_pvp_char(cid)
         scd=int(d['challenger_special_cd'] if is_ch else d['opponent_special_cd']); ucd=int(d['challenger_ultimate_cd'] if is_ch else d['opponent_ultimate_cd'])
         if defend:
-            nsc=max(0,scd-1); nuc=max(0,ucd-1); pref='challenger' if is_ch else 'opponent'; other=int(d['opponent_id'] if is_ch else d['challenger_id'])
-            conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_defending=1,{pref}_special_cd=?,{pref}_ultimate_cd=?,turn_user_id=?,updated_at=? WHERE id=?",(nsc,nuc,other,int(time.time()),int(duel_id))); conn.commit(); conn.close()
-            nd=_pvp_get(duel_id); send_message(d['chat_id'],f"🛡️ {_pvp_name(uid)} adopta una postura defensiva.\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
+            pref='challenger' if is_ch else 'opponent'
+            used=int(d[pref+'_defends_used'] or 0)
+            if used>=3:
+                conn.rollback(); conn.close(); return False,'🛡️ Ya usaste tus 3 defensas en este duelo.'
+            nsc=max(0,scd-1); nuc=max(0,ucd-1); other=int(d['opponent_id'] if is_ch else d['challenger_id'])
+            conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_defending=1,{pref}_defends_used={pref}_defends_used+1,{pref}_special_cd=?,{pref}_ultimate_cd=?,turn_user_id=?,updated_at=? WHERE id=?",(nsc,nuc,other,int(time.time()),int(duel_id))); conn.commit(); conn.close()
+            nd=_pvp_get(duel_id); remaining=max(0,3-int(nd[pref+'_defends_used']))
+            send_message(d['chat_id'],f"🛡️ {_pvp_name(uid)} adopta una postura defensiva. ({remaining}/3 restantes)\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
         ab=_rpg_get_ability(char['class_name'],ability_key)
         if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
         if ab.get('special') and scd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {scd} turnos."

@@ -4345,6 +4345,25 @@ def use_inventory_item(chat_id,user_id,inventory_id):
     if not row or not char: return send_message(chat_id,"No encontré ese objeto.")
     heal=int(row.get('heal_percent') or 0)
     if heal<=0: return send_message(chat_id,"Ese objeto no se puede usar de esa forma.")
+
+    # Si el jugador participa en un Boss activo, el HP del Boss es la fuente de verdad.
+    # Evita que una poción del inventario cure el HP normal mientras el jugador sigue caído en el Boss.
+    with db_lock:
+        conn=get_db()
+        bp=conn.execute("""SELECT p.*, b.chat_id FROM rpg_boss_participants p
+                           JOIN rpg_boss_instances b ON b.id=p.boss_id
+                           WHERE p.user_id=? AND b.status='active' AND b.expires_at>?
+                           ORDER BY b.spawned_at DESC LIMIT 1""",(int(user_id),int(time.time()))).fetchone()
+        conn.close()
+    if bp:
+        bp=dict(bp)
+        if int(bp.get('defeated') or 0) and row.get('item_key')!='esencia_vital':
+            left=max(0,int(bp.get('defeated_until') or 0)-int(time.time()))
+            if left>0:
+                return send_message(chat_id,f"💀 Estás caído en un Boss. Una poción normal no puede revivirte.\n⏳ Recuperación: {left//60}m {left%60:02d}s.")
+            return send_message(chat_id,"♻️ Tu recuperación del Boss ya terminó. Vuelve al combate antes de usar una poción normal.")
+        ok,msg=boss_use_potion(int(bp['chat_id']),user_id,int(bp['boss_id']),inventory_id)
+        return send_message(chat_id,msg)
     eff=effective_character_stats(char); maxhp=eff['max_hp']; current=int(char['hp'])
     is_revive = row.get('item_key') == 'esencia_vital'
     if is_revive and current > 0:
@@ -5229,7 +5248,7 @@ def _boss_phase(b):
 
 def _boss_card(b,user_id=None):
     with db_lock:
-        conn=get_db(); rows=conn.execute("SELECT p.user_id,p.damage,p.defeated,p.hp,p.max_hp,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name FROM rpg_boss_participants p LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? ORDER BY p.damage DESC",(int(b['id']),)).fetchall(); conn.close()
+        conn=get_db(); rows=conn.execute("SELECT p.user_id,p.damage,p.defeated,p.defeated_until,p.hp,p.max_hp,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name FROM rpg_boss_participants p LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? ORDER BY p.damage DESC",(int(b['id']),)).fetchall(); conn.close()
     phase=_boss_phase(b); left=max(0,int(b['expires_at'])-int(time.time())); mins=left//60
     lines=[f"👹 BOSS — {b['name']}",f"⭐ Nv. {b['level']} · Fase {phase}/3",f"❤️ {b['hp']}/{b['max_hp']}",f"⚔️ ATK {b['atk']} · 🛡️ DEF {b['defense']}"]
     if user_id is not None:
@@ -5246,8 +5265,6 @@ def _boss_card(b,user_id=None):
                     lines.append(f"⏳ Recuperación: {left_recovery//60}m {left_recovery%60:02d}s")
                 else:
                     lines.append("♻️ Recuperación completada. Ya puedes volver al combate.")
-            if char and is_owner(user_id) and char['class_name']=='The Cleaner':
-                lines.append("🗡️🗡️ Espadas del Ángel: "+("ACTIVADAS (+6 ATK)" if bool(char['secret_blades_active']) else "guardadas"))
     lines += ["",f"👥 Participantes: {len(rows)} · ⏳ {mins//60}h {mins%60}m"]
     if rows:
         lines += ["","📊 Daño:"]+[f"{i}. {r['display_name']} — {r['damage']}" for i,r in enumerate(rows[:8],1)]

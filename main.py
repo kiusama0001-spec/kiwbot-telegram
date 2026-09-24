@@ -5519,7 +5519,8 @@ def _omega_card(event,user_id=None):
             wait=0
             if run and turns>=OMEGA_TURNS_PER_RUN:
                 wait=max(0,int(run['run_started_at'])+OMEGA_RETRY_SECONDS-now)
-            lines += ["","⚔️ TU MARCA",
+            owner_name=_pvp_name(user_id)
+            lines += ["",f"⚔️ MARCA DE {owner_name}",
                       f"❤️ {int(run.get('hp') or 0):,}/{int(run.get('max_hp') or 0):,}" if run else "❤️ —",
                       f"💥 Daño total: {int(score['total_damage']):,}",f"🎯 Turnos totales: {int(score['total_turns'])}"]
             if wait: lines.append(f"🔒 Próximo intento: {_omega_time_text(wait)}")
@@ -5545,8 +5546,11 @@ def _omega_keyboard(event,user_id):
     if turns>=OMEGA_TURNS_PER_RUN:
         wait=max(0,int(run['run_started_at'])+OMEGA_RETRY_SECONDS-now) if run else 0
         if wait>0:
-            return {"inline_keyboard":[[{"text":f"🔒 Regresas en {_omega_time_text(wait)}","callback_data":f"omega_refresh:{event['id']}"}],
-                                       [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]]}
+            return {"inline_keyboard":[
+                [{"text":f"🔒 Regresas en {_omega_time_text(wait)}","callback_data":f"omega_refresh:{event['id']}"}],
+                [{"text":"⚡ ENTRAR / VER MI BATALLA","callback_data":f"omega_join:{event['id']}"}],
+                [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
+            ]}
         # La siguiente pulsación de atacar reiniciará la tanda.
         turns=0
     char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
@@ -5556,6 +5560,7 @@ def _omega_keyboard(event,user_id):
         [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"omega_atk:{event['id']}:{a[0]['key']}"},
          {"text":f"{a[1]['emoji']} {a[1]['name']}" if sc<=0 else f"⏳ {a[1]['name']} ({sc})","callback_data":f"omega_atk:{event['id']}:{a[1]['key']}"}],
         [{"text":f"{a[2]['emoji']} {a[2]['name']}" if uc<=0 else f"⏳ {a[2]['name']} ({uc})","callback_data":f"omega_atk:{event['id']}:{a[2]['key']}"}],
+        [{"text":"⚡ ENTRAR / VER MI BATALLA","callback_data":f"omega_join:{event['id']}"}],
         [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
     ]}
 
@@ -5590,6 +5595,9 @@ def omega_join(chat_id,user_id,event_id):
                         VALUES(?,?,?,0,0,0,?,?) ON CONFLICT(event_id,user_id) DO NOTHING""",
                      (int(event_id),int(user_id),now,pmax,pmax))
         conn.commit(); conn.close()
+    score2,run2=_omega_score(event_id,user_id)
+    if score2 and int(score2.get('total_turns') or 0)>0:
+        return True,"⚡ Esta es tu batalla contra Kenny Omega."
     return True,"⚡ Entraste a la clasificatoria contra Kenny Omega.\nTienes 10 turnos. Haz todo el daño que puedas."
 
 def omega_attack(chat_id,user_id,event_id,ability_key):
@@ -5711,7 +5719,7 @@ def _omega_give_chest(event_id,user_id):
 def _omega_finalize(event,defeated=False):
     if not event or event.get('status')!='active': return False
     now=int(time.time())
-    if now<int(event['ends_at']): return False
+    if (not defeated) and now<int(event['ends_at']): return False
     rows=_omega_ranking(event['id'],3)
     with db_lock:
         conn=get_db()
@@ -6583,7 +6591,7 @@ def process_command(
             "Los comandos secretos/admin no aparecen en esta lista.")
         return True
 
-    if command == "/modotest":
+    if command in ("/modotest", "/modetest"):
         ok,msg2=toggle_boss_test(chat_id,message.get("from",{}).get("id"))
         send_message(chat_id,msg2); return True
 
@@ -6607,6 +6615,26 @@ def process_command(
             conn.commit()
             conn.close()
         send_message(chat_id,"🧪 EVENTO OMEGA REINICIADO\n\nLa clasificatoria activa fue cancelada sin recompensas.\nRanking, turnos y participantes de esta prueba fueron limpiados.\n\n✅ Ya puedes usar /invocaromega para comenzar desde cero.")
+        return True
+
+    if command == "/omega1hp":
+        uid=message.get("from",{}).get("id")
+        if not is_owner(uid):
+            send_message(chat_id,"Solo Kiu puede usar /omega1hp.")
+            return True
+        e=_omega_active(chat_id)
+        if not e:
+            send_message(chat_id,"🧪 No hay un evento Omega activo.")
+            return True
+        with db_lock:
+            conn=get_db()
+            conn.execute("UPDATE rpg_omega_events SET hp=1 WHERE id=? AND status='active'",(int(e["id"]),))
+            conn.commit(); conn.close()
+        send_message(chat_id,
+            "🧪 OMEGA MODO 1 HP\n\n"
+            "❤️ Kenny Omega quedó en 1/250,000 HP.\n"
+            "⚡ El próximo golpe con daño debe derrotarlo y activar la prueba completa de cierre, podio y Caja Omega.\n\n"
+            "No se modificaron ranking, turnos ni recompensas.")
         return True
 
     if command in ("/invocaromega", "/spawnomega"):

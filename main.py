@@ -4579,9 +4579,6 @@ def accept_pvp(duel_id, chat_id, user):
     with db_lock:
         conn=get_db(); conn.execute("UPDATE rpg_pvp_duels SET status='active',turn_user_id=?,updated_at=? WHERE id=?",(first,int(time.time()),int(duel_id))); conn.commit(); conn.close()
     duel=_pvp_get(duel_id)
-    # Entrada oficial del PvP: el video de One Winged Angel/Kenny se muestra en TODOS los duelos.
-    # La función reutiliza el file_id cacheado de Telegram, así que no vuelve a subir el MP4 cada vez.
-    send_one_winged_angel_finisher(chat_id)
     send_message(chat_id,f"🎲 Iniciativa: {_pvp_name(d['challenger_id'])} {v1} — { _pvp_name(uid)} {v2}\n\n"+_pvp_card(duel),reply_markup=_pvp_keyboard(duel)); return True,''
 
 def pvp_action(duel_id, uid, ability_key=None, defend=False):
@@ -4623,7 +4620,13 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         other=int(d['opponent_id'] if is_ch else d['challenger_id']); status='finished' if target_hp<=0 else 'active'; turn=None if status=='finished' else other
         conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_hp=?,{opref}_hp=?,{pref}_special_cd=?,{pref}_ultimate_cd=?,{opref}_defending=0,status=?,turn_user_id=?,updated_at=? WHERE id=?",(own_hp,target_hp,scd,ucd,status,turn,int(time.time()),int(duel_id))); conn.commit(); conn.close()
     nd=_pvp_get(duel_id); crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; heal_txt=f' · ❤️ +{heal}' if heal else ''
-    if nd['status']=='finished': send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n🏆 {_pvp_name(uid)} gana el duelo.\nDuelo amistoso: sin pérdida de HP, EXP ni KW."); return True,''
+    if nd['status']=='finished':
+        send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n🏆 {_pvp_name(uid)} gana el duelo.\nDuelo amistoso: sin pérdida de HP, EXP ni KW.")
+        # El finisher de Kenny Omega es exclusivo de Kiu/The Cleaner y solo aparece
+        # cuando One Winged Angel es el golpe que TERMINA el duelo PvP.
+        if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel':
+            send_one_winged_angel_finisher(nd['chat_id'])
+        return True,''
     send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
 
 def pvp_surrender(duel_id, uid):

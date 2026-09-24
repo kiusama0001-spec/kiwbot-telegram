@@ -869,6 +869,12 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_boss_test_users (
+                user_id BIGINT PRIMARY KEY, enabled BIGINT NOT NULL DEFAULT 1, updated_at BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+
         # Migraciones compatibles para Omega: HP mundial compartido y HP por intento.
         for _sql in (
             "ALTER TABLE rpg_omega_events ADD COLUMN IF NOT EXISTS hp BIGINT NOT NULL DEFAULT 250000",
@@ -5370,8 +5376,14 @@ OMEGA_ANNOUNCE_SECONDS=2*3600
 OMEGA_REWARDS={1:(50000,5000),2:(30000,3000),3:(15000,2000)}
 
 def _boss_test_enabled(user_id):
-    with _boss_test_lock:
-        return int(user_id) in _boss_test_users
+    try:
+        with db_lock:
+            conn=get_db()
+            row=conn.execute("SELECT enabled FROM rpg_boss_test_users WHERE user_id=?",(int(user_id),)).fetchone()
+            conn.close()
+        return bool(row and int(row["enabled"])==1)
+    except Exception:
+        return False
 
 def _boss_stats_for(user_id,char):
     eff=effective_character_stats(char)
@@ -5383,28 +5395,72 @@ def _boss_stats_for(user_id,char):
 def toggle_boss_test(chat_id,user_id):
     if not is_owner(user_id):
         return False,"Solo Kiu puede usar /modotest."
-    with _boss_test_lock:
-        if int(user_id) in _boss_test_users:
-            _boss_test_users.remove(int(user_id)); enabled=False
-        else:
-            _boss_test_users.add(int(user_id)); enabled=True
-    # Si ya está dentro de un Boss, el cambio se refleja inmediatamente.
-    b=_boss_active(chat_id)
-    if b:
-        p=_boss_participant(b['id'],user_id)
-        char=get_active_character(user_id)
-        if p and char:
-            eff=_boss_stats_for(user_id,char)
-            new_max=int(eff['max_hp'])
-            new_hp=new_max if enabled else min(new_max,int(p['hp']))
-            with db_lock:
-                conn=get_db()
-                conn.execute("UPDATE rpg_boss_participants SET hp=?,max_hp=? WHERE boss_id=? AND user_id=?",
-                             (new_hp,new_max,int(b['id']),int(user_id)))
-                conn.commit(); conn.close()
+    enabled=not _boss_test_enabled(user_id)
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_boss_test_users(user_id,enabled,updated_at) VALUES(?,?,?)
+                        ON CONFLICT(user_id) DO UPDATE SET enabled=EXCLUDED.enabled,updated_at=EXCLUDED.updated_at""",
+                     (int(user_id),1 if enabled else 0,now))
+        conn.commit(); conn.close()
+    char=get_active_character(user_id)
+    if char:
+        eff=_boss_stats_for(user_id,char); new_max=int(eff['max_hp'])
+        b=_boss_active(chat_id)
+        if b:
+            p=_boss_participant(b['id'],user_id)
+            if p:
+                new_hp=new_max if enabled else min(new_max,int(p['hp']))
+                with db_lock:
+                    conn=get_db()
+                    conn.execute("UPDATE rpg_boss_participants SET hp=?,max_hp=? WHERE boss_id=? AND user_id=?",
+                                 (new_hp,new_max,int(b['id']),int(user_id)))
+                    conn.commit(); conn.close()
+        oe=_omega_active(chat_id)
+        if oe:
+            score,run=_omega_score(oe['id'],user_id)
+            if run:
+                new_hp=new_max if enabled else min(new_max,int(run.get('hp') or new_max))
+                with db_lock:
+                    conn=get_db()
+                    conn.execute("UPDATE rpg_omega_runs SET hp=?,max_hp=? WHERE event_id=? AND user_id=?",
+                                 (new_hp,new_max,int(oe['id']),int(user_id)))
+                    conn.commit(); conn.close()
     if enabled:
         return True,"🧪 Modo Boss de prueba ACTIVADO.\n❤️ 1000 HP · ⚔️ 250 ATK · 🛡️ 50 DEF\nSolo afecta combates contra Bosses y Kenny Omega."
     return True,"🧪 Modo Boss de prueba DESACTIVADO.\nTus estadísticas normales vuelven a usarse."
+
+
+_omega_combat_messages={}
+_omega_combat_messages_lock=RLock()
+
+def _telegram_message_id(result):
+    try:
+        return int((result or {}).get("result",{}).get("message_id"))
+    except Exception:
+        return None
+
+def _omega_track_combat_message(chat_id,user_id,event_id,*message_ids):
+    key=(int(chat_id),int(user_id),int(event_id))
+    mids=[int(x) for x in message_ids if x]
+    if not mids: return
+    to_delete=[]
+    with _omega_combat_messages_lock:
+        turns=_omega_combat_messages.setdefault(key,[])
+        turns.append(mids)
+        if len(turns)>=4:
+            old=turns[:2]; del turns[:2]
+            to_delete=[mid for group in old for mid in group]
+    for mid in to_delete:
+        try: delete_message(chat_id,mid)
+        except Exception: pass
+
+def _omega_clear_combat_cache(event_id=None):
+    with _omega_combat_messages_lock:
+        if event_id is None: _omega_combat_messages.clear()
+        else:
+            for key in list(_omega_combat_messages):
+                if key[2]==int(event_id): _omega_combat_messages.pop(key,None)
 
 def _omega_active(chat_id):
     now=int(time.time())
@@ -5483,7 +5539,7 @@ def _omega_keyboard(event,user_id):
     score,run=_omega_score(event['id'],user_id)
     now=int(time.time())
     if not score:
-        return {"inline_keyboard":[[{"text":"⚡ ENTRAR A LA CLASIFICATORIA","callback_data":f"omega_join:{event['id']}"}],
+        return {"inline_keyboard":[[{"text":"⚡ ENTRAR A LA BATALLA","callback_data":f"omega_join:{event['id']}"}],
                                    [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]]}
     turns=int(run['turns_used']) if run else 0
     if turns>=OMEGA_TURNS_PER_RUN:
@@ -5566,6 +5622,7 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
     if ab.get('special') and int(run['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['special_cd']} turnos."
     if ab.get('ultimate') and int(run['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['ultimate_cd']} turnos."
     dr=send_dice(chat_id,'🎲')
+    dice_mid=_telegram_message_id(dr)
     roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
     if not roll: return False,"Telegram no devolvió el dado. Intenta otra vez."
     eff=_boss_stats_for(user_id,char); dmg=0
@@ -5621,10 +5678,13 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
     # Victoria mundial inmediata.
     if rowhp and int(rowhp['hp'])<=0:
         text+="\n\n💥⚡ KENNY OMEGA HA CAÍDO. La barra global llegó a 0."
-        send_message(chat_id,text)
+        final_hit=send_message(chat_id,text)
+        _omega_track_combat_message(chat_id,user_id,event_id,dice_mid,_telegram_message_id(final_hit))
         _omega_finalize(e,defeated=True)
+        _omega_clear_combat_cache(event_id)
         return True,""
-    send_message(chat_id,text+"\n\n"+_omega_card(e,user_id),reply_markup=_omega_keyboard(e,user_id))
+    battle_msg=send_message(chat_id,text+"\n\n"+_omega_card(e,user_id),reply_markup=_omega_keyboard(e,user_id))
+    _omega_track_combat_message(chat_id,user_id,event_id,dice_mid,_telegram_message_id(battle_msg))
     return True,""
 
 def _omega_give_chest(event_id,user_id):
@@ -5707,8 +5767,14 @@ def omega_tick():
             top=(f"\n👑 Líder actual: {ranking[0]['display_name']} — {int(ranking[0]['total_damage']):,} daño" if ranking else "")
             send_message(int(e['chat_id']),
                 "⚡ KENNY OMEGA SIGUE ESPERANDO RETADORES\n\n"
+                f"❤️ HP GLOBAL: {int(e.get('hp') or 0):,}/{int(e.get('max_hp') or OMEGA_MAX_HP):,}\n"
                 f"⏳ Quedan {_omega_time_text(int(e['ends_at'])-now)} de la clasificatoria."
-                f"{top}\n\n🎯 Tienes 10 turnos por intento y puedes regresar cada 2 horas.\nUsa /omega para participar.")
+                f"{top}\n\n🎯 Tienes 10 turnos por intento y puedes regresar cada 2 horas.\n"
+                "Pulsa el botón o usa /omega para participar.",
+                reply_markup={"inline_keyboard":[
+                    [{"text":"⚡ ENTRAR A LA BATALLA","callback_data":f"omega_join:{e['id']}"}],
+                    [{"text":"📊 Ver / actualizar ranking","callback_data":f"omega_refresh:{e['id']}"}]
+                ]})
             with db_lock:
                 conn=get_db(); conn.execute("UPDATE rpg_omega_events SET last_announce_at=? WHERE id=?",(now,int(e['id']))); conn.commit(); conn.close()
 
@@ -6492,6 +6558,31 @@ def process_command(
         lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
         send_message(chat_id,"\n".join(lines)); return True
 
+    if command in ("/comandos", "/ayudarpg"):
+        send_message(chat_id,
+            "🎮 COMANDOS KIWRPG\n\n"
+            "🧙 /rpg — Abrir KiwRPG\n"
+            "👤 /personaje — Personaje activo\n"
+            "📋 /perfil — Perfil de jugador\n"
+            "💰 /saldo — Consultar Kiwons\n"
+            "🎒 /inventario — Ver inventario\n"
+            "🏪 /tienda — Abrir tienda privada\n"
+            "🐾 /mascota — Ver mascotas\n"
+            "🎰 /gacha — Gacha de mascotas\n\n"
+            "⚔️ COMBATE\n"
+            "👾 /encuentro — Buscar enemigo PvE\n"
+            "👹 /boss — Ver/entrar al Boss activo\n"
+            "📚 /bosses — Lista de Bosses\n"
+            "⚡ /omega — Kenny Omega: entrar/ver ranking\n"
+            "🤝 /duelo — Duelo amistoso\n"
+            "🏆 /duelopvp — Duelo clasificatorio\n"
+            "🏳️ /rendirse — Rendirse\n"
+            "📊 /pvp — Perfil PvP\n"
+            "🥇 /rankingpvp — Ranking PvP\n\n"
+            "💸 /transferir — Transferir Kiwons\n\n"
+            "Los comandos secretos/admin no aparecen en esta lista.")
+        return True
+
     if command == "/modotest":
         ok,msg2=toggle_boss_test(chat_id,message.get("from",{}).get("id"))
         send_message(chat_id,msg2); return True
@@ -6506,6 +6597,7 @@ def process_command(
             send_message(chat_id,"🧪 No hay una clasificatoria de Kenny Omega activa para reiniciar.")
             return True
         eid=int(e["id"])
+        _omega_clear_combat_cache(eid)
         with db_lock:
             conn=get_db()
             conn.execute("DELETE FROM rpg_omega_rewards WHERE event_id=?",(eid,))

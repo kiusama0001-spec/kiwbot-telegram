@@ -5242,6 +5242,16 @@ RPG_BOSS_ATTACKS = {
 }
 
 def _boss_attack_move(b,choice):
+    if b.get('boss_key')=='golem':
+        phase=_boss_phase(b)
+        basic=RPG_BOSS_ATTACKS['golem']['attack']
+        if phase==1:
+            pool=basic
+        elif phase==2:
+            pool=[('🔨 Martillo Sísmico',1.38),('🌍 Terremoto',1.50)] if choice=='special' else basic
+        else:
+            pool=[('🔨 Martillo Sísmico',1.38),('🌍 Terremoto',1.50),('💥 Aplastamiento',1.62)] if choice=='special' else basic
+        return random.choice(pool)
     pool=RPG_BOSS_ATTACKS.get(str(b.get('boss_key')),{}).get('special' if choice=='special' else 'attack')
     return random.choice(pool) if pool else (("💥 Habilidad especial",1.35) if choice=='special' else ("⚔️ Ataque",1.0))
 
@@ -5421,6 +5431,15 @@ def boss_use_potion(chat_id,user_id,boss_id,inventory_id):
 
 def _boss_ai_choice(b,p):
     cfg=RPG_BOSSES.get(b['boss_key'],{}); style=cfg.get('style','tactical'); phase=_boss_phase(b); hp_ratio=float(b['hp'])/max(1,float(b['max_hp'])); player_ratio=float(p['hp'])/max(1,float(p['max_hp']))
+    if b['boss_key']=='golem':
+        # Núcleo Inestable corresponde a phase=3, persistida en la aparición.
+        # No se cura ni desbloquea especiales antes de su fase correspondiente.
+        choices=({1:['defend']*5+['attack']*5,
+                  2:['defend']*2+['attack']*5+['special']*5,
+                  3:['defend']+['attack']*4+['special']*9})[phase]
+        if int(b.get('defending') or 0) or int(b.get('defends_used') or 0)>=3:
+            choices=[move for move in choices if move!='defend']
+        return random.choice(choices)
     choices=[]
     if style=='tank': choices=['defend']*4+['attack']*4+['special']*2
     elif style=='aggressive': choices=['attack']*6+['special']*4+['defend']
@@ -5490,6 +5509,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn=get_db(); fresh=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(int(boss_id),)).fetchone()
             if not fresh or fresh['status']!='active': conn.rollback(); conn.close(); return False,"El Boss ya fue derrotado."
             nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(p['special_cd'])-1); uc=max(0,int(p['ultimate_cd'])-1)
+            golem_phase_change=(fresh['boss_key']=='golem' and nh>0 and phase>int(fresh['phase']))
             if ab.get('special'): sc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
             ownhp=min(int(p['max_hp']),int(p['hp'])+heal)
@@ -5497,6 +5517,11 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
+        if golem_phase_change:
+            if phase==2:
+                player_text+='\n\n🌍 FASE 2 — La tierra tiembla. El Gólem desbloquea Martillo Sísmico y Terremoto.'
+            else:
+                player_text+='\n\n🔥 FASE 3 — NÚCLEO INESTABLE. Su núcleo se agrieta: el Gólem desbloquea Aplastamiento y atacará con mayor agresividad hasta caer.'
         b=_boss_active(chat_id)
         if not b:
             with db_lock:

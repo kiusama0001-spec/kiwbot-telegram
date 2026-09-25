@@ -4978,6 +4978,15 @@ def answer_trade_offer(offer_id,user_id,accept):
         except Exception:
             conn.rollback(); conn.close(); raise
 
+def trade_inventory_keyboard(user_id,target_id):
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""SELECT i.id,i.quantity,x.name,x.rarity,x.item_type,x.equip_slot,x.tradeable FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0 AND x.tradeable=1 AND i.item_key<>'anillo_bodas' ORDER BY i.acquired_at DESC LIMIT 25""",(int(user_id),world)).fetchall(); conn.close()
+    kb=[]
+    for r in rows:
+        icon=_inventory_item_icon(dict(r)); kb.append([{"text":f"{icon} {RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']} ×{int(r['quantity'] or 1)}","callback_data":f"trade_pick:{int(target_id)}:{int(r['id'])}"}])
+    return {"inline_keyboard":kb} if kb else None
+
 def show_inventory_item(chat_id,user_id,inventory_id):
     row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
     if not row or not char: return send_message(chat_id,"No encontré ese objeto o personaje.")
@@ -6104,10 +6113,14 @@ RPG_SHOP = {
 }
 
 def rpg_shop_keyboard(user_id):
-    balance=get_kiwons(user_id)
-    rows=[]
+    balance=get_kiwons(user_id); rows=[]
+    keys=list(RPG_SHOP.keys())
+    with db_lock:
+        conn=get_db(); items=conn.execute("SELECT item_key,item_type,equip_slot FROM rpg_items WHERE item_key = ANY(?)",(keys,)).fetchall() if keys else []; conn.close()
+    by={str(x['item_key']):dict(x) for x in items}
     for key,cfg in RPG_SHOP.items():
-        rows.append([{"text":f"{cfg['label']} · {cfg['price']:,} KW","callback_data":f"rpg_shop_item:{key}"}])
+        icon=_inventory_item_icon(by.get(key,{})) if key in by else "🎒"
+        rows.append([{"text":f"{icon} {cfg['label']} · {cfg['price']:,} KW","callback_data":f"rpg_shop_item:{key}"}])
     rows.append([{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}])
     return balance,{"inline_keyboard":rows}
 
@@ -6196,6 +6209,7 @@ RPG_BOSSES = {
     "nidhogg": {"name":"Nidhogg, Devorador de Mundos","level":36,"hp":7200,"atk":48,"defense":22,"style":"dragon","hours":4},
     "chronos": {"name":"Chronos, Guardián del Tiempo","level":39,"hp":6400,"atk":47,"defense":20,"style":"time","hours":4},
     "azath": {"name":"Azath, Dios del Abismo","level":45,"hp":9000,"atk":54,"defense":24,"style":"abyss","hours":5},
+    "will_trial": {"name":"Aeternus, Titán del Vacío","level":50,"hp":12000,"atk":58,"defense":27,"style":"chaos","hours":1},
 }
 
 RPG_BOSS_ATTACKS = {
@@ -6214,6 +6228,7 @@ RPG_BOSS_ATTACKS = {
  "nidhogg":{"attack":[("🐉 Garra del Devorador",1.04),("🔥 Aliento Negro",1.14)],"special":[("🔥 Incendio del Mundo",1.54),("🌍 Devoramundos",1.72),("🐉 Ragnarok",1.88)]},
  "chronos":{"attack":[("⏳ Corte Temporal",.98),("⌛ Arena del Tiempo",1.10)],"special":[("🕰️ Distorsión Temporal",1.44),("⏱️ Tiempo Robado",1.62),("⌛ Fin de los Tiempos",1.82)]},
  "azath":{"attack":[("🌑 Garra del Abismo",1.06),("👁️ Mirada Imposible",1.16)],"special":[("🕳️ Colapso del Abismo",1.62),("🌌 Vacío Absoluto",1.82),("☠️ Fin de la Existencia",2.00)]},
+ "will_trial":{"attack":[("🌑 Golpe del Vacío",1.08),("💥 Puño del Titán",1.18)],"special":[("☄️ Ruptura Celestial",1.65),("🌌 Colapso Aéreo",1.85),("☠️ Fin del Horizonte",2.05)]},
 }
 
 def _boss_attack_move(b,choice):
@@ -7081,6 +7096,11 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             if fresh['boss_key']=='angel_caido' and boss_was_defending and dmg>0 and nh>0:
                 counter=max(1,int(round(dmg*.15)))
                 ownhp=max(0,ownhp-counter)
+            will_help=0
+            if str(fresh.get('boss_key') or '')=='will_trial' and nh>0:
+                will_help=random.randint(350,550)
+                nh=max(0,nh-will_help)
+                phase=_boss_phase(dict(fresh)|{'hp':nh})
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
@@ -7089,6 +7109,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
         if counter:
             player_text+=f"\n🪽 CONTRAATAQUE — El Ángel Caído devuelve {counter} de daño."
+        if 'will_help' in locals() and will_help:
+            player_text+=f"\n🔥 WILL OSPREAY — Hidden Blade: {will_help} daño adicional."
         if boss_phase_change:
             phase_texts={
                 'golem': {2:'🌍 FASE 2 — La tierra tiembla. El Gólem desbloquea Martillo Sísmico y Terremoto.',
@@ -7128,7 +7150,19 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if not b:
             with db_lock:
                 conn=get_db(); dead=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(boss_id),)).fetchone(); conn.close()
-            dead=dict(dead); n=_boss_reward_all(dead); send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes.")
+            dead=dict(dead); n=_boss_reward_all(dead)
+            extra=''
+            if str(dead.get('boss_key') or '')=='will_trial':
+                with db_lock:
+                    _c=get_db(); _ps=_c.execute("SELECT user_id FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(boss_id),)).fetchall(); _c.close()
+                unlocked=0
+                for _p in _ps:
+                    if unlock_special_technique(int(_p['user_id']),'hidden_blade','Misión Épica: El Asesino Aéreo'):
+                        unlocked+=1
+                        try: send_hidden_blade_unlock_video(int(_p['user_id']))
+                        except Exception: pass
+                extra=f"\n🔥 Will peleó a su lado. Hidden Blade fue entregada a {unlocked} aventurero(s) que aún no la tenían."
+            send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes."+extra)
             if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel': send_one_winged_angel_finisher(chat_id)
             cleanup_combat_dice(chat_id,user_id)
             return True,''
@@ -7221,8 +7255,8 @@ def _merchant_private_url(merchant_id):
     return f"https://t.me/{username}?start=merchant_{int(merchant_id)}" if username else ""
 
 def _merchant_price(rarity,min_level=1):
-    base={"comun":900,"poco_comun":2200,"raro":4800,"ultra_raro":9500}.get(str(rarity),1500)
-    return int(base + max(0,int(min_level or 1)-1)*120)
+    base={"comun":550,"poco_comun":1200,"raro":2800,"ultra_raro":6000}.get(str(rarity),1200)
+    return int(base + max(0,int(min_level or 1)-1)*80)
 
 def _merchant_active(chat_id=None, now=None):
     now=int(now or time.time())
@@ -7233,19 +7267,45 @@ def _merchant_active(chat_id=None, now=None):
         conn.close()
     return row
 
-def merchant_private_text_keyboard(merchant_id):
-    now=int(time.time())
+def merchant_private_text_keyboard(merchant_id, user_id=None):
+    now=int(time.time()); char=get_active_character(user_id) if user_id else None
     with db_lock:
         conn=get_db(); m=conn.execute("SELECT * FROM rpg_merchants WHERE id=?",(int(merchant_id),)).fetchone()
-        offers=conn.execute("""SELECT o.*,i.name,i.rarity,i.equip_slot,i.min_level FROM rpg_merchant_offers o JOIN rpg_items i ON i.item_key=o.item_key WHERE o.merchant_id=? ORDER BY o.id""",(int(merchant_id),)).fetchall(); conn.close()
+        offers=conn.execute("""SELECT o.*,i.name,i.rarity,i.item_type,i.description,i.equip_slot,i.allowed_classes,i.min_level,i.atk_bonus,i.def_bonus,i.hp_bonus FROM rpg_merchant_offers o JOIN rpg_items i ON i.item_key=o.item_key WHERE o.merchant_id=? ORDER BY o.id""",(int(merchant_id),)).fetchall(); conn.close()
     if not m or m['status']!='active' or int(m['expires_at'])<=now: return "🐪 Malkor ya levantó el puesto. Volverá en otra ocasión.",None
-    left=max(1,(int(m['expires_at'])-now+59)//60); lines=["🐪 MALKOR, EL MERCADER ERRANTE","",f"—{random.choice(RPG_MERCHANT_PHRASES)}","",f"⏳ Se marcha en ~{left} min.","🌍 Stock GLOBAL: solo existe 1 unidad de cada pieza.",""]
+    left=max(1,(int(m['expires_at'])-now+59)//60); lines=["🐪 MALKOR, EL MERCADER ERRANTE","",f"—{random.choice(RPG_MERCHANT_PHRASES)}","",f"⏳ Se marcha en ~{left} min.","🌍 Stock GLOBAL: solo existe 1 unidad de cada pieza.","🔎 Cada pieza muestra clase, nivel y estadísticas ANTES de pagar.",""]
     kb=[]
     for o in offers:
-        icon=_inventory_item_icon(dict(o)); rare=RPG_RARITY_ICON.get(o['rarity'],'⚪'); sold=int(o['sold_by'] or 0)>0
-        lines.append(f"{icon} {rare} {o['name']} — {int(o['price']):,} KW — {'❌ AGOTADO' if sold else '1/1'}")
-        kb.append([{"text":f"❌ AGOTADO · {o['name']}" if sold else f"{icon} Comprar · {o['name']} · {int(o['price']):,} KW","callback_data":f"merchant_buy:{int(o['id'])}" if not sold else "merchant_sold"}])
+        d=dict(o); icon=_inventory_item_icon(d); rare=RPG_RARITY_ICON.get(o['rarity'],'⚪'); sold=int(o['sold_by'] or 0)>0
+        allowed=str(o.get('allowed_classes') or '').strip() or 'Todas'; req=int(o.get('min_level') or 1)
+        stats=[]
+        if int(o.get('atk_bonus') or 0): stats.append(f"⚔️ +{int(o['atk_bonus'])}")
+        if int(o.get('def_bonus') or 0): stats.append(f"🛡️ +{int(o['def_bonus'])}")
+        if int(o.get('hp_bonus') or 0): stats.append(f"❤️ +{int(o['hp_bonus'])}")
+        compatible=True; reason=''
+        if char:
+            compatible,reason=item_compatibility(d,char)
+        lines += [f"{icon} {rare} {o['name']} — {int(o['price']):,} KW — {'❌ AGOTADO' if sold else '1/1'}",f"   🎭 {allowed} · 📈 Nv. {req}"+(f" · {' '.join(stats)}" if stats else '')]
+        if char and not compatible: lines.append(f"   🔒 No compatible contigo: {reason}")
+        if sold: btn={"text":f"❌ AGOTADO · {o['name']}","callback_data":"merchant_sold"}
+        elif char and not compatible: btn={"text":f"🔒 No compatible · {o['name']}","callback_data":"merchant_incompatible"}
+        else: btn={"text":f"{icon} Ver / comprar · {o['name']}","callback_data":f"merchant_confirm:{int(o['id'])}"}
+        kb.append([btn])
     return "\n".join(lines),{"inline_keyboard":kb}
+
+def merchant_confirm_text(user_id, offer_id):
+    with db_lock:
+        conn=get_db(); o=conn.execute("""SELECT o.*,m.status,m.expires_at,i.* FROM rpg_merchant_offers o JOIN rpg_merchants m ON m.id=o.merchant_id JOIN rpg_items i ON i.item_key=o.item_key WHERE o.id=?""",(int(offer_id),)).fetchone(); conn.close()
+    if not o or o['status']!='active' or int(o['expires_at'])<=int(time.time()): return "🐪 Malkor ya se fue.",None
+    d=dict(o); icon=_inventory_item_icon(d); rare=RPG_RARITY_ICON.get(o['rarity'],'⚪'); char=get_active_character(user_id)
+    allowed=str(o.get('allowed_classes') or '').strip() or 'Todas'; req=int(o.get('min_level') or 1)
+    stats=f"⚔️ ATK +{int(o.get('atk_bonus') or 0)} · 🛡️ DEF +{int(o.get('def_bonus') or 0)} · ❤️ HP +{int(o.get('hp_bonus') or 0)}"
+    text=f"🐪 MALKOR — CONFIRMAR COMPRA\n\n{icon} {rare} {o['name']}\n{o.get('description') or ''}\n\n🎭 Clases: {allowed}\n📈 Nivel requerido: {req}\n{stats}\n\n💰 Precio: {int(o['price']):,} KW\n🪙 Tu saldo: {get_kiwons(user_id):,} KW"
+    if int(o['sold_by'] or 0)>0: return text+"\n\n❌ AGOTADO",None
+    if char:
+        ok,reason=item_compatibility(d,char)
+        if not ok: return text+f"\n\n🔒 No compatible contigo: {reason}",None
+    return text,{"inline_keyboard":[[{"text":f"✅ Comprar · {int(o['price']):,} KW","callback_data":f"merchant_buy:{int(o['id'])}"},{"text":"❌ Cancelar","callback_data":f"merchant_back:{int(o['merchant_id'])}"}]]}
 
 def spawn_merchant(chatrow, now=None, forced=False):
     now=int(now or time.time()); chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
@@ -7279,6 +7339,13 @@ def spawn_merchant(chatrow, now=None, forced=False):
 
 def merchant_buy(user_id, offer_id, chat_id=None):
     now=int(time.time()); reserved=None
+    char=get_active_character(user_id)
+    if not char: return False,"Necesitas un personaje activo para comprarle equipo a Malkor."
+    with db_lock:
+        _c=get_db(); _check=_c.execute("SELECT i.* FROM rpg_merchant_offers o JOIN rpg_items i ON i.item_key=o.item_key WHERE o.id=?",(int(offer_id),)).fetchone(); _c.close()
+    if not _check: return False,"Esa oferta ya no existe."
+    _ok,_reason=item_compatibility(dict(_check),char)
+    if not _ok: return False,f"🔒 No puedes comprar esa pieza: {_reason}. Malkor no acepta devoluciones por mirar mal la etiqueta."
     with db_lock:
         conn=get_db()
         try:
@@ -7293,8 +7360,7 @@ def merchant_buy(user_id, offer_id, chat_id=None):
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_merchant_offers SET sold_by=0,sold_at=0 WHERE id=? AND sold_by=?",(int(offer_id),int(user_id))); conn.commit(); conn.close()
         return False,f"🪙 Te faltan Kiwons. Malkor te mira como a un NPC sin misión. Precio: {price:,} KW."
-    char=get_active_character(user_id)
-    item=grant_rpg_item(user_id,int(char['id']),reserved['item_key'],f"malkor:{reserved['merchant_id']}") if char else None
+    item=grant_rpg_item(user_id,int(char['id']),reserved['item_key'],f"malkor:{reserved['merchant_id']}")
     if not item:
         change_kiwons(user_id,price,'merchant_refund',chat_id=chat_id,note='Reembolso Malkor')
         with db_lock:
@@ -7522,6 +7588,21 @@ RPG_QUICK_MISSIONS = [
     {"key":"draw_cat","type":"draw","title":"🐈 Retrato del gato del gremio","prompt":"Pulsa «🎨 Tomar reto y dibujar». Dibuja en el lienzo un gato aventurero; si parece un pan con orejas también cuenta. La PRIMERA entrega válida gana.","kw":1000,"exp":105},
     {"key":"draw_boss","type":"draw","title":"👹 Diseña al próximo boss","prompt":"Dibuja un boss para el reino y manda la imagen. Puede dar miedo o parecer que debe impuestos; primera entrega gana.","kw":1150,"exp":120},
     {"key":"draw_malkor","type":"draw","title":"🧳 Retrato policial de Malkor","prompt":"Malkor desapareció con el descuento. Pulsa «🎨 Tomar reto y dibujar», haz su retrato policial en el lienzo y entrégalo. La PRIMERA entrega válida gana.","kw":1050,"exp":110},
+    {"key":"draw_dragon","type":"draw","title":"🐉 Dibuja: DRAGÓN","prompt":"La palabra es DRAGÓN. Dibuja exactamente lo que te inspire esa palabra. Primera entrega válida gana.","kw":1050,"exp":110},
+    {"key":"draw_potion","type":"draw","title":"🧪 Dibuja: POCIÓN","prompt":"La palabra es POCIÓN. Dibuja una poción digna de un inventario RPG. Primera entrega válida gana.","kw":950,"exp":100},
+    {"key":"draw_castle","type":"draw","title":"🏰 Dibuja: CASTILLO","prompt":"La palabra es CASTILLO. No hace falta ser arquitecto medieval jajaja. Primera entrega válida gana.","kw":1000,"exp":105},
+    {"key":"draw_goblin","type":"draw","title":"👺 Dibuja: GOBLIN","prompt":"La palabra es GOBLIN. Hazlo feo, elegante o sospechosamente adorable. Primera entrega válida gana.","kw":1000,"exp":105},
+    {"key":"draw_mimic","type":"draw","title":"🧰 Dibuja: MIMIC","prompt":"La palabra es MIMIC. Un cofre que definitivamente no intentará comerte. Primera entrega válida gana.","kw":1050,"exp":110},
+    {"key":"draw_knight","type":"draw","title":"🛡️ Dibuja: CABALLERO","prompt":"La palabra es CABALLERO. Dibuja tu versión de un guerrero con armadura. Primera entrega válida gana.","kw":1000,"exp":105},
+    {"key":"draw_wizard","type":"draw","title":"🧙 Dibuja: MAGO","prompt":"La palabra es MAGO. Sombrero, bastón, barba o caos arcano: tú decides. Primera entrega válida gana.","kw":1000,"exp":105},
+    {"key":"draw_bow","type":"draw","title":"🏹 Dibuja: ARCO","prompt":"La palabra es ARCO. Dibuja un arco que un arquero presumiría en el grupo. Primera entrega válida gana.","kw":950,"exp":100},
+    {"key":"draw_crown","type":"draw","title":"👑 Dibuja: CORONA","prompt":"La palabra es CORONA. Diseña una que grite boss final. Primera entrega válida gana.","kw":950,"exp":100},
+    {"key":"draw_ghost","type":"draw","title":"👻 Dibuja: FANTASMA","prompt":"La palabra es FANTASMA. Terrorífico o ridículo, pero reconocible. Primera entrega válida gana.","kw":950,"exp":100},
+    {"key":"draw_chicken","type":"draw","title":"🐔 Dibuja: POLLO","prompt":"La palabra es POLLO. Sí, esta es una misión seria. Más o menos. Primera entrega válida gana.","kw":900,"exp":95},
+    {"key":"draw_treasure","type":"draw","title":"💰 Dibuja: TESORO","prompt":"La palabra es TESORO. Dibuja el loot que haría correr a todo el grupo. Primera entrega válida gana.","kw":1000,"exp":105},
+    {"key":"draw_monster","type":"draw","title":"👹 Dibuja: MONSTRUO","prompt":"La palabra es MONSTRUO. Invéntalo desde cero. Primera entrega válida gana.","kw":1050,"exp":110},
+    {"key":"draw_shield","type":"draw","title":"🛡️ Dibuja: ESCUDO","prompt":"La palabra es ESCUDO. Diseña uno que aguante hasta los chistes de Malkor. Primera entrega válida gana.","kw":950,"exp":100},
+    {"key":"draw_ring","type":"draw","title":"💍 Dibuja: ANILLO","prompt":"La palabra es ANILLO. Dibuja uno digno de una aventura legendaria. Primera entrega válida gana.","kw":1000,"exp":105},
 ]
 
 def _quick_active(chat_id, now=None):
@@ -7556,14 +7637,14 @@ def _quick_reward(m,user_id):
     if item and char:
         got=grant_rpg_item(uid,int(char['id']),item,f"mision_relampago:{int(m['id'])}")
         if got: item_msg=f"\n💍 Premio especial: {got['name']}\n✨ No es poder ni estadísticas: es una promesa esperando a la persona correcta."
-    if str(m.get('mission_key') or '')=='gatos_perdidos':
+    if str(m.get('mission_key') or '')=='gatos_perdidos' or str(m.get('mission_type') or '')=='draw':
         with db_lock:
             conn=get_db(); row=conn.execute("SELECT rescues,sword_claimed FROM rpg_cat_rescues WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
             rescues=int(row['rescues'] or 0) if row else 0; claimed=int(row['sword_claimed'] or 0) if row else 0
             rescues+=1
             conn.execute("""INSERT INTO rpg_cat_rescues(user_id,rescues,sword_claimed,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET rescues=EXCLUDED.rescues,sword_claimed=EXCLUDED.sword_claimed,updated_at=EXCLUDED.updated_at""",(uid,rescues,claimed,int(time.time())))
             conn.commit(); conn.close()
-        item_msg+=f"\n🐾 Gatos rescatados: {min(rescues,5)}/5"
+        item_msg+=f"\n🐾 Progreso Espada del Gato Perdido: {min(rescues,5)}/5"
         if rescues>=5 and not claimed and char:
             got=grant_rpg_item(uid,int(char['id']),'espada_gato','cinco_gatos_rescatados')
             if got:
@@ -7848,6 +7929,24 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
     enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=enemy["key"],dungeon_event_id=dungeon_id,dungeon_room=room)
     return (True,f"🏰 {name}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
 
+def spawn_will_epic_event(chatrow, now=None):
+    chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
+    if _boss_active(chat_id): return False
+    ok,b=spawn_boss(chat_id,'will_trial')
+    if not ok: return False
+    old=get_current_message_thread_id()
+    try:
+        set_current_message_thread_id(topic)
+        caption=("🔴 MISIÓN ÉPICA — EL ASESINO AÉREO\n\n"
+                 "El cielo se abre sobre el reino. Aeternus, Titán del Vacío, ha descendido.\n\n"
+                 "🔥 Will Ospreay entra al campo de batalla como aliado. No viene a mirar: después de CADA ataque de un aventurero, Will golpeará al Boss con enorme daño.\n\n"
+                 "⚠️ Aeternus es mucho más fuerte que un Boss normal.\n"
+                 "🏆 Quienes participen y sobrevivan a la victoria podrán aprender HIDDEN BLADE.\n\n"
+                 "Esta misión NO pertenece al tablón. Es un evento épico público.")
+        send_will_quick_mission_video(chat_id,caption,reply_markup={"inline_keyboard":[[{"text":"⚔️ Entrar a la batalla","callback_data":f"boss_join:{int(b['id'])}"}]]})
+    finally: set_current_message_thread_id(old)
+    return True
+
 def rpg_auto_world_tick(now=None):
     now=int(now or time.time())
     # Primero limpia monstruos ignorados.
@@ -7879,8 +7978,14 @@ def rpg_auto_world_tick(now=None):
             try: delete_message(int(d["chat_id"]),int(d["message_id"]))
             except Exception: pass
     for rr in quick_due:
-        try: spawn_quick_mission(dict(rr),now)
-        except Exception: logger.exception("Error creando misión relámpago en chat %s",rr["chat_id"])
+        try:
+            if random.random()<0.03 and not _boss_active(int(rr['chat_id'])):
+                if spawn_will_epic_event(dict(rr),now):
+                    with db_lock:
+                        _c=get_db(); _c.execute("UPDATE rpg_auto_chats SET next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,now,int(rr['chat_id']))); _c.commit(); _c.close()
+                else: spawn_quick_mission(dict(rr),now)
+            else: spawn_quick_mission(dict(rr),now)
+        except Exception: logger.exception("Error creando misión relámpago/épica en chat %s",rr["chat_id"])
     for rr in merchant_due:
         try: spawn_merchant(dict(rr),now)
         except Exception: logger.exception("Error creando Mercader Errante en chat %s",rr["chat_id"])
@@ -8084,8 +8189,7 @@ def _mission_board(cycle_id=None):
     remaining=[m for m in RPG_MISSION_CATALOG if m["key"] not in {x["key"] for x in chosen}]
     rng.shuffle(remaining)
     chosen.extend(dict(x) for x in remaining[:max(0,RPG_MISSION_BOARD_SIZE-len(chosen))])
-    if rng.random() < RPG_WILL_MYTHIC_CHANCE:
-        chosen[-1]=dict(RPG_WILL_MYTHIC_MISSION)
+    # Will ya no pertenece al tablón: su misión épica aparece como evento público independiente.
     order={"comun":0,"poco_comun":1,"raro":2,"epica":3,"legendaria":4,"mitica":5}
     return sorted(chosen[:RPG_MISSION_BOARD_SIZE],key=lambda x:(order.get(x["rarity"],9),x["goal"]))
 
@@ -8156,7 +8260,9 @@ def send_will_quick_mission_video(chat_id, caption, reply_markup=None):
     """Muestra a Will Ospreay en la misión relámpago sin desbloquear Hidden Blade."""
     cached=_rpg_asset_get("will_ospreay_hidden_blade")
     if cached:
-        return send_animation(int(chat_id),cached,caption)
+        sent=send_animation(int(chat_id),cached,caption)
+        if reply_markup: send_message(int(chat_id),"⚔️ La misión épica está abierta. ¿Entras?",reply_markup=reply_markup)
+        return sent
     path=Path(__file__).with_name("will-ospreay-hidden-blade.mp4")
     if not path.exists() or not TELEGRAM_API:
         return send_message(chat_id,caption,reply_markup=reply_markup)
@@ -8166,6 +8272,7 @@ def send_will_quick_mission_video(chat_id, caption, reply_markup=None):
         payload=resp.json() if resp.ok else {}
         anim=((payload.get("result") or {}).get("animation") or {})
         if anim.get("file_id"): _rpg_asset_set("will_ospreay_hidden_blade",anim["file_id"])
+        if reply_markup: send_message(int(chat_id),"⚔️ La misión épica está abierta. ¿Entras?",reply_markup=reply_markup)
         return payload
     except Exception:
         logger.exception("No pude mostrar a Will Ospreay en la misión relámpago")
@@ -8691,6 +8798,29 @@ def handle_rpg_callback(query):
         ok,msg2=_omega_open_chest(event_id,uid,chat_id)
         send_message(chat_id,msg2)
         return True
+    if data.startswith("trade_pick:"):
+        try: _,tid,iid=data.split(":",2); tid=int(tid); iid=int(iid)
+        except Exception: return True
+        target={"id":tid}; fake={"from":query.get("from") or {},"chat":msg.get("chat") or {}}
+        ok,msg2=create_trade_offer(fake,target,iid)
+        if not ok: send_message(chat_id,msg2)
+        return True
+    if data.startswith("trade_accept:") or data.startswith("trade_reject:"):
+        accept=data.startswith("trade_accept:")
+        try: oid=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=answer_trade_offer(oid,uid,accept); send_message(chat_id,msg2); return True
+    if data.startswith("merchant_confirm:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        try: oid=int(data.split(":",1)[1])
+        except Exception: return True
+        txt,kb=merchant_confirm_text(uid,oid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("merchant_back:"):
+        try: mid=int(data.split(":",1)[1])
+        except Exception: return True
+        txt,kb=merchant_private_text_keyboard(mid,uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="merchant_incompatible":
+        telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🔒 Tu clase o nivel no puede equipar esa pieza.","show_alert":True}); return True
     if data.startswith("merchant_buy:"):
         if not _is_private_chat_obj(msg.get("chat")):
             telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🔒 Las compras de Malkor son privadas.","show_alert":True}); return True
@@ -8700,7 +8830,7 @@ def handle_rpg_callback(query):
         with db_lock:
             mc=get_db(); rr=mc.execute("SELECT merchant_id FROM rpg_merchant_offers WHERE id=?",(oid,)).fetchone(); mc.close()
         if rr:
-            txt,kb=merchant_private_text_keyboard(int(rr['merchant_id'])); send_message(chat_id,txt,reply_markup=kb)
+            txt,kb=merchant_private_text_keyboard(int(rr['merchant_id']),uid); send_message(chat_id,txt,reply_markup=kb)
         return True
     if data=="merchant_sold":
         telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"❌ Esa pieza ya se agotó.","show_alert":False}); return True
@@ -8857,7 +8987,7 @@ def process_command(
             if chat.get("type")!="private": return True
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
-            txt,kb=merchant_private_text_keyboard(merchant_id); send_message(chat_id,txt,reply_markup=kb); return True
+            txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
         if len(parts)>1 and parts[1] in ("shop","pets","missions","forge"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
@@ -8983,7 +9113,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,"💍 La propuesta se hace en el grupo para que el momento quede anunciado ante todos."); return True
         target=resolve_target_for_economy(message,text)
         if not target:
-            send_message(chat_id,"💍 No pude identificar a esa persona. La forma infalible es responder a uno de sus mensajes con /casar. Si quieres usar @usuario, pídele que escriba /registrarme una vez en el grupo."); return True
+            send_message(chat_id,"💍 No pude identificar a esa persona todavía. Ya no hace falta /registrarme: basta con que esa persona haya escrito al menos un mensaje desde que el bot está activo. También puedes responder directamente a su mensaje con /casar."); return True
         ok,msg2=propose_marriage(message,target)
         if not ok: send_message(chat_id,msg2)
         return True
@@ -9008,8 +9138,13 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         pp=str(text or '').strip().split()
         target=resolve_target_for_economy(message,text)
         iid=next((int(x) for x in pp[1:] if x.isdigit()),0)
-        if not target or not iid:
-            send_message(chat_id,"🔄 Usa /intercambio @usuario ID o responde al mensaje de la persona con /intercambio ID. El ID aparece al abrir un objeto en /inventario."); return True
+        if not target:
+            send_message(chat_id,"🔄 No pude identificar a esa persona. Ya no necesita /registrarme: basta con que haya escrito en el grupo. También puedes responder a uno de sus mensajes con /intercambio."); return True
+        if not iid:
+            kb=trade_inventory_keyboard(user_id,int(target['id']))
+            send_message(chat_id,f"🔄 INTERCAMBIO CON {_player_name_by_id(int(target['id']))}\n\nElige el objeto que quieres ofrecer:",reply_markup=kb)
+            if not kb: send_message(chat_id,"No tienes objetos disponibles para intercambiar.")
+            return True
         ok,msg2=create_trade_offer(message,target,iid)
         if not ok: send_message(chat_id,msg2)
         return True
@@ -9060,13 +9195,11 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,"🧪 Matrimonio de prueba terminado." if ok else state); return True
 
     if command in ("/testwillmision", "/testmisionwill"):
-        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
-        _mission_ensure_tables(); c=_mission_cycle_id(); m=RPG_WILL_MYTHIC_MISSION
-        with db_lock:
-            conn=get_db(); conn.execute("""INSERT INTO rpg_mission_progress(cycle_id,user_id,mission_key,progress,completed,rewarded,updated_at) VALUES(?,?,?,19,0,0,?)
-                ON CONFLICT(cycle_id,user_id,mission_key) DO UPDATE SET progress=19,completed=0,rewarded=0,updated_at=EXCLUDED.updated_at""",(c,int(user_id),m['key'],int(time.time())))
-            conn.commit(); conn.close()
-        send_message(chat_id,"🧪 Misión de Will preparada en 19/20. Tu próxima victoria PvE debe completar El Asesino Aéreo, desbloquear Hidden Blade y mostrar el MP4."); return True
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede forzar la misión épica de Will."); return True
+        register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        ok=spawn_will_epic_event({"chat_id":chat_id,"message_thread_id":message.get("message_thread_id")},int(time.time()))
+        send_message(chat_id,"🧪 Misión épica de Will creada." if ok else "⚠️ No pude crearla: probablemente ya hay un Boss activo.")
+        return True
 
     if command in ("/comandos", "/ayudarpg"):
         uid=message.get("from",{}).get("id")
@@ -9261,7 +9394,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         groups={}
         for m in RPG_QUICK_MISSIONS: groups.setdefault(m['type'],[]).append(m)
         labels={'target':'🎯 Puntería','parity':'🎲 Azar','number':'🔢 Acertijos','emoji':'🧩 Emojis','speed':'⚡ Reflejos','mention':'👥 Menciona a alguien','text':'✍️ Escribe algo','draw':'🎨 Dibuja algo'}
-        lines=[f"⚡ CATÁLOGO DE MISIONES RELÁMPAGO — {len(RPG_QUICK_MISSIONS)} TOTAL", "", "🔁 Ciclo de 40: ninguna misión vuelve a salir hasta que hayan pasado las otras 39.", ""]
+        lines=[f"⚡ CATÁLOGO DE MISIONES RELÁMPAGO — {len(RPG_QUICK_MISSIONS)} TOTAL", "", f"🔁 Ciclo de {len(RPG_QUICK_MISSIONS)}: no se repiten hasta recorrer prácticamente todo el catálogo.", ""]
         n=1
         for typ in ('target','parity','number','emoji','speed','mention','text','draw'):
             if typ not in groups: continue
@@ -9279,9 +9412,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
         with db_lock:
             conn=get_db(); row=conn.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); conn.close()
-        forced_key=(parts[1].strip() if len(parts)>1 else None)
+        _qparts=str(text or '').strip().split(maxsplit=1)
+        forced_key=(_qparts[1].strip() if len(_qparts)>1 else None)
         if forced_key and not any(str(m['key'])==forced_key for m in RPG_QUICK_MISSIONS):
-            send_message(chat_id,"❌ Esa clave no existe. Usa /misionesaleatorias para ver las 40 claves."); return True
+            send_message(chat_id,f"❌ Esa clave no existe. Usa /misionesaleatorias para ver las {len(RPG_QUICK_MISSIONS)} claves."); return True
         if row and spawn_quick_mission(dict(row),int(time.time()),True,forced_key):
             send_message(chat_id,"🧪 Misión de prueba creada"+(f": {forced_key}" if forced_key else " al azar")+".")
         else: send_message(chat_id,"No se pudo crear la misión de prueba.")
@@ -10707,11 +10841,7 @@ def process_update(
             chat_id
         ):
 
-            directly_addressed = (
-                bot_was_mentioned(message)
-                or
-                is_reply_to_bot(message)
-            )
+            directly_addressed = bot_was_mentioned(message)
 
             if directly_addressed:
 
@@ -10795,6 +10925,12 @@ def process_update(
 
             return
 
+
+        # En grupos KiwBot conversa SOLO cuando lo mencionan con @usuario.
+        # Responder a un mensaje del bot ya no lo despierta. Comandos, moderación y
+        # Misiones Relámpago se procesan antes de este punto y siguen funcionando.
+        if chat.get("type") in ("group","supergroup") and REQUIRE_MENTION and not bot_was_mentioned(message):
+            return
 
         # =================================================
         # PREFERENCIAS PERMANENTES DE KIU
@@ -10904,11 +11040,7 @@ def process_update(
 
             if REQUIRE_MENTION:
 
-                if not (
-                    bot_was_mentioned(message)
-                    or
-                    is_reply_to_bot(message)
-                ):
+                if not bot_was_mentioned(message):
                     return
 
             text = clean_bot_mention(

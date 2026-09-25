@@ -776,6 +776,117 @@ def init_db():
                   tradeable=excluded.tradeable, equip_slot=excluded.equip_slot, allowed_classes=excluded.allowed_classes, min_level=excluded.min_level
             """, (key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,classes,minlvl))
 
+        # KiwRPG V8.0 — Arsenal de Mazmorras: 100 objetos nuevos, balanceados por slot y nivel.
+        v80_items = [
+            ('v8_espada_del_bastion', 'Espada del Bastión', 'comun', 'arma', 'Arma de Guerrero equilibrada para progresión de mazmorra.', 1, 0, 0, None, 1, 'arma', 'Guerrero', 1),
+            ('v8_hacha_del_caminante', 'Hacha del Caminante', 'poco_comun', 'arma', 'Arma de Guerrero equilibrada para progresión de mazmorra.', 2, 0, 0, None, 1, 'arma', 'Guerrero', 3),
+            ('v8_mandoble_de_bronce', 'Mandoble de Bronce', 'poco_comun', 'arma', 'Arma de Guerrero equilibrada para progresión de mazmorra.', 2, 1, 0, None, 1, 'arma', 'Guerrero', 5),
+            ('v8_hoja_del_centinela', 'Hoja del Centinela', 'raro', 'arma', 'Arma de Guerrero equilibrada para progresión de mazmorra.', 3, 1, 5, None, 1, 'arma', 'Guerrero', 9),
+            ('v8_filo_del_leon', 'Filo del León', 'ultra_raro', 'arma', 'Arma de Guerrero equilibrada para progresión de mazmorra.', 4, 1, 5, None, 1, 'arma', 'Guerrero', 14),
+            ('v8_vara_de_bruma', 'Vara de Bruma', 'comun', 'arma', 'Arma de Mago equilibrada para progresión de mazmorra.', 1, 0, 0, None, 1, 'arma', 'Mago', 1),
+            ('v8_baculo_astral', 'Báculo Astral', 'poco_comun', 'arma', 'Arma de Mago equilibrada para progresión de mazmorra.', 2, 0, 0, None, 1, 'arma', 'Mago', 3),
+            ('v8_cetro_de_ambar', 'Cetro de Ámbar', 'poco_comun', 'arma', 'Arma de Mago equilibrada para progresión de mazmorra.', 2, 1, 0, None, 1, 'arma', 'Mago', 5),
+            ('v8_orbe_del_eclipse_menor', 'Orbe del Eclipse Menor', 'raro', 'arma', 'Arma de Mago equilibrada para progresión de mazmorra.', 3, 1, 5, None, 1, 'arma', 'Mago', 9),
+            ('v8_vara_de_runas', 'Vara de Runas', 'ultra_raro', 'arma', 'Arma de Mago equilibrada para progresión de mazmorra.', 4, 1, 5, None, 1, 'arma', 'Mago', 14),
+            ('v8_dagas_de_medianoche', 'Dagas de Medianoche', 'comun', 'arma', 'Arma de Pícaro equilibrada para progresión de mazmorra.', 1, 0, 0, None, 1, 'arma', 'Pícaro', 1),
+            ('v8_estilete_del_cuervo', 'Estilete del Cuervo', 'poco_comun', 'arma', 'Arma de Pícaro equilibrada para progresión de mazmorra.', 2, 0, 0, None, 1, 'arma', 'Pícaro', 3),
+            ('v8_kukri_sombrio', 'Kukri Sombrío', 'poco_comun', 'arma', 'Arma de Pícaro equilibrada para progresión de mazmorra.', 2, 1, 0, None, 1, 'arma', 'Pícaro', 5),
+            ('v8_gemelas_de_mercurio', 'Gemelas de Mercurio', 'raro', 'arma', 'Arma de Pícaro equilibrada para progresión de mazmorra.', 3, 1, 5, None, 1, 'arma', 'Pícaro', 9),
+            ('v8_hoja_silenciosa', 'Hoja Silenciosa', 'ultra_raro', 'arma', 'Arma de Pícaro equilibrada para progresión de mazmorra.', 4, 1, 5, None, 1, 'arma', 'Pícaro', 14),
+            ('v8_maza_del_alba', 'Maza del Alba', 'comun', 'arma', 'Arma de Paladín equilibrada para progresión de mazmorra.', 1, 0, 0, None, 1, 'arma', 'Paladín', 1),
+            ('v8_espada_juramentada', 'Espada Juramentada', 'poco_comun', 'arma', 'Arma de Paladín equilibrada para progresión de mazmorra.', 2, 0, 0, None, 1, 'arma', 'Paladín', 3),
+            ('v8_martillo_de_guardia', 'Martillo de Guardia', 'poco_comun', 'arma', 'Arma de Paladín equilibrada para progresión de mazmorra.', 2, 1, 0, None, 1, 'arma', 'Paladín', 5),
+            ('v8_hoja_del_templo', 'Hoja del Templo', 'raro', 'arma', 'Arma de Paladín equilibrada para progresión de mazmorra.', 3, 1, 5, None, 1, 'arma', 'Paladín', 9),
+            ('v8_maza_solar', 'Maza Solar', 'ultra_raro', 'arma', 'Arma de Paladín equilibrada para progresión de mazmorra.', 4, 1, 5, None, 1, 'arma', 'Paladín', 14),
+            ('v8_arco_de_fresno', 'Arco de Fresno', 'comun', 'arma', 'Arma de Arquero equilibrada para progresión de mazmorra.', 1, 0, 0, None, 1, 'arma', 'Arquero', 1),
+            ('v8_arco_del_vendaval', 'Arco del Vendaval', 'poco_comun', 'arma', 'Arma de Arquero equilibrada para progresión de mazmorra.', 2, 0, 0, None, 1, 'arma', 'Arquero', 3),
+            ('v8_arco_de_luna', 'Arco de Luna', 'poco_comun', 'arma', 'Arma de Arquero equilibrada para progresión de mazmorra.', 2, 1, 0, None, 1, 'arma', 'Arquero', 5),
+            ('v8_ballesta_ligera', 'Ballesta Ligera', 'raro', 'arma', 'Arma de Arquero equilibrada para progresión de mazmorra.', 3, 1, 5, None, 1, 'arma', 'Arquero', 9),
+            ('v8_arco_del_halcon', 'Arco del Halcón', 'ultra_raro', 'arma', 'Arma de Arquero equilibrada para progresión de mazmorra.', 4, 1, 5, None, 1, 'arma', 'Arquero', 14),
+            ('v8_hoja_cleaner_i', 'Hoja Cleaner I', 'comun', 'arma', 'Arma de The Cleaner equilibrada para progresión de mazmorra.', 1, 0, 0, None, 1, 'arma', 'The Cleaner', 1),
+            ('v8_katana_del_barrido', 'Katana del Barrido', 'poco_comun', 'arma', 'Arma de The Cleaner equilibrada para progresión de mazmorra.', 2, 0, 0, None, 1, 'arma', 'The Cleaner', 3),
+            ('v8_filo_de_combate', 'Filo de Combate', 'poco_comun', 'arma', 'Arma de The Cleaner equilibrada para progresión de mazmorra.', 2, 1, 0, None, 1, 'arma', 'The Cleaner', 5),
+            ('v8_espada_del_ultimo_round', 'Espada del Último Round', 'raro', 'arma', 'Arma de The Cleaner equilibrada para progresión de mazmorra.', 3, 1, 5, None, 1, 'arma', 'The Cleaner', 9),
+            ('v8_hoja_best_bout', 'Hoja Best Bout', 'ultra_raro', 'arma', 'Arma de The Cleaner equilibrada para progresión de mazmorra.', 4, 1, 5, None, 1, 'arma', 'The Cleaner', 14),
+            ('v8_casco_1', 'Casco de Hierro Viejo', 'comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 1, 0, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_casco_2', 'Capucha de Ceniza', 'comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 1, 0, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_casco_3', 'Yelmo del Vigía', 'comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 1, 0, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_casco_4', 'Tiara de Cristal', 'poco_comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 1, 5, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_casco_5', 'Casco del Lobo', 'poco_comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 1, 5, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_casco_6', 'Capucha Nocturna', 'poco_comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 1, 5, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_casco_7', 'Yelmo de Roble', 'poco_comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 2, 5, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_casco_8', 'Corona del Errante', 'poco_comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 2, 5, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_casco_9', 'Casco de Escamas', 'poco_comun', 'casco', 'Protección de cabeza obtenible en expediciones.', 0, 2, 5, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_casco_10', 'Capucha Rúnica', 'raro', 'casco', 'Protección de cabeza obtenible en expediciones.', 1, 2, 10, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_casco_11', 'Yelmo del Guardabosques', 'raro', 'casco', 'Protección de cabeza obtenible en expediciones.', 1, 2, 10, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_casco_12', 'Tiara del Oráculo', 'raro', 'casco', 'Protección de cabeza obtenible en expediciones.', 1, 2, 10, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_casco_13', 'Casco del Coloso', 'ultra_raro', 'casco', 'Protección de cabeza obtenible en expediciones.', 1, 3, 15, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_casco_14', 'Yelmo de la Aurora', 'ultra_raro', 'casco', 'Protección de cabeza obtenible en expediciones.', 1, 3, 15, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_casco_15', 'Corona del Abismo', 'ultra_raro', 'casco', 'Protección de cabeza obtenible en expediciones.', 1, 3, 15, None, 1, 'casco', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_armadura_1', 'Jubón Reforzado', 'comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 5, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_armadura_2', 'Cota del Viajero', 'comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 5, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_armadura_3', 'Armadura de Bronce', 'comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 5, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_armadura_4', 'Túnica de Ceniza', 'comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 5, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_armadura_5', 'Pechera del Vigía', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_armadura_6', 'Manto de Cristal', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_armadura_7', 'Coraza del Lobo', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_armadura_8', 'Túnica Nocturna', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 1, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_armadura_9', 'Cota de Roble', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 2, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_armadura_10', 'Manto Rúnico', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 2, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_armadura_11', 'Pechera del Guardabosques', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 2, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_armadura_12', 'Túnica del Oráculo', 'poco_comun', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 2, 10, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_armadura_13', 'Coraza de Escamas', 'raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 3, 15, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_armadura_14', 'Manto del Centinela', 'raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 3, 15, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_armadura_15', 'Armadura del Coloso', 'raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 3, 15, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_armadura_16', 'Túnica de la Aurora', 'raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 0, 3, 15, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_armadura_17', 'Coraza del Dragón Menor', 'ultra_raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 1, 3, 20, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_armadura_18', 'Manto del Abismo', 'ultra_raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 1, 3, 20, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_armadura_19', 'Armadura del Reino Caído', 'ultra_raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 1, 3, 20, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_armadura_20', 'Pechera de las Tres Salas', 'ultra_raro', 'armadura', 'Armadura equilibrada: mejora supervivencia sin anular el daño enemigo.', 1, 3, 20, None, 1, 'armadura', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_guantes_1', 'Guantes de Cuero', 'comun', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 0, 1, 0, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_guantes_2', 'Guantes del Rastreador', 'comun', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 0, 1, 0, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_guantes_3', 'Guanteletes de Bronce', 'poco_comun', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 1, 1, 0, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_guantes_4', 'Guantes de Bruma', 'poco_comun', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 1, 1, 0, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_guantes_5', 'Guanteletes del Vigía', 'poco_comun', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 1, 1, 5, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_guantes_6', 'Guantes del Cuervo', 'poco_comun', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 1, 1, 5, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_guantes_7', 'Guanteletes Rúnicos', 'raro', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 1, 2, 5, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_guantes_8', 'Guantes del Halcón', 'raro', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 1, 2, 5, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_guantes_9', 'Guanteletes del Abismo', 'ultra_raro', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 2, 2, 5, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_guantes_10', 'Guantes del Conquistador', 'ultra_raro', 'guantes', 'Guantes de expedición con bonificaciones contenidas.', 2, 2, 5, None, 1, 'guantes', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_botas_1', 'Botas de Cuero', 'comun', 'botas', 'Botas de expedición con mejoras moderadas.', 0, 0, 5, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_botas_2', 'Botas del Explorador', 'comun', 'botas', 'Botas de expedición con mejoras moderadas.', 0, 0, 5, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_botas_3', 'Botas de Bronce', 'poco_comun', 'botas', 'Botas de expedición con mejoras moderadas.', 0, 1, 5, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_botas_4', 'Botas de Bruma', 'poco_comun', 'botas', 'Botas de expedición con mejoras moderadas.', 0, 1, 5, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_botas_5', 'Botas del Vigía', 'poco_comun', 'botas', 'Botas de expedición con mejoras moderadas.', 1, 1, 5, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_botas_6', 'Botas del Cuervo', 'poco_comun', 'botas', 'Botas de expedición con mejoras moderadas.', 1, 1, 5, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_botas_7', 'Botas Rúnicas', 'raro', 'botas', 'Botas de expedición con mejoras moderadas.', 1, 1, 10, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_botas_8', 'Botas del Halcón', 'raro', 'botas', 'Botas de expedición con mejoras moderadas.', 1, 1, 10, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_botas_9', 'Botas del Abismo', 'ultra_raro', 'botas', 'Botas de expedición con mejoras moderadas.', 1, 2, 15, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_botas_10', 'Botas del Conquistador', 'ultra_raro', 'botas', 'Botas de expedición con mejoras moderadas.', 1, 2, 15, None, 1, 'botas', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_accesorio_1', 'Amuleto de Cobre', 'comun', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 0, 0, 5, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_accesorio_2', 'Broche del Viajero', 'comun', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 0, 0, 5, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 1),
+            ('v8_accesorio_3', 'Anillo de Bruma', 'poco_comun', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 1, 0, 5, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_accesorio_4', 'Talismán del Vigía', 'poco_comun', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 1, 0, 5, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 3),
+            ('v8_accesorio_5', 'Medallón del Cuervo', 'poco_comun', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 1, 1, 5, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_accesorio_6', 'Anillo Rúnico', 'poco_comun', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 1, 1, 5, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 5),
+            ('v8_accesorio_7', 'Talismán del Halcón', 'raro', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 1, 1, 10, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_accesorio_8', 'Medallón del Abismo', 'raro', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 1, 1, 10, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 9),
+            ('v8_accesorio_9', 'Anillo de la Aurora', 'ultra_raro', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 2, 1, 10, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_accesorio_10', 'Sello del Conquistador', 'ultra_raro', 'accesorio', 'Accesorio de mazmorra con poder limitado para evitar acumulaciones excesivas.', 2, 1, 10, None, 1, 'accesorio', 'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', 14),
+            ('v8_material_1', 'Polvo de Ruina', 'comun', 'material', 'Material especial recuperado al explorar mazmorras.', 0, 0, 0, None, 1, '', '', 1),
+            ('v8_material_2', 'Musgo de Cripta', 'comun', 'material', 'Material especial recuperado al explorar mazmorras.', 0, 0, 0, None, 1, '', '', 1),
+            ('v8_material_3', 'Carbón Volcánico', 'poco_comun', 'material', 'Material especial recuperado al explorar mazmorras.', 0, 0, 0, None, 1, '', '', 1),
+            ('v8_material_4', 'Fragmento Abisal', 'raro', 'material', 'Material especial recuperado al explorar mazmorras.', 0, 0, 0, None, 1, '', '', 1),
+            ('v8_material_5', 'Esencia de Mazmorra', 'ultra_raro', 'material', 'Material especial recuperado al explorar mazmorras.', 0, 0, 0, None, 1, '', '', 1),
+        ]
+        for key,name,rarity,itype,desc,atk,defn,hp,limit,trade,slot,allowed,minlvl in v80_items:
+            cur.execute("""INSERT INTO rpg_items
+                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,description=excluded.description,
+                atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,tradeable=excluded.tradeable,equip_slot=excluded.equip_slot,allowed_classes=excluded.allowed_classes,min_level=excluded.min_level
+            """,(key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,allowed,minlvl))
+
         # KiwRPG V6.3 — reliquias exclusivas de los 15 Bosses.
         boss_drop_items = [
             ('nucleo_golem','Núcleo de Hierro del Gólem','raro','material','Un núcleo metálico arrancado al Gólem de Hierro.'),
@@ -4421,7 +4532,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                             dc.commit(); dc.close()
                         if first:
                             change_kiwons(user_id,RPG_DUNGEON_FINAL_KW,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra {dungeon_id} completada"); grant_rpg_exp(char["id"],RPG_DUNGEON_FINAL_EXP)
-                            send_message(chat_id,f"🏆 ¡MAZMORRA COMPLETADA!\n🪙 Bono final: +{RPG_DUNGEON_FINAL_KW} KW\n⭐ Bono final: +{RPG_DUNGEON_FINAL_EXP} EXP")
+                            chest=roll_dungeon_completion_loot(user_id,int(char["id"]),dungeon_id)
+                            chest_txt=(f"\n🎁 Cofre final: {RPG_RARITY_ICON.get(chest['rarity'],'⚪')} {chest['name']}" if chest else "")
+                            send_message(chat_id,f"🏆 ¡MAZMORRA COMPLETADA!\n🪙 Bono final: +{RPG_DUNGEON_FINAL_KW} KW\n⭐ Bono final: +{RPG_DUNGEON_FINAL_EXP} EXP{chest_txt}")
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -6770,6 +6883,15 @@ RPG_DUNGEON_TTL = 20 * 60
 RPG_DUNGEON_ROOMS = 3
 RPG_DUNGEON_FINAL_KW = 1500
 RPG_DUNGEON_FINAL_EXP = 300
+RPG_DUNGEON_LOOT_POOLS = {'comun': ['v8_espada_del_bastion', 'v8_vara_de_bruma', 'v8_dagas_de_medianoche', 'v8_maza_del_alba', 'v8_arco_de_fresno', 'v8_hoja_cleaner_i', 'v8_casco_1', 'v8_casco_2', 'v8_casco_3', 'v8_armadura_1', 'v8_armadura_2', 'v8_armadura_3', 'v8_armadura_4', 'v8_guantes_1', 'v8_guantes_2', 'v8_botas_1', 'v8_botas_2', 'v8_accesorio_1', 'v8_accesorio_2', 'v8_material_1', 'v8_material_2'], 'poco_comun': ['v8_hacha_del_caminante', 'v8_mandoble_de_bronce', 'v8_baculo_astral', 'v8_cetro_de_ambar', 'v8_estilete_del_cuervo', 'v8_kukri_sombrio', 'v8_espada_juramentada', 'v8_martillo_de_guardia', 'v8_arco_del_vendaval', 'v8_arco_de_luna', 'v8_katana_del_barrido', 'v8_filo_de_combate', 'v8_casco_4', 'v8_casco_5', 'v8_casco_6', 'v8_casco_7', 'v8_casco_8', 'v8_casco_9', 'v8_armadura_5', 'v8_armadura_6', 'v8_armadura_7', 'v8_armadura_8', 'v8_armadura_9', 'v8_armadura_10', 'v8_armadura_11', 'v8_armadura_12', 'v8_guantes_3', 'v8_guantes_4', 'v8_guantes_5', 'v8_guantes_6', 'v8_botas_3', 'v8_botas_4', 'v8_botas_5', 'v8_botas_6', 'v8_accesorio_3', 'v8_accesorio_4', 'v8_accesorio_5', 'v8_accesorio_6', 'v8_material_3'], 'raro': ['v8_hoja_del_centinela', 'v8_orbe_del_eclipse_menor', 'v8_gemelas_de_mercurio', 'v8_hoja_del_templo', 'v8_ballesta_ligera', 'v8_espada_del_ultimo_round', 'v8_casco_10', 'v8_casco_11', 'v8_casco_12', 'v8_armadura_13', 'v8_armadura_14', 'v8_armadura_15', 'v8_armadura_16', 'v8_guantes_7', 'v8_guantes_8', 'v8_botas_7', 'v8_botas_8', 'v8_accesorio_7', 'v8_accesorio_8', 'v8_material_4'], 'ultra_raro': ['v8_filo_del_leon', 'v8_vara_de_runas', 'v8_hoja_silenciosa', 'v8_maza_solar', 'v8_arco_del_halcon', 'v8_hoja_best_bout', 'v8_casco_13', 'v8_casco_14', 'v8_casco_15', 'v8_armadura_17', 'v8_armadura_18', 'v8_armadura_19', 'v8_armadura_20', 'v8_guantes_9', 'v8_guantes_10', 'v8_botas_9', 'v8_botas_10', 'v8_accesorio_9', 'v8_accesorio_10', 'v8_material_5']}
+
+def roll_dungeon_completion_loot(user_id, character_id, dungeon_id):
+    """Un cofre por finalización. Pesos conservadores; nunca entrega legendarios/reliquias."""
+    x=random.random()
+    rarity = 'comun' if x < 0.38 else ('poco_comun' if x < 0.78 else ('raro' if x < 0.97 else 'ultra_raro'))
+    pool=RPG_DUNGEON_LOOT_POOLS[rarity]
+    return grant_rpg_item(user_id,character_id,random.choice(pool),f"mazmorra:{int(dungeon_id)}:cofre")
+
 RPG_DUNGEONS = [
     {"key":"ruinas","name":"🏚️ Ruinas del Reino Caído"},
     {"key":"cripta","name":"⚰️ Cripta de las Almas"},

@@ -654,6 +654,17 @@ def init_db():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_marriages_a_status ON rpg_marriages(user_a,status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_marriages_b_status ON rpg_marriages(user_b,status)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_trade_offers (
+            id BIGSERIAL PRIMARY KEY,
+            from_user BIGINT NOT NULL,
+            to_user BIGINT NOT NULL,
+            inventory_id BIGINT NOT NULL,
+            chat_id BIGINT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at BIGINT NOT NULL,
+            resolved_at BIGINT NOT NULL DEFAULT 0
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_trade_pending ON rpg_trade_offers(to_user,status,created_at)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_merchants (
                 id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
@@ -4884,10 +4895,88 @@ def item_action_keyboard(row, char):
     if row.get("equip_slot") and int(row.get("forge_level") or 0)<15:
         buttons.append({"text":f"🔨 Mejorar +{int(row.get('forge_level') or 0)}","callback_data":f"forge_upgrade:{row['id']}"})
     if int(row.get("heal_percent") or 0)>0: buttons.append({"text":"🧪 Usar","callback_data":f"rpg_use:{row['id']}"})
+    if int(row.get("tradeable") or 0) and not int(row.get("equipped") or 0) and not int(row.get("locked") or 0):
+        buttons.append({"text":"💰 Vender","callback_data":f"rpg_sell_offer:{row['id']}"})
+        buttons.append({"text":"🔄 Intercambiar","callback_data":f"rpg_trade_help:{row['id']}"})
     keyboard=[]
     if buttons: keyboard.append(buttons[:2]);
     if len(buttons)>2: keyboard.append(buttons[2:])
     return {"inline_keyboard":keyboard} if keyboard else None
+
+RPG_SELL_BASE = {"comun":180,"poco_comun":350,"raro":700,"ultra_raro":1400,"legendario":3000,"reliquia":5500}
+
+def rpg_sell_value(row):
+    rarity=str(row.get('rarity') or 'comun')
+    base=int(RPG_SELL_BASE.get(rarity,150))
+    forge=int(row.get('forge_level') or 0)
+    return max(50, int(round(base*(1+forge*0.12))))
+
+def sell_inventory_item(user_id,inventory_id):
+    uid=int(user_id); iid=int(inventory_id); world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        try:
+            row=conn.execute("""SELECT i.*,x.name,x.rarity,x.tradeable FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE""",(iid,uid,world)).fetchone()
+            if not row: conn.rollback(); conn.close(); return False,"No encontré ese objeto."
+            if int(row['equipped'] or 0): conn.rollback(); conn.close(); return False,"Desequipa el objeto antes de venderlo."
+            if int(row['locked'] or 0): conn.rollback(); conn.close(); return False,"Ese objeto está reservado y no puede venderse."
+            if not int(row['tradeable'] or 0) or str(row['item_key']) in ('anillo_bodas','espada_gato'):
+                conn.rollback(); conn.close(); return False,"Ese objeto especial no se puede vender."
+            value=rpg_sell_value(dict(row)); qty=int(row['quantity'] or 1)
+            if qty>1: conn.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(iid,))
+            else: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(iid,))
+            prow=conn.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            if not prow: conn.execute("INSERT INTO players(user_id,display_name,kiwons,created_at,updated_at) VALUES(?,?,?,?,?)",(uid,f'Jugador {uid}',value,int(time.time()),int(time.time())))
+            else: conn.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(value,int(time.time()),uid))
+            conn.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(uid,value,'rpg_sell',uid,None,None,f"Venta {row['item_key']}",int(time.time())))
+            conn.commit(); name=str(row['name']); conn.close(); return True,f"💰 Vendiste {name}.\\n🪙 +{value:,} KW"
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+def create_trade_offer(message,target,inventory_id):
+    uid=int((message.get('from') or {}).get('id') or 0); tid=int(target.get('id') or 0); chat_id=int((message.get('chat') or {}).get('id') or 0); iid=int(inventory_id)
+    if not uid or not tid or uid==tid: return False,"No puedes intercambiar contigo mismo."
+    world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            row=conn.execute("""SELECT i.*,x.name,x.tradeable FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE""",(iid,uid,world)).fetchone()
+            if not row: conn.rollback(); conn.close(); return False,"No encontré ese objeto en tu inventario."
+            if int(row['equipped'] or 0): conn.rollback(); conn.close(); return False,"Desequipa el objeto antes de ofrecerlo."
+            if int(row['locked'] or 0): conn.rollback(); conn.close(); return False,"Ese objeto ya está reservado."
+            if not int(row['tradeable'] or 0) or str(row['item_key'])=='anillo_bodas': conn.rollback(); conn.close(); return False,"Ese objeto no puede intercambiarse."
+            conn.execute("UPDATE rpg_inventory SET locked=1 WHERE id=?",(iid,))
+            rr=conn.execute("INSERT INTO rpg_trade_offers(from_user,to_user,inventory_id,chat_id,status,created_at) VALUES(?,?,?,?, 'pending',?) RETURNING id",(uid,tid,iid,chat_id,now)).fetchone()
+            conn.commit(); oid=int(rr['id']); name=str(row['name']); conn.close()
+        except Exception:
+            conn.rollback(); conn.close(); raise
+    a=_player_name_by_id(uid); b=_player_name_by_id(tid)
+    send_message(chat_id,f"🔄 PROPUESTA DE INTERCAMBIO\\n\\n{a} ofrece a {b}:\\n🎒 {name}\\n\\nSolo {b} puede aceptar o rechazar.",reply_markup={"inline_keyboard":[[{"text":"✅ Aceptar","callback_data":f"trade_accept:{oid}"},{"text":"❌ Rechazar","callback_data":f"trade_reject:{oid}"}]]})
+    return True,""
+
+def answer_trade_offer(offer_id,user_id,accept):
+    oid=int(offer_id); uid=int(user_id); now=int(time.time()); world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        try:
+            off=conn.execute("SELECT * FROM rpg_trade_offers WHERE id=? FOR UPDATE",(oid,)).fetchone()
+            if not off or off['status']!='pending': conn.rollback(); conn.close(); return False,"Ese intercambio ya terminó."
+            if int(off['to_user'])!=uid: conn.rollback(); conn.close(); return False,"Ese intercambio no era para ti."
+            inv=conn.execute("SELECT i.*,x.name FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE",(int(off['inventory_id']),int(off['from_user']),world)).fetchone()
+            if not inv: conn.execute("UPDATE rpg_trade_offers SET status='cancelled',resolved_at=? WHERE id=?",(now,oid)); conn.commit(); conn.close(); return False,"El objeto ya no está disponible."
+            if not accept:
+                conn.execute("UPDATE rpg_inventory SET locked=0 WHERE id=?",(int(inv['id']),)); conn.execute("UPDATE rpg_trade_offers SET status='rejected',resolved_at=? WHERE id=?",(now,oid)); conn.commit(); conn.close(); return True,"❌ Intercambio rechazado. El objeto volvió a estar disponible."
+            char=get_active_character(uid)
+            if not char: conn.rollback(); conn.close(); return False,"Necesitas un personaje activo para recibir el objeto."
+            qty=int(inv['quantity'] or 1)
+            if qty>1:
+                conn.execute("UPDATE rpg_inventory SET quantity=quantity-1,locked=0 WHERE id=?",(int(inv['id']),))
+                conn.execute("""INSERT INTO rpg_inventory(user_id,character_id,world_id,item_key,quantity,equipped,locked,serial_number,acquired_at,acquired_from,forge_level) VALUES(?,?,?,?,1,0,0,?,?,?,?)""",(uid,int(char['id']),world,inv['item_key'],inv['serial_number'],now,f"intercambio:{oid}",int(inv['forge_level'] or 0)))
+            else:
+                conn.execute("UPDATE rpg_inventory SET user_id=?,character_id=?,equipped=0,locked=0,acquired_from=? WHERE id=?",(uid,int(char['id']),f"intercambio:{oid}",int(inv['id'])))
+            conn.execute("UPDATE rpg_trade_offers SET status='accepted',resolved_at=? WHERE id=?",(now,oid)); conn.commit(); name=str(inv['name']); conn.close(); return True,f"✅ Intercambio aceptado.\\n🎒 {name} ahora pertenece a {_player_name_by_id(uid)}."
+        except Exception:
+            conn.rollback(); conn.close(); raise
 
 def show_inventory_item(chat_id,user_id,inventory_id):
     row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
@@ -4911,7 +5000,8 @@ def show_inventory_item(chat_id,user_id,inventory_id):
     if row.get('equip_slot'):
         slot_icons={'arma':'⚔️','casco':'🪖','armadura':'🛡️','guantes':'🧤','botas':'👢','accesorio':'💍'}
         si=slot_icons.get(str(row['equip_slot']),'🎽')
-        text+=f"\n{si} Equipamiento: {row['equip_slot'].title()}\n📈 Nivel requerido: {row['min_level']}\n"+("✅ Compatible" if ok else f"🔒 {reason}")
+        allowed=str(row.get('allowed_classes') or '').strip()
+        text+=f"\n{si} Equipamiento: {row['equip_slot'].title()}\n🎭 Clases: {allowed or 'Todas'}\n📈 Nivel requerido: {row['min_level']}\n"+("✅ Compatible con tu clase" if ok else f"🔒 No compatible: {reason}")
     if int(row.get('equipped') or 0): text+="\n🟢 EQUIPADO"
     kb=item_action_keyboard(row,char)
     if row.get('image_file_id'): send_photo(chat_id,row['image_file_id'],text,reply_markup=kb)
@@ -6000,17 +6090,17 @@ def forge_make(user_id,key,chat_id=None):
 # =========================================================
 
 RPG_SHOP = {
-    "pocion_menor": {"price": 350, "label": "Poción menor", "desc": "Restaura 20% del HP máximo."},
-    "pocion_mayor": {"price": 800, "label": "Poción Mayor", "desc": "Restaura 45% del HP máximo."},
-    "esencia_vital": {"price": 2500, "label": "Esencia Vital", "desc": "En Bosses te levanta antes de los 5 min con 50% HP."},
-    "espada_recluta": {"price": 1800, "label": "Espada del Recluta", "desc": "Equipo básico para clases compatibles."},
-    "baston_aprendiz": {"price": 1800, "label": "Bastón del Aprendiz", "desc": "Equipo básico para Mago."},
-    "dagas_desgastadas": {"price": 1800, "label": "Dagas Desgastadas", "desc": "Equipo básico para Pícaro/The Cleaner."},
-    "arco_cazador": {"price": 1800, "label": "Arco del Cazador", "desc": "Equipo básico para Arquero."},
-    "pechera_cuero": {"price": 1500, "label": "Pechera de Cuero", "desc": "Armadura básica."},
-    "capucha_viajero": {"price": 1100, "label": "Capucha del Viajero", "desc": "Casco básico."},
-    "guantes_viajero": {"price": 900, "label": "Guantes del Viajero", "desc": "Guantes básicos."},
-    "botas_sendero": {"price": 900, "label": "Botas del Sendero", "desc": "Botas básicas."},
+    "pocion_menor": {"price": 220, "label": "Poción menor", "desc": "Restaura 20% del HP máximo."},
+    "pocion_mayor": {"price": 550, "label": "Poción Mayor", "desc": "Restaura 45% del HP máximo."},
+    "esencia_vital": {"price": 1800, "label": "Esencia Vital", "desc": "En Bosses te levanta antes de los 5 min con 50% HP."},
+    "espada_recluta": {"price": 950, "label": "Espada del Recluta", "desc": "Equipo básico para clases compatibles."},
+    "baston_aprendiz": {"price": 950, "label": "Bastón del Aprendiz", "desc": "Equipo básico para Mago."},
+    "dagas_desgastadas": {"price": 950, "label": "Dagas Desgastadas", "desc": "Equipo básico para Pícaro/The Cleaner."},
+    "arco_cazador": {"price": 950, "label": "Arco del Cazador", "desc": "Equipo básico para Arquero."},
+    "pechera_cuero": {"price": 800, "label": "Pechera de Cuero", "desc": "Armadura básica."},
+    "capucha_viajero": {"price": 600, "label": "Capucha del Viajero", "desc": "Casco básico."},
+    "guantes_viajero": {"price": 500, "label": "Guantes del Viajero", "desc": "Guantes básicos."},
+    "botas_sendero": {"price": 500, "label": "Botas del Sendero", "desc": "Botas básicas."},
 }
 
 def rpg_shop_keyboard(user_id):
@@ -6028,8 +6118,12 @@ def rpg_shop_item_text(user_id,key):
         conn=get_db(); item=conn.execute("SELECT * FROM rpg_items WHERE item_key=?",(key,)).fetchone(); conn.close()
     if not item: return None,None
     bal=get_kiwons(user_id)
+    class_info=""
+    if item.get('equip_slot'):
+        allowed=str(item.get('allowed_classes') or '').strip()
+        class_info=f"\n🎭 Clases: {allowed or 'Todas'}\n📈 Nivel requerido: {int(item.get('min_level') or 1)}"
     text=(f"🏪 TIENDA RPG\n\n{RPG_RARITY_ICON.get(item['rarity'],'⚪')} {item['name']}\n"
-          f"{item['description']}\n\n💰 Precio: {cfg['price']:,} KW\n🪙 Tu saldo: {bal:,} KW")
+          f"{item['description']}{class_info}\n\n💰 Precio: {cfg['price']:,} KW\n🪙 Tu saldo: {bal:,} KW")
     kb={"inline_keyboard":[[{"text":f"🛒 Comprar · {cfg['price']:,} KW","callback_data":f"rpg_buy:{key}"}],
                            [{"text":"◀️ Volver a la tienda","callback_data":"rpg_shop"}]]}
     return text,kb
@@ -7447,7 +7541,10 @@ def _quick_keyboard(m):
     if typ=='speed':
         return {"inline_keyboard":[[{"text":"⚡ ¡RECLAMAR!","callback_data":f"qm:{mid}:speed:go"}]]}
     if typ=='draw':
-        return {"inline_keyboard":[[{"text":"🎨 Tomar reto y dibujar","callback_data":f"qm:{mid}:draw:open"}]]}
+        botname=str(get_bot_identity().get('username') or '').strip()
+        if botname:
+            return {"inline_keyboard":[[{"text":"🎨 Abrir lienzo","url":f"https://t.me/{botname}?start=draw_{mid}"}]]}
+        return {"inline_keyboard":[[{"text":"🎨 Abrir lienzo","callback_data":f"qm:{mid}:draw:open"}]]}
     return None
 
 def _quick_reward(m,user_id):
@@ -7543,10 +7640,9 @@ def handle_quick_mission_text(message,text):
         expected=str(m['answer'] or '').strip()
         if raw.casefold()!=expected.casefold(): return False
     elif typ=='draw':
-        # Telegram entrega fotos en `photo`; también aceptamos documento image/*.
-        doc=message.get('document') or {}
-        is_image=bool(message.get('photo')) or str(doc.get('mime_type') or '').startswith('image/')
-        if not is_image: return False
+        # Las misiones de dibujo se entregan únicamente desde el lienzo de KiwBot.
+        # Así todos compiten con la misma herramienta y el servidor decide al primer ganador.
+        return False
     else:
         return False
     ok,msg=_quick_finish(dict(m),uid); send_message(chat_id,msg); return True
@@ -7570,6 +7666,9 @@ def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
             cfg=dict(picked)
         else:
             cfg=dict(random.choice(candidates))
+        # Las relámpago son carreras públicas: recompensa suficiente para que valga competir.
+        cfg['kw']=int(round(int(cfg.get('kw',0))*1.20/50.0)*50)
+        cfg['exp']=int(round(int(cfg.get('exp',0))*1.10))
         answer=str(cfg.get('answer',''))
         if cfg['type']=='number': answer=str(random.randint(1,5))
         row=conn.execute("""INSERT INTO rpg_quick_missions(chat_id,message_thread_id,mission_key,mission_type,title,prompt,answer,payload,reward_kw,reward_exp,reward_item,status,winner_id,message_id,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',0,0,?,?) RETURNING id""",(chat_id,int(topic) if topic is not None else None,cfg['key'],cfg['type'],cfg['title'],cfg['prompt'],answer,'',int(cfg['kw']),int(cfg['exp']),str(cfg.get('item','')),now,now+RPG_QUICK_MISSION_TTL)).fetchone(); qid=int(row['id'])
@@ -7577,7 +7676,11 @@ def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
     with db_lock:
         conn=get_db(); m=dict(conn.execute("SELECT * FROM rpg_quick_missions WHERE id=?",(qid,)).fetchone()); conn.close()
     prize=f"🪙 {m['reward_kw']:,} KW · ✨ {m['reward_exp']:,} EXP"+(" · 💍 Anillo de Bodas" if m['reward_item']=='anillo_bodas' else '')
-    card=f"⚡ MISIÓN RELÁMPAGO\n\n{m['title']}\n{m['prompt']}\n\n🏆 El primero en completarla gana.\n🎁 {prize}\n⏳ 10 minutos."
+    how=""
+    if m['mission_type']=='draw': how="\n\n🎨 Pulsa «Abrir lienzo», dibuja y toca «Entregar dibujo».\n🏁 Abrirlo no reserva nada: gana la PRIMERA entrega válida."
+    elif m['mission_type']=='text': how=f"\n\n✍️ Escribe EXACTAMENTE esta frase en el chat:\n«{m['answer']}»"
+    elif m['mission_type']=='mention': how="\n\n👥 Menciona con @ a otra persona del grupo."
+    card=f"⚡ MISIÓN RELÁMPAGO\n\n{m['title']}\n{m['prompt']}{how}\n\n🏆 El primero en completarla gana.\n🎁 {prize}\n⏳ 10 minutos."
     old=get_current_message_thread_id(); set_current_message_thread_id(topic)
     try:
         sent=send_message(chat_id,card,reply_markup=_quick_keyboard(m))
@@ -8069,19 +8172,25 @@ def send_will_quick_mission_video(chat_id, caption, reply_markup=None):
         return send_message(chat_id,caption,reply_markup=reply_markup)
 
 def _selected_mission_progress(user_id,event=None):
+    """Resumen compacto de las misiones del tablón relacionadas con un evento.
+
+    V9: ya no existe una misión seleccionada. Las 10 del tablón avanzan a la vez.
+    """
     try:
-        uid=int(user_id); cycle=_mission_cycle_id(); key=_mission_selected_key(uid,cycle)
-        if not key: return ""
-        m=next((x for x in _mission_board(cycle) if x["key"]==key),None)
-        if not m and key==RPG_WILL_MYTHIC_MISSION["key"]: m=dict(RPG_WILL_MYTHIC_MISSION)
-        if not m or (event and m["event"]!=event): return ""
+        uid=int(user_id); cycle=_mission_cycle_id()
+        board=[m for m in _mission_board(cycle) if (not event or m["event"]==event)]
+        if not board: return ""
         with db_lock:
-            conn=get_db(); row=conn.execute(
-                "SELECT progress,completed FROM rpg_mission_progress WHERE cycle_id=? AND user_id=? AND mission_key=?",
-                (cycle,uid,key)).fetchone(); conn.close()
-        progress=int(row["progress"] or 0) if row else 0
-        done=bool(int(row["completed"] or 0)) if row else False
-        return f"{'✅' if done else '📜'} Misión: {m['title']} — {progress:,}/{int(m['goal']):,}"
+            conn=get_db(); rows=conn.execute(
+                "SELECT mission_key,progress,completed FROM rpg_mission_progress WHERE cycle_id=? AND user_id=?",
+                (cycle,uid)).fetchall(); conn.close()
+        prog={str(r["mission_key"]):dict(r) for r in rows}
+        pending=[]
+        for m in board:
+            r=prog.get(m["key"],{}); n=min(int(m["goal"]),int(r.get("progress") or 0))
+            if n < int(m["goal"]): pending.append(f"{m['title']} {n:,}/{int(m['goal']):,}")
+        if not pending: return "✅ Misiones de esta actividad completadas."
+        return "📜 Tablón: " + " · ".join(pending[:2]) + (f" · +{len(pending)-2} más" if len(pending)>2 else "")
     except Exception:
         return ""
 
@@ -8092,12 +8201,15 @@ def mission_event(user_id,event,amount=1):
         if not uid or amount<=0: return []
         _mission_ensure_tables()
         cycle=_mission_cycle_id()
-        selected=_mission_selected_key(uid,cycle)
-        if not selected:
-            return []
-        board=[m for m in _mission_board(cycle) if m["event"]==event and m["key"]==selected]
-        if not board and selected==RPG_WILL_MYTHIC_MISSION["key"] and event==RPG_WILL_MYTHIC_MISSION["event"]:
-            board=[dict(RPG_WILL_MYTHIC_MISSION)]
+        # V9: todas las misiones visibles del tablón están activas simultáneamente.
+        board=[m for m in _mission_board(cycle) if m["event"]==event]
+        # El comando de prueba de Will puede preparar 19/20 aunque la mítica no haya salido
+        # en el tablón de este ciclo. Si existe ese progreso, también lo avanzamos.
+        if event==RPG_WILL_MYTHIC_MISSION["event"] and not any(m["key"]==RPG_WILL_MYTHIC_MISSION["key"] for m in board):
+            with db_lock:
+                _c=get_db(); _wr=_c.execute("SELECT progress,completed FROM rpg_mission_progress WHERE cycle_id=? AND user_id=? AND mission_key=?",(cycle,uid,RPG_WILL_MYTHIC_MISSION["key"])).fetchone(); _c.close()
+            if _wr and not bool(int(_wr["completed"] or 0)):
+                board.append(dict(RPG_WILL_MYTHIC_MISSION))
         if not board: return []
         completed=[]
         now=int(time.time())
@@ -8152,7 +8264,6 @@ def mission_event(user_id,event,amount=1):
 def mission_board_text(user_id):
     _mission_ensure_tables()
     uid=int(user_id); cycle=_mission_cycle_id(); board=_mission_board(cycle)
-    selected=_mission_selected_key(uid,cycle)
     with db_lock:
         conn=get_db()
         rows=conn.execute("""SELECT mission_key,progress,completed FROM rpg_mission_progress
@@ -8161,29 +8272,26 @@ def mission_board_text(user_id):
     prog={r["mission_key"]:dict(r) for r in rows}
     left=max(0,_mission_cycle_ends(cycle)-int(time.time()))
     lines=["📜 TABLÓN DE MISIONES","",
-           "Elige la misión que quieres realizar.",
-           "Solo la seleccionada avanza; cambiarla no borra tu progreso.",
+           "⚔️ Las 10 misiones están ACTIVAS al mismo tiempo.",
+           "Juega normalmente: cada acción suma automáticamente en todas las misiones compatibles.",
+           "🎁 Al completar una, la recompensa se entrega sola. No tienes que aceptar ni reclamar nada.",
            f"🔄 Nuevo tablón en {left//3600}h {(left%3600)//60}m",""]
     for i,m in enumerate(board,1):
         r=prog.get(m["key"],{})
         p=min(int(m["goal"]),int(r.get("progress") or 0))
         done=p>=int(m["goal"])
-        mark="✅" if done else ("🎯" if selected==m["key"] else m["icon"])
+        mark="✅" if done else m["icon"]
         rarity="MÍTICA" if m["rarity"]=="mitica" else m["rarity"].replace("_"," ").upper()
         lines.append(f"{i}. {mark} {m['title']} · {rarity}")
         lines.append(f"   {m.get('story','')}")
         lines.append(f"   🎯 {p:,}/{m['goal']:,} · 🪙 {m['reward']:,} KW")
     done_count=sum(1 for m in board if int(prog.get(m["key"],{}).get("progress") or 0)>=int(m["goal"]))
-    lines += ["",f"🏁 Completadas: {done_count}/10"]
+    lines += ["",f"🏁 Completadas: {done_count}/{len(board)} · Todas avanzan simultáneamente"]
     return "\n".join(lines)
 
 def mission_board_keyboard(user_id):
-    c=_mission_cycle_id(); board=_mission_board(c); selected=_mission_selected_key(user_id,c)
-    rows=[]
-    for i,m in enumerate(board,1):
-        prefix="🎯" if selected==m["key"] else ("🔴" if m["rarity"]=="mitica" else m["icon"])
-        rows.append([{"text":f"{prefix} {i}. {m['title']}","callback_data":f"mission_select:{m['key']}"}])
-    return {"inline_keyboard":rows}
+    # Ya no hay selección misión por misión. El botón solo refresca el progreso.
+    return {"inline_keyboard":[[{"text":"🔄 Actualizar progreso","callback_data":"mission_board_refresh"}]]}
 
 
 def _delete_old_combat_card(chat_id,msg):
@@ -8239,6 +8347,26 @@ def handle_rpg_callback(query):
             send_message(chat_id,"La misión tropezó con un slime. Intenta otra vez."); return True
         send_message(chat_id,msg2)
         return True
+    if data.startswith("rpg_sell_offer:"):
+        try: iid=int(data.split(":",1)[1])
+        except Exception: return True
+        row=inventory_item_row(uid,iid)
+        if not row: send_message(chat_id,"No encontré ese objeto."); return True
+        value=rpg_sell_value(row)
+        send_message(chat_id,f"💰 ¿Vender {row['name']} por {value:,} KW?\n\nLa venta es definitiva.",reply_markup={"inline_keyboard":[[{"text":f"💰 Vender · {value:,} KW","callback_data":f"rpg_sell_confirm:{iid}"},{"text":"❌ Cancelar","callback_data":"rpg_sell_cancel"}]]}); return True
+    if data.startswith("rpg_sell_confirm:"):
+        try: iid=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=sell_inventory_item(uid,iid); send_message(chat_id,msg2); return True
+    if data=="rpg_sell_cancel": send_message(chat_id,"Venta cancelada."); return True
+    if data.startswith("rpg_trade_help:"):
+        try: iid=int(data.split(":",1)[1])
+        except Exception: return True
+        send_message(chat_id,f"🔄 Para ofrecer este objeto a alguien usa:\n/intercambio @usuario {iid}\n\nTambién puedes responder a un mensaje suyo con /intercambio {iid}."); return True
+    if data.startswith("trade_accept:") or data.startswith("trade_reject:"):
+        try: oid=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=answer_trade_offer(oid,uid,data.startswith("trade_accept:")); send_message(chat_id,msg2); return True
     if data.startswith("marry_accept:") or data.startswith("marry_reject:"):
         try: mid=int(data.split(":",1)[1])
         except Exception: return True
@@ -8276,12 +8404,11 @@ def handle_rpg_callback(query):
         if ok: _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("mission_select:"):
-        if not _is_private_chat_obj(msg.get("chat")):
-            send_message(chat_id,"🔒 Elige tus misiones en privado.",reply_markup=_private_launch_keyboard("missions"))
-            return True
-        key=data.split(":",1)[1]
-        ok,msg2=mission_select(uid,key)
-        send_message(chat_id,msg2+"\n\n"+mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
+        # Compatibilidad con botones antiguos: ya no se seleccionan misiones.
+        send_message(chat_id,"📜 El tablón cambió: ahora las 10 misiones avanzan al mismo tiempo. Ya no necesitas seleccionar una.",reply_markup=mission_board_keyboard(uid))
+        return True
+    if data=="mission_board_refresh":
+        send_message(chat_id,mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
         return True
     if data.startswith("auto_encounter_claim:"):
         spawn_id=int(data.split(":",1)[1])
@@ -8714,6 +8841,17 @@ def process_command(
             ensure_player(user)
             send_character_creator(chat_id,user.get("id"),origin_chat_id=origin_chat_id or chat_id)
             return True
+        if len(parts)>1 and parts[1].startswith("draw_"):
+            if chat.get("type")!="private": return True
+            try: mid=int(parts[1].split("_",1)[1])
+            except Exception: mid=0
+            with db_lock:
+                conn=get_db(); mm=conn.execute("SELECT * FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
+            if not mm or mm['mission_type']!='draw' or mm['status']!='active' or int(mm['expires_at'])<=int(time.time()):
+                send_message(chat_id,"🎨 Ese reto de dibujo ya terminó o alguien llegó primero."); return True
+            url=f"{PUBLIC_BASE_URL}/rpg/draw?mission={mid}"
+            send_message(chat_id,f"🎨 {mm['title']}\n\n{mm['prompt']}\n\n🏁 El primero que ENTREGUE un dibujo válido gana. Abrir el lienzo no reserva el reto.",reply_markup={"inline_keyboard":[[{"text":"🎨 Abrir lienzo","web_app":{"url":url}}]]})
+            return True
         if len(parts)>1 and parts[1].startswith("merchant_"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
@@ -8815,12 +8953,37 @@ def process_command(
         lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
         send_message(chat_id,"\n".join(lines)); return True
 
+    if command in ("/registrarme", "/registro"):
+        remember_user(chat_id,message.get("from",{})); ensure_player(message.get("from",{}))
+        uname=(message.get("from",{}) or {}).get("username")
+        send_message(chat_id,f"✅ Jugador registrado para menciones e intercambios."+(f"\n👤 @{uname}" if uname else "\n⚠️ Tu cuenta no tiene @username; usa respuestas a mensajes para bodas/intercambios.")); return True
+
+    if command in ("/clases", "/clasesrpg"):
+        send_message(chat_id,"""🎭 CLASES DE KIWRPG
+
+⚔️ Guerrero — 120 HP · 14 ATK · 8 DEF
+Equipo: armas pesadas/medias y armaduras compatibles. Equilibrado y resistente.
+
+🔮 Mago — 85 HP · 18 ATK · 4 DEF
+Equipo: bastones, túnicas y piezas arcanas. Mucho daño, menor resistencia.
+
+🗡️ Pícaro — 95 HP · 16 ATK · 5 DEF
+Equipo: dagas y equipo ligero. Críticos y evasión.
+
+🛡️ Paladín — 130 HP · 11 ATK · 10 DEF
+Equipo: armas y armaduras de Paladín. Defensa, bloqueo y recuperación.
+
+🏹 Arquero — 100 HP · 15 ATK · 6 DEF
+Equipo: arcos y equipo de cazador. Precisión y daño consistente.
+
+💡 Antes de comprar, la tienda ahora muestra «🎭 Clases» y «📈 Nivel requerido». En /inventario cada pieza también indica si es compatible contigo."""); return True
+
     if command in ("/casar", "/proponer", "/matrimonio"):
         if chat.get("type") not in ("group","supergroup"):
             send_message(chat_id,"💍 La propuesta se hace en el grupo para que el momento quede anunciado ante todos."); return True
         target=resolve_target_for_economy(message,text)
         if not target:
-            send_message(chat_id,"💍 Usa /casar @usuario o responde al mensaje de la persona a quien quieres proponerle matrimonio."); return True
+            send_message(chat_id,"💍 No pude identificar a esa persona. La forma infalible es responder a uno de sus mensajes con /casar. Si quieres usar @usuario, pídele que escriba /registrarme una vez en el grupo."); return True
         ok,msg2=propose_marriage(message,target)
         if not ok: send_message(chat_id,msg2)
         return True
@@ -8840,6 +9003,16 @@ def process_command(
         parts=str(text or "").strip().split()
         if len(parts)<2 or not parts[1].isdigit(): send_message(chat_id,"🤝 Usa /compartiritem ID. El ID aparece al abrir el objeto desde /inventario."); return True
         ok,msg2=share_inventory_item_with_spouse(user_id,int(parts[1])); send_message(chat_id,msg2); return True
+
+    if command in ("/intercambio", "/intercambiar", "/trade"):
+        pp=str(text or '').strip().split()
+        target=resolve_target_for_economy(message,text)
+        iid=next((int(x) for x in pp[1:] if x.isdigit()),0)
+        if not target or not iid:
+            send_message(chat_id,"🔄 Usa /intercambio @usuario ID o responde al mensaje de la persona con /intercambio ID. El ID aparece al abrir un objeto en /inventario."); return True
+        ok,msg2=create_trade_offer(message,target,iid)
+        if not ok: send_message(chat_id,msg2)
+        return True
 
     if command in ("/divorcio", "/divorciar"):
         target=resolve_target_for_economy(message,text)
@@ -8873,7 +9046,7 @@ def process_command(
     if command in ("/testboda", "/testcasar"):
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
         target=resolve_target_for_economy(message,text)
-        if not target: send_message(chat_id,"🧪 Usa /testboda @usuario o responde a su mensaje."); return True
+        if not target: send_message(chat_id,"🧪 No pude resolver ese @. Haz que esa persona escriba /registrarme o responde directamente a uno de sus mensajes con /testboda."); return True
         if not _marriage_ring_row(user_id):
             char=get_active_character(user_id)
             if char: grant_rpg_item(user_id,int(char['id']),'anillo_bodas','test_boda_auto')
@@ -8890,9 +9063,7 @@ def process_command(
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
         _mission_ensure_tables(); c=_mission_cycle_id(); m=RPG_WILL_MYTHIC_MISSION
         with db_lock:
-            conn=get_db(); conn.execute("""INSERT INTO rpg_mission_selected(cycle_id,user_id,mission_key,selected_at) VALUES(?,?,?,?)
-                ON CONFLICT(cycle_id,user_id) DO UPDATE SET mission_key=EXCLUDED.mission_key,selected_at=EXCLUDED.selected_at""",(c,int(user_id),m['key'],int(time.time())))
-            conn.execute("""INSERT INTO rpg_mission_progress(cycle_id,user_id,mission_key,progress,completed,rewarded,updated_at) VALUES(?,?,?,19,0,0,?)
+            conn=get_db(); conn.execute("""INSERT INTO rpg_mission_progress(cycle_id,user_id,mission_key,progress,completed,rewarded,updated_at) VALUES(?,?,?,19,0,0,?)
                 ON CONFLICT(cycle_id,user_id,mission_key) DO UPDATE SET progress=19,completed=0,rewarded=0,updated_at=EXCLUDED.updated_at""",(c,int(user_id),m['key'],int(time.time())))
             conn.commit(); conn.close()
         send_message(chat_id,"🧪 Misión de Will preparada en 19/20. Tu próxima victoria PvE debe completar El Asesino Aéreo, desbloquear Hidden Blade y mostrar el MP4."); return True
@@ -8903,7 +9074,7 @@ def process_command(
              "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo · /kiwons — Kiwons\n"
              "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge · /forjador · /mejorar — Forja y mejoras +15\n🏪 /tienda · /shop — Tienda\n"
              "🐾 /mascota · /mascotas · /pets — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales · /mats — Materiales\n\n"
-             "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — Tablón privado\n⚡ /eventorpg · /misionactual — Misión Relámpago activa\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
+             "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — 10 misiones simultáneas\n⚡ /eventorpg · /misionactual — Misión Relámpago activa\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
              "🧹 /resetcombate · /reiniciarcombate — Liberar tu combate si se traba\n🏃 /huir · /cancelar_combate — Abandonar PvE\n"
              "👹 /boss — Boss activo\n📚 /bosses — Lista de Bosses\n⚡ /omega · /kennyomega — Kenny Omega\n🥇 /rankingomega — Ranking Omega\n"
              "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse · /rendicion — Rendirse\n📊 /pvp · /perfilpvp — Perfil PvP\n🥇 /rankingpvp · /toppvp — Ranking PvP\n\n"

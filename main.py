@@ -9433,7 +9433,7 @@ def cloudflare_generate_test_image():
             "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
             "Content-Type": "application/json",
         },
-        json={"prompt": prompt},
+        json={"prompt": prompt, "num_steps": 4},
         timeout=90,
     )
     if response.status_code != 200:

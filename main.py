@@ -613,6 +613,26 @@ def init_db():
             ON rpg_auto_encounters(chat_id,status,expires_at)
         """)
 
+        # KiwRPG V7.2: mazmorras horarias.
+        cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_dungeon_at BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS dungeon_event_id BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS dungeon_room BIGINT NOT NULL DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_dungeons (
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
+                dungeon_key TEXT NOT NULL, dungeon_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                message_id BIGINT NOT NULL DEFAULT 0, spawned_at BIGINT NOT NULL, expires_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dungeons_chat_status ON rpg_dungeons(chat_id,status,expires_at)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_dungeon_runs (
+                dungeon_id BIGINT NOT NULL, user_id BIGINT NOT NULL, room BIGINT NOT NULL DEFAULT 1,
+                completed BIGINT NOT NULL DEFAULT 0, started_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+                PRIMARY KEY(dungeon_id,user_id)
+            )
+        """)
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_assets (
                 asset_key TEXT PRIMARY KEY,
@@ -2188,9 +2208,8 @@ def _dice_key(chat_id):
 
 def send_dice(chat_id, emoji="🎲", reply_to_message_id=None):
     """Lanza el dado sin borrar nada en el camino crítico del combate."""
+    # No usamos reply_to_message_id: la tarjeta puede desaparecer antes de que Telegram procese el dado.
     data = {"chat_id": chat_id, "emoji": emoji}
-    if reply_to_message_id:
-        data["reply_parameters"] = {"message_id": reply_to_message_id}
     result=telegram("sendDice", data)
     try:
         mid=int((((result or {}).get("result") or {}).get("message_id") or 0))
@@ -4171,7 +4190,7 @@ def _rpg_enemy_damage(battle, eff, defending=False):
     return enemy_roll, dmg
 
 
-def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0):
+def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0, dungeon_event_id=0, dungeon_room=0):
     char = get_active_character(user_id)
     if not char:
         return False, "Necesitas un personaje activo. Usa /crear_personaje."
@@ -4198,8 +4217,8 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
         conn = get_db()
         conn.execute("""
             INSERT INTO rpg_battles
-            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id)
-            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'',?,?,?)
+            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id,dungeon_event_id,dungeon_room)
+            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'',?,?,?,?,?)
             ON CONFLICT(chat_id,user_id) DO UPDATE SET
                 character_id=excluded.character_id, enemy_key=excluded.enemy_key,
                 enemy_name=excluded.enemy_name, enemy_hp=excluded.enemy_hp,
@@ -4208,8 +4227,8 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
                 started_at=excluded.started_at, updated_at=excluded.updated_at,
                 ultimate_cd=0, special_cd=0, defending=0, last_action='',
                 encounter_rarity=excluded.encounter_rarity, encounter_number=excluded.encounter_number,
-                auto_spawn_id=excluded.auto_spawn_id
-        """, (int(chat_id),int(user_id),int(char["id"]),base["key"],enemy_name,enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now,rarity,encounter_number,int(auto_spawn_id or 0)))
+                auto_spawn_id=excluded.auto_spawn_id, dungeon_event_id=excluded.dungeon_event_id, dungeon_room=excluded.dungeon_room
+        """, (int(chat_id),int(user_id),int(char["id"]),base["key"],enemy_name,enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now,rarity,encounter_number,int(auto_spawn_id or 0),int(dungeon_event_id or 0),int(dungeon_room or 0)))
         conn.commit(); conn.close()
     eff=effective_character_stats(char)
     rare_note = ""
@@ -4387,6 +4406,22 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     +(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels!=1 else ''}! Nivel {newstats['level']}." if levels else ""))
                 drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"],encounter_rarity)
                 if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
+                dungeon_id=int(battle.get("dungeon_event_id") or 0); dungeon_room=int(battle.get("dungeon_room") or 0)
+                if dungeon_id>0:
+                    if dungeon_room<RPG_DUNGEON_ROOMS:
+                        nr=dungeon_room+1
+                        with db_lock:
+                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
+                        e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
+                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=_rpg_combat_keyboard(user_id))
+                    else:
+                        with db_lock:
+                            dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
+                            if first: dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id)))
+                            dc.commit(); dc.close()
+                        if first:
+                            change_kiwons(user_id,RPG_DUNGEON_FINAL_KW,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra {dungeon_id} completada"); grant_rpg_exp(char["id"],RPG_DUNGEON_FINAL_EXP)
+                            send_message(chat_id,f"🏆 ¡MAZMORRA COMPLETADA!\n🪙 Bono final: +{RPG_DUNGEON_FINAL_KW} KW\n⭐ Bono final: +{RPG_DUNGEON_FINAL_EXP} EXP")
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -6730,6 +6765,18 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 # =========================================================
 RPG_AUTO_ENCOUNTER_INTERVAL = 3 * 60
 RPG_AUTO_ENCOUNTER_TTL = 2 * 60 + 40
+RPG_DUNGEON_INTERVAL = 60 * 60
+RPG_DUNGEON_TTL = 20 * 60
+RPG_DUNGEON_ROOMS = 3
+RPG_DUNGEON_FINAL_KW = 1500
+RPG_DUNGEON_FINAL_EXP = 300
+RPG_DUNGEONS = [
+    {"key":"ruinas","name":"🏚️ Ruinas del Reino Caído"},
+    {"key":"cripta","name":"⚰️ Cripta de las Almas"},
+    {"key":"bosque","name":"🌲 Laberinto del Bosque Negro"},
+    {"key":"volcan","name":"🌋 Foso del Dragón"},
+    {"key":"abismo","name":"🌑 Santuario del Abismo"},
+]
 
 RPG_AUTO_STORIES = [
     "🌲 Algo se mueve entre los árboles cerca del camino.",
@@ -6748,13 +6795,14 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
     now=int(time.time())
     with db_lock:
         conn=get_db()
-        conn.execute("""INSERT INTO rpg_auto_chats(chat_id,message_thread_id,next_spawn_at,updated_at)
-                        VALUES(?,?,?,?)
+        conn.execute("""INSERT INTO rpg_auto_chats(chat_id,message_thread_id,next_spawn_at,next_dungeon_at,updated_at)
+                        VALUES(?,?,?,?,?)
                         ON CONFLICT(chat_id) DO UPDATE SET
                           message_thread_id=EXCLUDED.message_thread_id,
+                          next_dungeon_at=CASE WHEN rpg_auto_chats.next_dungeon_at<=0 THEN EXCLUDED.next_dungeon_at ELSE rpg_auto_chats.next_dungeon_at END,
                           updated_at=EXCLUDED.updated_at""",
                      (int(chat_id),int(message_thread_id) if message_thread_id is not None else None,
-                      now+RPG_AUTO_ENCOUNTER_INTERVAL,now))
+                      now+RPG_AUTO_ENCOUNTER_INTERVAL,now+RPG_DUNGEON_INTERVAL,now))
         conn.commit(); conn.close()
 
 def _auto_encounter_card(enemy, story):
@@ -6770,9 +6818,13 @@ def _auto_spawn_one(chatrow, now=None):
     now=int(now or time.time())
     chat_id=int(chatrow["chat_id"])
     topic=chatrow.get("message_thread_id")
-    # No apilar apariciones pendientes.
+    # La mazmorra tiene prioridad sobre los monstruos automáticos.
     with db_lock:
         conn=get_db()
+        dungeon=conn.execute("""SELECT id FROM rpg_dungeons WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1""",(chat_id,now)).fetchone()
+        if dungeon:
+            conn.execute("UPDATE rpg_auto_chats SET next_spawn_at=?,updated_at=? WHERE chat_id=?",(now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id))
+            conn.commit(); conn.close(); return False
         pending=conn.execute("""SELECT id FROM rpg_auto_encounters
              WHERE chat_id=? AND status='pending' AND expires_at>? LIMIT 1""",(chat_id,now)).fetchone()
         if pending:
@@ -6806,6 +6858,53 @@ def _auto_spawn_one(chatrow, now=None):
         conn.commit(); conn.close()
     return bool(mid)
 
+def _active_dungeon(chat_id, now=None):
+    now=int(now or time.time())
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_dungeons WHERE chat_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(int(chat_id),now)).fetchone(); conn.close()
+    return row
+
+def _spawn_dungeon(chatrow, now=None):
+    now=int(now or time.time()); chat_id=int(chatrow["chat_id"]); topic=chatrow.get("message_thread_id"); d=random.choice(RPG_DUNGEONS)
+    with db_lock:
+        conn=get_db()
+        active=conn.execute("SELECT id FROM rpg_dungeons WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
+        if active:
+            conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
+        pending=conn.execute("SELECT message_id FROM rpg_auto_encounters WHERE chat_id=? AND status='pending'",(chat_id,)).fetchall()
+        old_ids=[int(x.get("message_id") or 0) for x in pending if int(x.get("message_id") or 0)>0]
+        conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE chat_id=? AND status='pending'",(chat_id,))
+        row=conn.execute("INSERT INTO rpg_dungeons(chat_id,message_thread_id,dungeon_key,dungeon_name,status,message_id,spawned_at,expires_at) VALUES(?,?,?,?,'active',0,?,?) RETURNING id",(chat_id,int(topic) if topic is not None else None,d["key"],d["name"],now,now+RPG_DUNGEON_TTL)).fetchone()
+        did=int(row["id"]); conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,next_spawn_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id)); conn.commit(); conn.close()
+    for mid in old_ids:
+        try: delete_message(chat_id,mid)
+        except Exception: pass
+    old=get_current_message_thread_id()
+    try:
+        set_current_message_thread_id(topic)
+        sent=send_message(chat_id,f"🏰 MAZMORRA ALEATORIA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\nCada aventurero puede hacer su propia expedición.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{did}"}]]})
+    finally: set_current_message_thread_id(old)
+    mid=int((((sent or {}).get("result") or {}).get("message_id") or 0)) if isinstance(sent,dict) else 0
+    with db_lock:
+        conn=get_db(); conn.execute("UPDATE rpg_dungeons SET message_id=?,status=? WHERE id=?",(mid,'active' if mid else 'send_failed',did)); conn.commit(); conn.close()
+    return bool(mid)
+
+def enter_dungeon(chat_id,user_id,dungeon_id):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(int(dungeon_id),)).fetchone()
+        if not d or int(d["chat_id"])!=int(chat_id) or d["status"]!='active' or int(d["expires_at"])<=now:
+            conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró."
+        battle=conn.execute("SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
+        if battle:
+            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes un combate activo. Termínalo antes de entrar a la mazmorra."
+        run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(int(dungeon_id),int(user_id))).fetchone()
+        if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
+        if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
+        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; conn.commit(); conn.close()
+    enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=enemy["key"],dungeon_event_id=dungeon_id,dungeon_room=room)
+    return (True,f"🏰 {name}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
+
 def rpg_auto_world_tick(now=None):
     now=int(now or time.time())
     # Primero limpia monstruos ignorados.
@@ -6815,6 +6914,9 @@ def rpg_auto_world_tick(now=None):
             WHERE status='pending' AND expires_at<=?""",(now,)).fetchall()
         for r in expired:
             conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE id=?",(int(r["id"]),))
+        expired_dungeons=conn.execute("SELECT * FROM rpg_dungeons WHERE status='active' AND expires_at<=?",(now,)).fetchall()
+        for d in expired_dungeons: conn.execute("UPDATE rpg_dungeons SET status='expired' WHERE id=?",(int(d["id"]),))
+        dungeon_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE next_dungeon_at<=?",(now,)).fetchall()
         due=conn.execute("SELECT * FROM rpg_auto_chats WHERE next_spawn_at<=?",(now,)).fetchall()
         conn.commit(); conn.close()
     for rr in expired:
@@ -6822,7 +6924,18 @@ def rpg_auto_world_tick(now=None):
         if int(r.get("message_id") or 0):
             try: delete_message(int(r["chat_id"]),int(r["message_id"]))
             except Exception: pass
+    for rr in expired_dungeons:
+        d=dict(rr)
+        if int(d.get("message_id") or 0):
+            try: delete_message(int(d["chat_id"]),int(d["message_id"]))
+            except Exception: pass
+    dungeon_due_chats=set()
+    for rr in dungeon_due:
+        dungeon_due_chats.add(int(rr["chat_id"]))
+        try: _spawn_dungeon(dict(rr),now)
+        except Exception: logger.exception("Error creando mazmorra automática en chat %s",rr["chat_id"])
     for rr in due:
+        if int(rr["chat_id"]) in dungeon_due_chats: continue
         try: _auto_spawn_one(dict(rr),now)
         except Exception: logger.exception("Error creando encuentro automático en chat %s",rr["chat_id"])
 
@@ -7211,7 +7324,7 @@ def help_revive_player(helper_id,target_id):
         return False,"No puedes levantarte tú mismo. 😌"
     with db_lock:
         conn=get_db()
-        target=conn.execute("SELECT * FROM characters WHERE user_id=? AND active=1 FOR UPDATE",(target_id,)).fetchone()
+        target=conn.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1 FOR UPDATE",(target_id,)).fetchone()
         if not target:
             conn.rollback(); conn.close(); return False,"Ese jugador no tiene un personaje activo."
         if int(target["hp"])>0 or int(target.get("defeated_until") or 0)<=int(time.time()):
@@ -7237,6 +7350,12 @@ def help_revive_player(helper_id,target_id):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("rpg_dungeon_enter:"):
+        try: dungeon_id=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
+        send_message(chat_id,msg2,reply_markup=_rpg_combat_keyboard(uid) if ok else None)
+        return True
     if data.startswith("rpg_help_revive:"):
         try: target_id=int(data.split(":",1)[1])
         except Exception: return True
@@ -7909,7 +8028,26 @@ def process_command(
         send_message(chat_id,mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
         return True
 
+    if command == "/mazmorra":
+        d=_active_dungeon(chat_id)
+        if not d:
+            send_message(chat_id,"🏰 No hay una mazmorra abierta ahora mismo. Aparece una aproximadamente cada hora."); return True
+        left=max(1,int((int(d["expires_at"])-time.time()+59)//60))
+        send_message(chat_id,f"🏰 {d['dungeon_name']}\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ quedan ~{left} min",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{int(d['id'])}"}]]}); return True
+
+    if command == "/testmazmorra":
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede forzar una mazmorra de prueba."); return True
+        register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        with db_lock:
+            tc=get_db(); row=tc.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); tc.close()
+        if row and _spawn_dungeon(dict(row),int(time.time())): send_message(chat_id,"🧪 Mazmorra de prueba creada.")
+        else: send_message(chat_id,"Ya hay una mazmorra activa o no se pudo crear.")
+        return True
+
     if command in ("/encuentro", "/combatir"):
+        if _active_dungeon(chat_id):
+            send_message(chat_id,"🏰 Hay una mazmorra abierta. Mientras siga activa, los encuentros normales quedan en pausa. Usa /mazmorra para entrar."); return True
         user = message.get("from", {})
         ensure_player(user)
         ensure_owner_secret_character(user)

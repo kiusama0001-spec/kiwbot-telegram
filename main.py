@@ -706,6 +706,40 @@ def init_db():
             )
         """)
 
+        # KiwRPG V9 — clanes, temporadas y World Boss mensual.
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_clans (
+            id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, owner_id BIGINT NOT NULL,
+            created_at BIGINT NOT NULL
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_clan_members (
+            clan_id BIGINT NOT NULL, user_id BIGINT NOT NULL UNIQUE, role TEXT NOT NULL DEFAULT 'member',
+            joined_at BIGINT NOT NULL, PRIMARY KEY(clan_id,user_id)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_clan_members_clan ON rpg_clan_members(clan_id)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_event_state (
+            chat_id BIGINT PRIMARY KEY, event_key TEXT NOT NULL DEFAULT '', event_year BIGINT NOT NULL DEFAULT 0,
+            event_month BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'inactive',
+            started_at BIGINT NOT NULL DEFAULT 0, ends_at BIGINT NOT NULL DEFAULT 0,
+            boss_hp BIGINT NOT NULL DEFAULT 0, boss_max_hp BIGINT NOT NULL DEFAULT 0,
+            boss_defeated BIGINT NOT NULL DEFAULT 0, last_announcement BIGINT NOT NULL DEFAULT 0
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_event_players (
+            chat_id BIGINT NOT NULL, event_key TEXT NOT NULL, user_id BIGINT NOT NULL,
+            currency BIGINT NOT NULL DEFAULT 0, total_damage BIGINT NOT NULL DEFAULT 0, total_attacks BIGINT NOT NULL DEFAULT 0,
+            attacks_day TEXT NOT NULL DEFAULT '', attacks_today BIGINT NOT NULL DEFAULT 0, daily_reward_day TEXT NOT NULL DEFAULT '',
+            boss_reward_claimed BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL,
+            PRIMARY KEY(chat_id,event_key,user_id)
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_event_purchases (
+            chat_id BIGINT NOT NULL,event_key TEXT NOT NULL,user_id BIGINT NOT NULL,reward_key TEXT NOT NULL,
+            quantity BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL,PRIMARY KEY(chat_id,event_key,user_id,reward_key)
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_dungeon_party_members (
+            dungeon_id BIGINT NOT NULL,user_id BIGINT NOT NULL,joined_at BIGINT NOT NULL,
+            room_cleared BIGINT NOT NULL DEFAULT 0,completed BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY(dungeon_id,user_id)
+        )""")
+
         # KiwRPG V2: mundos, salón histórico, drops e interacciones.
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_world_state (
@@ -3829,7 +3863,11 @@ def send_rpg_image(chat_id, asset_key, caption="", reply_markup=None):
     cache_key = f"img:{asset_key}"
     cached = _rpg_asset_get(cache_key)
     if cached:
-        return send_photo(chat_id, cached, caption, reply_markup=reply_markup)
+        sent=send_photo(chat_id, cached, caption, reply_markup=reply_markup)
+        # Si Telegram invalida un file_id, olvidarlo y re-subir el archivo local.
+        if sent and sent.get("ok") is not False:
+            return sent
+        _rpg_asset_forget(cache_key)
 
     path = rpg_asset_path(asset_key)
     if not path or not TELEGRAM_API:
@@ -4238,8 +4276,23 @@ def exp_needed(level):
     return max(100, level * 100)
 
 
+RPG_CLAN_EXP_BONUS = 20
+
+def rpg_user_clan(user_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute("""SELECT c.*,m.role FROM rpg_clan_members m JOIN rpg_clans c ON c.id=m.clan_id WHERE m.user_id=? LIMIT 1""",(int(user_id),)).fetchone(); conn.close()
+    return row
+
 def grant_rpg_exp(character_id, amount):
     amount = max(0, int(amount))
+    # Todo EXP ganado por un miembro de clan recibe +20%, sin duplicar lógica en cada modo.
+    try:
+        with db_lock:
+            _c=get_db(); _r=_c.execute("SELECT user_id FROM characters WHERE id=?",(int(character_id),)).fetchone(); _c.close()
+        if _r and rpg_user_clan(int(_r['user_id'])):
+            amount=max(0,int(round(amount*1.20)))
+    except Exception:
+        logger.exception("No pude aplicar bonus EXP de clan")
     with db_lock:
         conn = get_db()
         try:
@@ -4466,14 +4519,27 @@ def get_rpg_battle(chat_id, user_id):
     return row
 
 
+_RPG_ASSET_RAM = {}
+_RPG_ASSET_RAM_LOCK = RLock()
+
 def _rpg_asset_get(key):
+    # Hot path: RAM -> PostgreSQL. Telegram file_id sigue siendo la fuente reutilizable.
+    with _RPG_ASSET_RAM_LOCK:
+        hit=_RPG_ASSET_RAM.get(str(key),"")
+    if hit: return hit
     with db_lock:
         conn=get_db(); row=conn.execute("SELECT telegram_file_id FROM rpg_assets WHERE asset_key=?",(key,)).fetchone(); conn.close()
-    return (row["telegram_file_id"] if row else "") or ""
+    fid=(row["telegram_file_id"] if row else "") or ""
+    if fid:
+        with _RPG_ASSET_RAM_LOCK: _RPG_ASSET_RAM[str(key)]=fid
+    return fid
 
+def _rpg_asset_forget(key):
+    with _RPG_ASSET_RAM_LOCK: _RPG_ASSET_RAM.pop(str(key),None)
 
 def _rpg_asset_set(key, file_id):
     if not file_id: return
+    with _RPG_ASSET_RAM_LOCK: _RPG_ASSET_RAM[str(key)]=str(file_id)
     with db_lock:
         conn=get_db()
         conn.execute("""INSERT INTO rpg_assets(asset_key,telegram_file_id,updated_at) VALUES (?,?,?)
@@ -4562,6 +4628,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 damage=max(1,int(round(raw)))
                 pet_pct=_pet_bonus(user_id,"pve_damage")
                 if pet_pct: damage=max(1,int(round(damage*(1.0+pet_pct/100.0))))
+                if opening_event_bonus_active(): damage=max(1,int(round(damage*1.15)))
                 if roll>=5 and ability.get("high_roll_bonus"):
                     damage=max(1,int(round(damage*(1.0+float(ability["high_roll_bonus"])))))
                 if ability.get("execute") and enemy_hp <= int(battle["enemy_max_hp"])*0.35:
@@ -4587,6 +4654,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 exp_pct=_pet_bonus(user_id,"exp"); kw_pct=_pet_bonus(user_id,"kiwons")
                 if exp_pct: reward_exp=max(1,int(round(reward_exp*(1.0+exp_pct/100.0))))
                 if kw_pct: reward_kw=max(1,int(round(reward_kw*(1.0+kw_pct/100.0))))
+                if opening_event_bonus_active():
+                    reward_exp=max(1,int(round(reward_exp*1.30)))
+                    reward_kw=max(1,int(round(reward_kw*1.20)))
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
@@ -4614,8 +4684,21 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     for _ in range(qty):
                         if grant_rpg_item(user_id,int(char["id"]),"polvo_forja",f"monstruo:{battle['enemy_key']}"): got+=1
                     if got: send_message(chat_id,f"🧱 El monstruo dejó Polvo de Forja ×{got}.")
+                # Drop de temporada adicional: nunca reemplaza el loot normal.
+                try:
+                    _st=_event_auto_sync(chat_id); _cfg=_event_cfg_from_state(_st)
+                    if _cfg and random.random()<0.55:
+                        _qty=random.randint(1,4)
+                        with db_lock:
+                            _ec=get_db(); event_player_row(chat_id,_cfg['key'],user_id,False,_ec); _ec.execute("UPDATE rpg_event_players SET currency=currency+?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?",(_qty,int(time.time()),int(chat_id),_cfg['key'],int(user_id))); _ec.commit(); _ec.close()
+                        send_message(chat_id,f"{_cfg['icon']} El monstruo dejó {_qty} ficha{'s' if _qty!=1 else ''} de temporada.")
+                except Exception: logger.exception("Error entregando drop de temporada")
                 dungeon_id=int(battle.get("dungeon_event_id") or 0); dungeon_room=int(battle.get("dungeon_room") or 0)
                 if dungeon_id>0:
+                    try:
+                        with db_lock:
+                            _dc=get_db(); _dc.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=? AND user_id=?",(dungeon_room,dungeon_id,int(user_id))); _dc.commit(); _dc.close()
+                    except Exception: logger.exception("No pude actualizar progreso cooperativo de mazmorra")
                     if dungeon_room<RPG_DUNGEON_ROOMS:
                         nr=dungeon_room+1
                         with db_lock:
@@ -4628,10 +4711,13 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                             if first: dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id)))
                             dc.commit(); dc.close()
                         if first:
-                            change_kiwons(user_id,RPG_DUNGEON_FINAL_KW,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra {dungeon_id} completada"); grant_rpg_exp(char["id"],RPG_DUNGEON_FINAL_EXP)
+                            with db_lock:
+                                _pc=get_db(); _pn=_pc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); _pc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=? AND user_id=?",(RPG_DUNGEON_ROOMS,dungeon_id,int(user_id))); _pc.commit(); _pc.close()
+                            _party=max(1,int(_pn['n'] if _pn else 1)); _coop=1.0+min(0.40,0.10*(_party-1)); _kw=int(round(RPG_DUNGEON_FINAL_KW*_coop)); _xp=int(round(RPG_DUNGEON_FINAL_EXP*_coop))
+                            change_kiwons(user_id,_kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada"); grant_rpg_exp(char["id"],_xp)
                             chest=roll_dungeon_completion_loot(user_id,int(char["id"]),dungeon_id)
                             chest_txt=(f"\n🎁 Cofre final: {RPG_RARITY_ICON.get(chest['rarity'],'⚪')} {chest['name']}" if chest else "")
-                            send_message(chat_id,f"🏆 ¡MAZMORRA COMPLETADA!\n🪙 Bono final: +{RPG_DUNGEON_FINAL_KW} KW\n⭐ Bono final: +{RPG_DUNGEON_FINAL_EXP} EXP{chest_txt}")
+                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 Expedición: {_party} aventureros · bonus de equipo +{int((_coop-1)*100)}%\n🪙 Bono final: +{_kw} KW\n⭐ Bono final: +{_xp} EXP{chest_txt}")
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -7221,6 +7307,237 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 # =========================================================
 RPG_AUTO_ENCOUNTER_INTERVAL = 3 * 60
 RPG_AUTO_ENCOUNTER_TTL = 2 * 60 + 40
+# =========================================================
+# KIWRPG V9 — CLANES + EVENTOS MENSUALES + WORLD BOSS
+# =========================================================
+
+RPG_EVENT_ATTACKS_PER_DAY=5
+RPG_EVENT_DAILY_KW=750
+RPG_EVENT_BOSS_REWARD_KW=15000
+RPG_EVENT_BOSS_REWARD_CURRENCY=150
+RPG_EVENT_BOSS_REWARD_DUST=20
+
+_EVENT_THEMES={
+ 1:("❄️","Invierno Eterno"),2:("💘","Festival de los Vínculos"),3:("🍀","Fortuna Esmeralda"),
+ 4:("🐰","Despertar de Primavera"),5:("🌸","Jardines del Reino"),6:("☀️","Solsticio de Fuego"),
+ 7:("⚔️","Festival de Campeones"),8:("🌊","Mareas Antiguas"),9:("🌙","Luna de los Errantes"),
+ 10:("🎃","Noche de las Sombras"),11:("💀","Festival de las Almas"),12:("🎄","Reino de Invierno")}
+_EVENT_BOSSES={
+ 2026:["Coloso Boreal","Corazón Encadenado","Rey Trébol","Liebre del Vacío","Reina de Espinas","Ifrit Solar","Campeón Sin Rostro","Leviatán Azul","Lobo Lunar","Rey Calabaza","Mictlán, Devorador de Almas","Krampus, Señor de la Escarcha"],
+ 2027:["Ymir de Cristal","Serafín Carmesí","Dragón Esmeralda","Titán de Polen","Dama de las Mil Flores","Fénix del Mediodía","Gladiador Eterno","Emperador Abisal","Oráculo de la Luna","Catrina Carmesí","Guardián del Mictlán","Rey del Invierno Negro"],
+ 2028:["Reina de la Ventisca","Bestia de los Juramentos","Fortuna Devoradora","Ciervo Primordial","Coloso del Jardín","Dragón del Sol","Señor de la Arena","Serpiente de las Mareas","Eclipse Viviente","Señor de las Calabazas","Rey de las Ofrendas","Estrella del Fin de Año"]}
+_EVENT_WEAPON_WORDS={2026:("Filo","Guardián"),2027:("Hoja","Centinela"),2028:("Arma","Heraldo")}
+_EVENT_PET_NAMES={2026:["Lobito Boreal","Cupido Menor","Duende Esmeralda","Conejo Astral","Zorro Florido","Salamandra Solar","León Joven","Nutria Abisal","Búho Lunar","Murciélago Calabaza","Xolo Guardián","Reno Rúnico"],2027:["Pingüino de Cristal","Paloma Carmesí","Gato Fortuna","Liebre Celeste","Colibrí Real","Fénix Joven","Grifo Campeón","Tortuga Marina","Kitsune Lunar","Cuervo de Halloween","Alebrije Espectral","Zorro de Nieve"],2028:["Foca Boreal","Lince del Vínculo","Serpiente Jade","Ciervo Primaveral","Mariposa Arcana","Lagarto Solar","Tigre de Arena","Caballito Abisal","Cuervo Eclipse","Gato Calabaza","Cuervo del Mictlán","Dragón de Nieve"]}
+
+def _event_cfg(year,month):
+    year=int(year); month=int(month)
+    if year not in (2026,2027,2028) or month not in range(1,13): return None
+    icon,title=_EVENT_THEMES[month]; boss=_EVENT_BOSSES[year][month-1]; pet=_EVENT_PET_NAMES[year][month-1]
+    key=f"event_{year}_{month:02d}"
+    return {"key":key,"year":year,"month":month,"icon":icon,"title":title,"boss":boss,"pet":pet,
+            "currency":f"{icon} Fichas {year}","boss_hp":1450000 + (year-2026)*180000 + month*12000,
+            "weapon":f"{_EVENT_WEAPON_WORDS[year][0]} de {title} — {year}","armor":f"{_EVENT_WEAPON_WORDS[year][1]} de {title} — {year}"}
+
+# Registrar las 36 mascotas de temporada en memoria para que sigan siendo utilizables tras reinicios.
+for _ey in (2026,2027,2028):
+    for _em in range(1,13):
+        _ecfg=_event_cfg(_ey,_em); _pk=f"eventpet_{_ey}_{_em:02d}"
+        RPG_PETS.setdefault(_pk,{"name":_ecfg['pet'],"icon":_ecfg['icon'],"rarity":"Evento","weight":0,"bonus":"exp","pct":5,"desc":f"+5% EXP. Exclusiva de {_ecfg['title']} {_ey}."})
+
+def _opening_cfg():
+    return {"key":"opening_2026","year":2026,"month":10,"icon":"🎊","title":"Festival de Apertura","boss":"Aeternus, Guardián de la Primera Puerta","pet":"Kiwito Fundador","currency":"🎟️ Fichas de Apertura","boss_hp":1200000,"weapon":"Hoja del Fundador — 2026","armor":"Emblema del Fundador — 2026"}
+
+def _event_today_key(): return time.strftime('%Y-%m-%d',time.localtime())
+
+def opening_event_bonus_active():
+    try:
+        now=int(time.time())
+        with db_lock:
+            c=get_db(); r=c.execute("SELECT 1 FROM rpg_event_state WHERE event_key='opening_2026' AND status='active' AND ends_at>=? LIMIT 1",(now,)).fetchone(); c.close()
+        return bool(r)
+    except Exception: return False
+
+def _event_get(chat_id):
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT * FROM rpg_event_state WHERE chat_id=?",(int(chat_id),)).fetchone(); c.close()
+    return r
+
+def _event_cfg_from_state(st):
+    if not st:return None
+    if st['event_key']=='opening_2026': return _opening_cfg()
+    return _event_cfg(int(st['event_year']),int(st['event_month']))
+
+def _event_month_bounds(year,month):
+    import calendar
+    start=int(time.mktime((year,month,1,0,0,0,0,0,-1)))
+    last=calendar.monthrange(year,month)[1]
+    end=int(time.mktime((year,month,last,23,59,59,0,0,-1)))
+    return start,end
+
+def _event_activate(chat_id,cfg,forced=False):
+    now=int(time.time()); y,m=cfg['year'],cfg['month']; start,end=_event_month_bounds(y,m)
+    if cfg['key']=='opening_2026': end=int(time.mktime((2026,10,30,23,59,59,0,0,-1)))
+    with db_lock:
+        c=get_db(); c.execute("""INSERT INTO rpg_event_state(chat_id,event_key,event_year,event_month,status,started_at,ends_at,boss_hp,boss_max_hp,boss_defeated,last_announcement)
+        VALUES(?,?,?,?,'active',?,?,?,?,0,?) ON CONFLICT(chat_id) DO UPDATE SET event_key=excluded.event_key,event_year=excluded.event_year,event_month=excluded.event_month,status='active',started_at=excluded.started_at,ends_at=excluded.ends_at,boss_hp=excluded.boss_hp,boss_max_hp=excluded.boss_max_hp,boss_defeated=0,last_announcement=excluded.last_announcement""",
+        (int(chat_id),cfg['key'],y,m,now,end,int(cfg['boss_hp']),int(cfg['boss_hp']),now)); c.commit(); c.close()
+    return cfg
+
+def _event_auto_sync(chat_id,now=None):
+    now=int(now or time.time()); lt=time.localtime(now); y,m=lt.tm_year,lt.tm_mon
+    st=_event_get(chat_id)
+    # Apertura manda hasta el 30/10/2026 inclusive.
+    if st and st['status']=='active' and st['event_key']=='opening_2026' and now<=int(st['ends_at']): return st
+    # 31 de octubre abre anticipadamente Halloween/Día de Muertos, que continúa todo noviembre.
+    cfg=_event_cfg(y,11) if (m==10 and lt.tm_mday==31) else _event_cfg(y,m)
+    if not cfg:return st
+    if not st or st['status']!='active' or st['event_key']!=cfg['key']:
+        if st and st.get('status')=='active' and st.get('event_key')!=cfg['key']:
+            oldcfg=_event_cfg_from_state(st)
+            if oldcfg:
+                if oldcfg['key']=='opening_2026':
+                    send_message(chat_id,"🌅 EL FESTIVAL DE APERTURA HA TERMINADO\n\nLas puertas ya están abiertas. Los bonus inaugurales y las Fichas de Apertura dejan de aparecer, pero todo lo conseguido permanece contigo.\n\nEstuviste aquí cuando todavía no existían leyendas. Ahora comienza la verdadera aventura.")
+                else:
+                    send_message(chat_id,f"🌙 {oldcfg['title']} {oldcfg['year']} HA TERMINADO\n\nLa tienda y los drops de temporada se cierran. Los objetos, mascotas y recuerdos conseguidos permanecen en tu colección.\n\nUna temporada termina... y otra está por comenzar.")
+        _event_activate(chat_id,cfg); st=_event_get(chat_id)
+        send_message(chat_id,f"{cfg['icon']} EVENTO DE TEMPORADA — {cfg['title']} {cfg['year']}\n\n👑 World Boss: {cfg['boss']}\n⚔️ 5 ataques diarios por aventurero.\n🎁 Moneda, materiales, equipo, pociones de nivel y una mascota exclusiva esperan durante la temporada.\n\n/eventos · /bossevento · /tiendaevento")
+    return st
+
+def event_player_row(chat_id,event_key,user_id,lock=False,conn=None):
+    own=conn is None; c=conn or get_db(); now=int(time.time())
+    c.execute("""INSERT INTO rpg_event_players(chat_id,event_key,user_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(chat_id,event_key,user_id) DO NOTHING""",(int(chat_id),event_key,int(user_id),now))
+    q="SELECT * FROM rpg_event_players WHERE chat_id=? AND event_key=? AND user_id=?"+(" FOR UPDATE" if lock else "")
+    r=c.execute(q,(int(chat_id),event_key,int(user_id))).fetchone()
+    if own: c.commit(); c.close()
+    return r
+
+def event_boss_card(chat_id,user_id):
+    st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
+    if not st or not cfg:return "📅 No hay temporada programada para esta fecha.",None
+    p=event_player_row(chat_id,cfg['key'],user_id); day=_event_today_key(); used=int(p['attacks_today']) if p and p['attacks_day']==day else 0
+    hp=max(0,int(st['boss_hp'])); mx=max(1,int(st['boss_max_hp'])); pct=100*hp/mx
+    txt=(f"👑 {cfg['boss']}\n{cfg['icon']} {cfg['title']} — {cfg['year']}\n\n❤️ {hp:,}/{mx:,} HP ({pct:.1f}%)\n⚔️ Tus ataques de hoy: {used}/{RPG_EVENT_ATTACKS_PER_DAY}\n💥 Tu contribución: {int(p['total_damage'] if p else 0):,}\n🪙 Moneda del evento: {int(p['currency'] if p else 0):,}\n\nCada día tienes 5 ataques. El primer ataque del día entrega materiales de participación.")
+    kb=None if int(st['boss_defeated']) else {"inline_keyboard":[[{"text":"⚔️ ATACAR","callback_data":"event_boss_attack"}],[{"text":"🛍️ Tienda del evento","callback_data":"event_shop"}]]}
+    return txt,kb
+
+def event_boss_attack(chat_id,user_id):
+    st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
+    if not st or not cfg:return False,"No hay evento activo."
+    if int(st['boss_defeated']):return False,"👑 Ese World Boss ya fue derrotado."
+    if not char:return False,"Primero crea y activa un personaje."
+    day=_event_today_key(); now=int(time.time())
+    with db_lock:
+        c=get_db(); p=event_player_row(chat_id,cfg['key'],user_id,True,c)
+        used=int(p['attacks_today']) if p['attacks_day']==day else 0
+        if used>=RPG_EVENT_ATTACKS_PER_DAY: c.rollback(); c.close(); return False,"🌙 Ya usaste tus 5 ataques de hoy. Vuelven mañana."
+        st2=c.execute("SELECT * FROM rpg_event_state WHERE chat_id=? FOR UPDATE",(int(chat_id),)).fetchone()
+        if not st2 or int(st2['boss_defeated']): c.rollback(); c.close(); return False,"El World Boss ya cayó."
+        eff=effective_character_stats(char); base=max(40,int(eff['atk'])*12 + int(char['level'])*5); dmg=max(1,int(round(base*random.uniform(.82,1.22))))
+        pet=_pet_bonus(user_id,'boss_damage'); dmg=int(round(dmg*(1+pet/100))) if pet else dmg
+        if is_user_married(user_id): dmg=int(round(dmg*(1+RPG_MARRIAGE_BOSS_BONUS/100)))
+        nh=max(0,int(st2['boss_hp'])-dmg); dead=nh<=0
+        first_daily=(p['daily_reward_day']!=day)
+        c.execute("UPDATE rpg_event_state SET boss_hp=?,boss_defeated=? WHERE chat_id=?",(nh,1 if dead else 0,int(chat_id)))
+        c.execute("""UPDATE rpg_event_players SET attacks_day=?,attacks_today=?,total_damage=total_damage+?,total_attacks=total_attacks+1,currency=currency+?,daily_reward_day=?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?""",
+                  (day,used+1,dmg,8 if first_daily else random.randint(1,4),day if first_daily else p['daily_reward_day'],now,int(chat_id),cfg['key'],int(user_id)))
+        c.commit(); c.close()
+    extra=""
+    if first_daily:
+        change_kiwons(user_id,RPG_EVENT_DAILY_KW,'event_daily',chat_id=chat_id,note=cfg['key'])
+        try: grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"evento:{cfg['key']}:diario")
+        except Exception: pass
+        extra=f"\n🎁 Participación diaria: +{RPG_EVENT_DAILY_KW} KW · +8 fichas · material de forja."
+    if dead:
+        _event_distribute_boss_rewards(chat_id,cfg)
+        return True,f"⚔️ {dmg:,} de daño.\n\n💀 ¡{cfg['boss']} HA CAÍDO!\nLa recompensa comunitaria fue desbloqueada para los participantes válidos.{extra}"
+    return True,f"⚔️ Golpeas a {cfg['boss']} por {dmg:,}.\n❤️ Le quedan {nh:,} HP.\n⚔️ Ataques restantes hoy: {RPG_EVENT_ATTACKS_PER_DAY-used-1}/5{extra}"
+
+def _event_distribute_boss_rewards(chat_id,cfg):
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT * FROM rpg_event_players WHERE chat_id=? AND event_key=? AND total_attacks>=10 AND boss_reward_claimed=0 FOR UPDATE",(int(chat_id),cfg['key'])).fetchall()
+        for r in rows:
+            c.execute("UPDATE rpg_event_players SET currency=currency+?,boss_reward_claimed=1,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?",(RPG_EVENT_BOSS_REWARD_CURRENCY,int(time.time()),int(chat_id),cfg['key'],int(r['user_id'])))
+        c.commit(); c.close()
+    for r in rows:
+        uid=int(r['user_id']); change_kiwons(uid,RPG_EVENT_BOSS_REWARD_KW,'event_boss',chat_id=chat_id,note=cfg['key'])
+        ch=get_active_character(uid)
+        if ch:
+            for _ in range(RPG_EVENT_BOSS_REWARD_DUST):
+                try: grant_rpg_item(uid,int(ch['id']),'polvo_forja',f"boss_evento:{cfg['key']}")
+                except Exception: break
+    send_message(chat_id,f"🏆 RECOMPENSA COMUNITARIA\n\n{cfg['boss']} fue derrotado.\nLos aventureros con 10+ ataques reciben +{RPG_EVENT_BOSS_REWARD_KW:,} KW, +{RPG_EVENT_BOSS_REWARD_CURRENCY} fichas y materiales especiales.\n\nCada golpe importó.")
+
+def event_shop_text(chat_id,user_id):
+    st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
+    if not cfg:return "No hay evento activo.",None
+    p=event_player_row(chat_id,cfg['key'],user_id); cur=int(p['currency'] or 0)
+    txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n\n⚔️ {cfg['weapon']} — 180\n🛡️ {cfg['armor']} — 220\n🧪 Poción de Ascenso (+1 nivel) — 300 · límite 1\n🐾 {cfg['pet']} — 400 · límite 1\n\nLos objetos llevan su año y no se reciclan en otra temporada.")
+    kb={"inline_keyboard":[[{"text":"⚔️ Arma · 180","callback_data":"event_buy:weapon"},{"text":"🛡️ Armadura · 220","callback_data":"event_buy:armor"}],[{"text":"🧪 +1 nivel · 300","callback_data":"event_buy:level"},{"text":"🐾 Mascota · 400","callback_data":"event_buy:pet"}]]}
+    return txt,kb
+
+def _event_reward_item(cfg,kind):
+    key=f"{cfg['key']}_{kind}"; now=int(time.time())
+    if kind=='weapon': vals=(key,cfg['weapon'],'ultra_raro','arma',f"Edición exclusiva {cfg['year']} de {cfg['title']}.",5,1,5,'arma','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',10)
+    else: vals=(key,cfg['armor'],'raro','armadura',f"Edición exclusiva {cfg['year']} de {cfg['title']}.",1,4,20,'armadura','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',10)
+    with db_lock:
+        c=get_db(); c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level) VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,?) ON CONFLICT(item_key) DO NOTHING""",(*vals[:8],now,*vals[8:])); c.commit(); c.close()
+    return key
+
+def event_buy(chat_id,user_id,kind):
+    prices={'weapon':180,'armor':220,'level':300,'pet':400}; price=prices.get(kind)
+    if not price:return False,'Recompensa desconocida.'
+    st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
+    if not cfg or not char:return False,'Necesitas un evento y personaje activo.'
+    limit=1 if kind in ('level','pet') else 99
+    with db_lock:
+        c=get_db(); p=event_player_row(chat_id,cfg['key'],user_id,True,c); q=c.execute("SELECT quantity FROM rpg_event_purchases WHERE chat_id=? AND event_key=? AND user_id=? AND reward_key=?",(int(chat_id),cfg['key'],int(user_id),kind)).fetchone(); bought=int(q['quantity'] if q else 0)
+        if bought>=limit: c.rollback(); c.close(); return False,'Ya compraste el máximo de esa recompensa esta temporada.'
+        if int(p['currency'])<price: c.rollback(); c.close(); return False,f'Te faltan {price-int(p["currency"])} fichas.'
+        c.execute("UPDATE rpg_event_players SET currency=currency-?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?",(price,int(time.time()),int(chat_id),cfg['key'],int(user_id)))
+        c.execute("""INSERT INTO rpg_event_purchases(chat_id,event_key,user_id,reward_key,quantity,updated_at) VALUES(?,?,?,?,1,?) ON CONFLICT(chat_id,event_key,user_id,reward_key) DO UPDATE SET quantity=rpg_event_purchases.quantity+1,updated_at=excluded.updated_at""",(int(chat_id),cfg['key'],int(user_id),kind,int(time.time()))); c.commit(); c.close()
+    if kind in ('weapon','armor'):
+        ik=_event_reward_item(cfg,kind); grant_rpg_item(user_id,int(char['id']),ik,f"tienda_evento:{cfg['key']}"); return True,f"🎁 Obtuviste {cfg[kind]}"
+    if kind=='level':
+        need=max(1,exp_needed(int(char['level']))); stats,gained=grant_rpg_exp(int(char['id']),need); return True,f"🧪 Bebes la Poción de Ascenso. ¡Subiste {max(1,gained)} nivel!"
+    petkey=f"eventpet_{cfg['year']}_{cfg['month']:02d}"; RPG_PETS[petkey]={"name":cfg['pet'],"icon":cfg['icon'],"rarity":"Evento","weight":0,"bonus":"exp","pct":5,"desc":"+5% EXP. Mascota exclusiva de temporada."}
+    with db_lock:
+        c=get_db(); anyp=c.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? LIMIT 1",(int(user_id),)).fetchone(); c.execute("INSERT INTO rpg_pets_owned(user_id,pet_key,copies,equipped,obtained_at) VALUES(?,?,1,?,?) ON CONFLICT(user_id,pet_key) DO UPDATE SET copies=rpg_pets_owned.copies+1",(int(user_id),petkey,0 if anyp else 1,int(time.time()))); c.commit(); c.close()
+    return True,f"🐾 {cfg['pet']} se unió a tu colección."
+
+def clan_create(user_id,name):
+    name=re.sub(r'\\s+',' ',str(name or '').strip())[:32]
+    if len(name)<3:return False,'El nombre del clan debe tener al menos 3 caracteres.'
+    if rpg_user_clan(user_id):return False,'Ya perteneces a un clan.'
+    with db_lock:
+        c=get_db()
+        try:
+            row=c.execute("INSERT INTO rpg_clans(name,owner_id,created_at) VALUES(?,?,?) RETURNING id",(name,int(user_id),int(time.time()))).fetchone(); c.execute("INSERT INTO rpg_clan_members(clan_id,user_id,role,joined_at) VALUES(?,?,'leader',?)",(int(row['id']),int(user_id),int(time.time()))); c.commit(); c.close(); return True,f"🏰 Clan {name} creado. Sus miembros reciben +20% EXP."
+        except Exception:
+            c.rollback(); c.close(); return False,'Ese nombre de clan ya existe.'
+
+def clan_join(user_id,clan_id):
+    if rpg_user_clan(user_id):return False,'Ya perteneces a un clan.'
+    with db_lock:
+        c=get_db(); clan=c.execute("SELECT * FROM rpg_clans WHERE id=?",(int(clan_id),)).fetchone()
+        if not clan:c.close();return False,'No existe ese clan.'
+        c.execute("INSERT INTO rpg_clan_members(clan_id,user_id,role,joined_at) VALUES(?,?,'member',?)",(int(clan_id),int(user_id),int(time.time()))); c.commit(); c.close()
+    return True,f"⚔️ Te uniste a {clan['name']}. Bonus activo: +20% EXP."
+
+def clan_leave(user_id):
+    cl=rpg_user_clan(user_id)
+    if not cl:return False,'No perteneces a ningún clan.'
+    if cl['role']=='leader':return False,'El líder no puede abandonar el clan mientras siga siendo líder.'
+    with db_lock:
+        c=get_db(); c.execute("DELETE FROM rpg_clan_members WHERE user_id=?",(int(user_id),)); c.commit(); c.close()
+    return True,'🚪 Has abandonado el clan. El +20% EXP deja de aplicarse.'
+
+def clan_card(user_id):
+    cl=rpg_user_clan(user_id)
+    if not cl:return '🏰 No perteneces a un clan.\n/crearclan Nombre · /unirclan ID'
+    with db_lock:
+        c=get_db(); n=c.execute("SELECT COUNT(*) n FROM rpg_clan_members WHERE clan_id=?",(int(cl['id']),)).fetchone(); c.close()
+    return f"🏰 {cl['name']} · ID {cl['id']}\n👥 {int(n['n'])} miembros\n✨ Bonus de clan: +20% EXP\n🎖️ Tu rango: {cl['role']}"
+
 RPG_DUNGEON_INTERVAL = 60 * 60
 RPG_DUNGEON_TTL = 20 * 60
 RPG_DUNGEON_ROOMS = 3
@@ -7925,9 +8242,10 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
         run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(int(dungeon_id),int(user_id))).fetchone()
         if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
         if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
-        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; conn.commit(); conn.close()
+        conn.execute("INSERT INTO rpg_dungeon_party_members(dungeon_id,user_id,joined_at,room_cleared,completed) VALUES(?,?,?,0,0) ON CONFLICT(dungeon_id,user_id) DO NOTHING",(int(dungeon_id),int(user_id),now))
+        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone(); conn.commit(); conn.close()
     enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=enemy["key"],dungeon_event_id=dungeon_id,dungeon_room=room)
-    return (True,f"🏰 {name}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
+    return (True,f"🏰 {name}\n👥 Expedición cooperativa: {int(party['n'])} aventureros\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
 
 def spawn_will_epic_event(chatrow, now=None):
     chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
@@ -7989,6 +8307,12 @@ def rpg_auto_world_tick(now=None):
     for rr in merchant_due:
         try: spawn_merchant(dict(rr),now)
         except Exception: logger.exception("Error creando Mercader Errante en chat %s",rr["chat_id"])
+    # Mantiene las temporadas mensuales sincronizadas sin crear un hilo adicional.
+    try:
+        with db_lock:
+            _ec=get_db(); _echats=_ec.execute("SELECT chat_id FROM rpg_auto_chats WHERE enabled=1").fetchall(); _ec.close()
+        for _er in _echats: _event_auto_sync(int(_er['chat_id']),now)
+    except Exception: logger.exception("Error sincronizando eventos mensuales")
     dungeon_due_chats=set()
     for rr in dungeon_due:
         dungeon_due_chats.add(int(rr["chat_id"]))
@@ -8495,6 +8819,13 @@ def handle_rpg_callback(query):
                 "A veces dos caminos se encuentran sin estar destinados a convertirse en uno. Y también está bien: "
                 "cada aventura merece continuar con sinceridad.")
         return True
+    if data=="event_boss_attack":
+        ok,msg2=event_boss_attack(chat_id,uid); send_message(chat_id,msg2)
+        txt,kb=event_boss_card(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="event_shop":
+        txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("event_buy:"):
+        kind=data.split(":",1)[1]; ok,msg2=event_buy(chat_id,uid,kind); send_message(chat_id,msg2); return True
     if data.startswith("rpg_dungeon_enter:"):
         try: dungeon_id=int(data.split(":",1)[1])
         except Exception: return True
@@ -9426,6 +9757,64 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not m: send_message(chat_id,"⚡ No hay una Misión Relámpago activa ahora mismo."); return True
         prize=f"🪙 {int(m['reward_kw']):,} KW · ✨ {int(m['reward_exp']):,} EXP"+(" · 💍 Anillo de Bodas" if m['reward_item']=='anillo_bodas' else '')
         send_message(chat_id,f"⚡ MISIÓN RELÁMPAGO ACTIVA\n\n{m['title']}\n{m['prompt']}\n\n🎁 {prize}",reply_markup=_quick_keyboard(dict(m))); return True
+
+    if command=="/registrarimagen":
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede registrar arte oficial."); return True
+        key=(parts[1].strip() if len(parts)>1 else '')
+        rep=(message.get('reply_to_message') or {}); photos=rep.get('photo') or []
+        if not key or not photos:
+            send_message(chat_id,"Responde a una imagen con /registrarimagen enemy:golem_piedra (o cualquier asset_key).") ; return True
+        fid=photos[-1].get('file_id')
+        if not fid: send_message(chat_id,"No pude leer el file_id de esa imagen."); return True
+        _rpg_asset_set(f"img:{key}",fid); send_message(chat_id,f"🖼️ Arte oficial registrado: {key}\nTelegram reutilizará este file_id sin volver a subir la imagen."); return True
+    if command=="/borrarimagenrpg":
+        if not is_owner(user_id): return True
+        key=(parts[1].strip() if len(parts)>1 else '')
+        if key:
+            _rpg_asset_forget(f"img:{key}")
+            with db_lock:
+                c=get_db(); c.execute("DELETE FROM rpg_assets WHERE asset_key=?",(f"img:{key}",)); c.commit(); c.close()
+            send_message(chat_id,f"🧹 Asset {key} eliminado del registro.")
+        return True
+
+    if command in ("/clan","/miclan"):
+        send_message(chat_id,clan_card(user_id)); return True
+    if command=="/crearclan":
+        name=parts[1] if len(parts)>1 else ''
+        ok,msg2=clan_create(user_id,name); send_message(chat_id,msg2); return True
+    if command=="/unirclan":
+        try: cid=int(parts[1].strip()) if len(parts)>1 else 0
+        except Exception: cid=0
+        if not cid: send_message(chat_id,"Usa /unirclan ID. El ID aparece en /clan de sus miembros."); return True
+        ok,msg2=clan_join(user_id,cid); send_message(chat_id,msg2); return True
+    if command=="/salirclan":
+        ok,msg2=clan_leave(user_id); send_message(chat_id,msg2); return True
+
+    if command in ("/eventos","/evento"):
+        st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
+        if not cfg: send_message(chat_id,"📅 No hay evento programado para esta fecha."); return True
+        left=max(0,int((int(st['ends_at'])-time.time())//86400))
+        send_message(chat_id,f"{cfg['icon']} {cfg['title']} — {cfg['year']}\n👑 {cfg['boss']}\n⏳ ~{left} días restantes\n\n⚔️ 5 ataques diarios · 🎁 recompensas de participación\n/bossevento · /tiendaevento"); return True
+    if command=="/bossevento":
+        txt,kb=event_boss_card(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
+    if command=="/tiendaevento":
+        txt,kb=event_shop_text(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
+    if command=="/iniciarevento":
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede iniciar manualmente un evento."); return True
+        arg=(parts[1].strip().lower() if len(parts)>1 else '')
+        if arg!='apertura': send_message(chat_id,"Por ahora el evento manual especial es /iniciarevento apertura"); return True
+        cfg=_opening_cfg(); _event_activate(chat_id,cfg,True); send_message(chat_id,"🎊 LAS PUERTAS DE KIWRPG SE HAN ABIERTO\n\nComienza el Festival de Apertura 2026.\n✨ Bonificaciones inaugurales · ⚔️ desafíos especiales · 🎟️ recompensas de fundador.\n👑 Aeternus espera a la comunidad.\n\nEl festival cerrará automáticamente el 30 de octubre a las 23:59."); return True
+    if command=="/testbossevento":
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede probar el World Boss."); return True
+        st=_event_auto_sync(chat_id); txt,kb=event_boss_card(chat_id,user_id); send_message(chat_id,"🧪 PRUEBA DE WORLD BOSS\n\n"+txt,reply_markup=kb); return True
+    if command=="/boss1hpevento":
+        if not is_owner(user_id): return True
+        st=_event_auto_sync(chat_id)
+        if st:
+            with db_lock:
+                c=get_db(); c.execute("UPDATE rpg_event_state SET boss_hp=1,boss_defeated=0 WHERE chat_id=?",(int(chat_id),)); c.commit(); c.close()
+            send_message(chat_id,"🧪 World Boss dejado a 1 HP.")
+        return True
 
     if command == "/mazmorra":
         d=_active_dungeon(chat_id)

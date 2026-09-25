@@ -616,6 +616,22 @@ def init_db():
         # KiwRPG V7.2: mazmorras horarias.
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_dungeon_at BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1")
+        cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_merchant_at BIGINT NOT NULL DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_merchants (
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'active', message_id BIGINT NOT NULL DEFAULT 0,
+                spawned_at BIGINT NOT NULL, expires_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_merchant_offers (
+                id BIGSERIAL PRIMARY KEY, merchant_id BIGINT NOT NULL, item_key TEXT NOT NULL,
+                price BIGINT NOT NULL, sold_by BIGINT NOT NULL DEFAULT 0, sold_at BIGINT NOT NULL DEFAULT 0,
+                UNIQUE(merchant_id,item_key)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_merchants_chat_status ON rpg_merchants(chat_id,status,expires_at)")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS dungeon_event_id BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS dungeon_room BIGINT NOT NULL DEFAULT 0")
         cur.execute("""
@@ -5746,10 +5762,16 @@ RPG_FORGE_RECIPES = {
 
 def forge_upgrade_requirements(next_level):
     lv=max(1,min(15,int(next_level)))
-    # 1-5:1, 6-10:2, 11-15:3. Total 30 Polvos para +15.
-    dust=1 if lv<=5 else (2 if lv<=10 else 3)
-    kw=100*lv
-    return dust,kw
+    table={
+        1:(1,300,1.00),2:(1,300,1.00),3:(1,300,1.00),
+        4:(2,500,0.95),5:(2,500,0.95),
+        6:(3,750,0.85),7:(3,750,0.85),
+        8:(4,1000,0.75),9:(4,1000,0.75),
+        10:(5,1500,0.65),11:(5,1500,0.65),
+        12:(7,2000,0.55),13:(7,2000,0.55),
+        14:(9,3000,0.45),15:(12,5000,0.35),
+    }
+    return table[lv]
 
 def forge_upgrade_item(user_id, inventory_id, chat_id=None):
     row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
@@ -5757,37 +5779,39 @@ def forge_upgrade_item(user_id, inventory_id, chat_id=None):
     if not row.get("equip_slot"): return False,"Ese objeto no se puede reforzar."
     level=int(row.get("forge_level") or 0)
     if level>=15: return False,f"🏆 {row['name']} ya alcanzó +15."
-    nxt=level+1; dust,cost=forge_upgrade_requirements(nxt); world=current_rpg_world()
+    nxt=level+1; dust,cost,chance=forge_upgrade_requirements(nxt); world=current_rpg_world()
     owned=_forge_owned_materials(user_id)
-    if owned.get("polvo_forja",0)<dust: return False,f"🧱 Necesitas {dust} Polvo de Forja para subir a +{nxt}."
-    if get_kiwons(user_id)<cost: return False,f"🪙 Necesitas {cost:,} KW para subir a +{nxt}."
-    ok,balance,error=change_kiwons(user_id,-cost,"rpg_upgrade",chat_id=chat_id,note=f"Mejora {row['item_key']} +{nxt}")
+    if owned.get("polvo_forja",0)<dust: return False,f"🧱 Necesitas {dust} Polvo de Forja para intentar +{nxt}."
+    if get_kiwons(user_id)<cost: return False,f"🪙 Necesitas {cost:,} KW para intentar +{nxt}."
+    ok,balance,error=change_kiwons(user_id,-cost,"rpg_upgrade",chat_id=chat_id,note=f"Intento mejora {row['item_key']} +{nxt}")
     if not ok: return False,"No tienes suficientes KW."
+    success=random.random()<chance
     try:
         with db_lock:
             conn=get_db()
             try:
                 live=conn.execute("SELECT * FROM rpg_inventory WHERE id=? AND user_id=? FOR UPDATE",(int(inventory_id),int(user_id))).fetchone()
                 if not live: raise RuntimeError("item_missing")
-                # Si una pieza común está apilada, separa una antes de mejorarla.
                 target_id=int(inventory_id)
                 if int(live.get("quantity") or 1)>1:
-                    # La fila pulsada se convierte en UNA pieza mejorable; el resto queda apilado aparte.
                     remainder=int(live.get("quantity") or 1)-1
                     conn.execute("UPDATE rpg_inventory SET quantity=1 WHERE id=?",(target_id,))
                     conn.execute("""INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id,forge_level)
                         VALUES(?,?,?,NULL,?,0,0,?,'separado_forja',?,?,0)""",
                         (int(user_id),int(char['id']),row['item_key'],remainder,int(time.time()),world,int(user_id)))
                 if not _consume_forge_materials(conn,user_id,world,{"polvo_forja":dust}): raise RuntimeError("dust_changed")
-                conn.execute("UPDATE rpg_inventory SET forge_level=? WHERE id=? AND user_id=?",(nxt,target_id,int(user_id)))
+                if success: conn.execute("UPDATE rpg_inventory SET forge_level=? WHERE id=? AND user_id=?",(nxt,target_id,int(user_id)))
                 conn.commit(); conn.close()
             except Exception:
                 conn.rollback(); conn.close(); raise
     except Exception:
         change_kiwons(user_id,cost,"rpg_upgrade_refund",chat_id=chat_id,note="Reembolso mejora")
-        return False,"⚠️ La mejora no se completó. Tus KW fueron devueltos."
+        return False,"⚠️ El intento no se procesó. Tus KW fueron devueltos."
+    if not success:
+        return False,(f"💥 FORJA FALLIDA — +{level} → +{nxt}\n\n{row['name']} resistió el golpe, pero la mejora no prendió.\n"
+                      f"🎯 Probabilidad: {int(chance*100)}% · 🧱 -{dust} Polvo · 🪙 -{cost:,} KW\n\n🛡️ El objeto NO se rompe ni baja de nivel.")
     fb=_forge_level_bonus(row.get('equip_slot'),nxt)
-    return True,(f"🔨 FORJA +{nxt}\n\n{row['name']} fue reforzado.\n🧱 -{dust} Polvo de Forja · 🪙 -{cost:,} KW\n"
+    return True,(f"🔨 FORJA +{nxt}\n\n{row['name']} fue reforzado.\n🎯 Éxito: {int(chance*100)}% · 🧱 -{dust} Polvo · 🪙 -{cost:,} KW\n"
                  f"⚔️ Bonus de mejora: +{fb['atk']} ATK · 🛡️ +{fb['defense']} DEF · ❤️ +{fb['hp']} HP\n\n🏆 Máximo: +15")
 
 def _forge_owned_materials(user_id):
@@ -7028,6 +7052,107 @@ def roll_dungeon_completion_loot(user_id, character_id, dungeon_id):
     pool=RPG_DUNGEON_LOOT_POOLS[rarity]
     return grant_rpg_item(user_id,character_id,random.choice(pool),f"mazmorra:{int(dungeon_id)}:cofre")
 
+RPG_MERCHANT_INTERVAL = 2 * 60 * 60
+RPG_MERCHANT_TTL = 20 * 60
+RPG_MERCHANT_RARITY_WEIGHTS = [("comun",38),("poco_comun",34),("raro",21),("ultra_raro",7)]
+RPG_MERCHANT_PHRASES = [
+    "¿Qué compran? ¿Qué venden?... perdón, vieja costumbre.",
+    "No soy Xûr, pero también aparezco cuando me da la gana.",
+    "Mi mercancía es totalmente legal. Fuente: créeme, aventurero.",
+    "Escuché que alguien necesitaba equipo. Yo necesito sus Kiwons. Qué coincidencia.",
+    "No puedes derrotarme para quedarte con el inventario. Ya lo intentaron.",
+    "Los precios subieron. Culpa de la inflación de Hyrule.",
+    "Miren gratis. Respirar cerca de lo ultra raro ya cuesta.",
+    "Hey, you. You're finally awake... perdón, siempre quise decir eso.",
+]
+RPG_MERCHANT_BUY_PHRASES=["Gracias por tus Kiwons. Ahora son mis Kiwons.","Excelente elección. Probablemente.","Sin devoluciones; esto no es un menú de guardado.","Objeto adquirido. El sonido de Zelda tienes que imaginarlo tú."]
+
+def _merchant_private_url(merchant_id):
+    username=get_bot_identity().get("username","")
+    return f"https://t.me/{username}?start=merchant_{int(merchant_id)}" if username else ""
+
+def _merchant_price(rarity,min_level=1):
+    base={"comun":900,"poco_comun":2200,"raro":4800,"ultra_raro":9500}.get(str(rarity),1500)
+    return int(base + max(0,int(min_level or 1)-1)*120)
+
+def _merchant_active(chat_id=None, now=None):
+    now=int(now or time.time())
+    with db_lock:
+        conn=get_db()
+        if chat_id is None: row=conn.execute("SELECT * FROM rpg_merchants WHERE status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(now,)).fetchone()
+        else: row=conn.execute("SELECT * FROM rpg_merchants WHERE chat_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(int(chat_id),now)).fetchone()
+        conn.close()
+    return row
+
+def merchant_private_text_keyboard(merchant_id):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); m=conn.execute("SELECT * FROM rpg_merchants WHERE id=?",(int(merchant_id),)).fetchone()
+        offers=conn.execute("""SELECT o.*,i.name,i.rarity,i.equip_slot,i.min_level FROM rpg_merchant_offers o JOIN rpg_items i ON i.item_key=o.item_key WHERE o.merchant_id=? ORDER BY o.id""",(int(merchant_id),)).fetchall(); conn.close()
+    if not m or m['status']!='active' or int(m['expires_at'])<=now: return "🐪 Malkor ya levantó el puesto. Volverá en otra ocasión.",None
+    left=max(1,(int(m['expires_at'])-now+59)//60); lines=["🐪 MALKOR, EL MERCADER ERRANTE","",f"—{random.choice(RPG_MERCHANT_PHRASES)}","",f"⏳ Se marcha en ~{left} min.","🌍 Stock GLOBAL: solo existe 1 unidad de cada pieza.",""]
+    kb=[]
+    for o in offers:
+        icon=_inventory_item_icon(dict(o)); rare=RPG_RARITY_ICON.get(o['rarity'],'⚪'); sold=int(o['sold_by'] or 0)>0
+        lines.append(f"{icon} {rare} {o['name']} — {int(o['price']):,} KW — {'❌ AGOTADO' if sold else '1/1'}")
+        kb.append([{"text":f"❌ AGOTADO · {o['name']}" if sold else f"{icon} Comprar · {o['name']} · {int(o['price']):,} KW","callback_data":f"merchant_buy:{int(o['id'])}" if not sold else "merchant_sold"}])
+    return "\n".join(lines),{"inline_keyboard":kb}
+
+def spawn_merchant(chatrow, now=None, forced=False):
+    now=int(now or time.time()); chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
+    with db_lock:
+        conn=get_db()
+        old=conn.execute("SELECT id FROM rpg_merchants WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
+        if old and not forced:
+            conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=?,updated_at=? WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
+        if forced: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE chat_id=? AND status='active'",(chat_id,))
+        pool=conn.execute("SELECT item_key,name,rarity,equip_slot,min_level FROM rpg_items WHERE equip_slot IS NOT NULL AND equip_slot<>'' AND rarity IN ('comun','poco_comun','raro','ultra_raro')").fetchall()
+        if len(pool)<6: conn.rollback(); conn.close(); return False
+        by={r:[] for r in ('comun','poco_comun','raro','ultra_raro')}
+        for x in pool: by.get(x['rarity'],[]).append(dict(x))
+        chosen=[]; used=set()
+        for _ in range(6):
+            available=[(r,w) for r,w in RPG_MERCHANT_RARITY_WEIGHTS if any(x['item_key'] not in used for x in by[r])]
+            rs=[x[0] for x in available]; ws=[x[1] for x in available]; rarity=random.choices(rs,weights=ws,k=1)[0]
+            cand=[x for x in by[rarity] if x['item_key'] not in used]; it=random.choice(cand); chosen.append(it); used.add(it['item_key'])
+        m=conn.execute("INSERT INTO rpg_merchants(chat_id,message_thread_id,status,message_id,spawned_at,expires_at) VALUES(?,?,'active',0,?,?) RETURNING id",(chat_id,int(topic) if topic is not None else None,now,now+RPG_MERCHANT_TTL)).fetchone(); mid=int(m['id'])
+        for it in chosen: conn.execute("INSERT INTO rpg_merchant_offers(merchant_id,item_key,price,sold_by,sold_at) VALUES(?,?,?,0,0)",(mid,it['item_key'],_merchant_price(it['rarity'],it['min_level'])))
+        conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=?,updated_at=? WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,now,chat_id)); conn.commit(); conn.close()
+    url=_merchant_private_url(mid); kb={"inline_keyboard":[[{"text":"🛒 Visitar a Malkor en privado","url":url}]]} if url else None
+    oldtopic=get_current_message_thread_id()
+    try:
+        set_current_message_thread_id(topic); sent=send_message(chat_id,"🐪 MALKOR, EL MERCADER ERRANTE\n\n"+random.choice(RPG_MERCHANT_PHRASES)+"\n\n🎒 Trae 6 piezas de equipo. Cada una tiene UNA sola unidad para todo el mundo.\n⏳ Permanecerá 20 minutos.\n\n🔒 Las compras se realizan en privado.",reply_markup=kb)
+    finally: set_current_message_thread_id(oldtopic)
+    msgid=int((((sent or {}).get('result') or {}).get('message_id') or 0)) if isinstance(sent,dict) else 0
+    with db_lock:
+        conn=get_db(); conn.execute("UPDATE rpg_merchants SET message_id=? WHERE id=?",(msgid,mid)); conn.commit(); conn.close()
+    return True
+
+def merchant_buy(user_id, offer_id, chat_id=None):
+    now=int(time.time()); reserved=None
+    with db_lock:
+        conn=get_db()
+        try:
+            o=conn.execute("""SELECT o.*,m.status,m.expires_at,i.name FROM rpg_merchant_offers o JOIN rpg_merchants m ON m.id=o.merchant_id JOIN rpg_items i ON i.item_key=o.item_key WHERE o.id=? FOR UPDATE""",(int(offer_id),)).fetchone()
+            if not o or o['status']!='active' or int(o['expires_at'])<=now: conn.rollback(); conn.close(); return False,"🐪 Malkor ya se fue."
+            if int(o['sold_by'] or 0)>0: conn.rollback(); conn.close(); return False,"❌ Llegaste tarde: esa pieza ya se agotó globalmente."
+            conn.execute("UPDATE rpg_merchant_offers SET sold_by=?,sold_at=? WHERE id=?",(int(user_id),now,int(offer_id))); conn.commit(); reserved=dict(o); conn.close()
+        except Exception:
+            conn.rollback(); conn.close(); raise
+    price=int(reserved['price']); ok,_,_=change_kiwons(user_id,-price,'merchant_buy',chat_id=chat_id,note=f"Malkor {reserved['item_key']}")
+    if not ok:
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_merchant_offers SET sold_by=0,sold_at=0 WHERE id=? AND sold_by=?",(int(offer_id),int(user_id))); conn.commit(); conn.close()
+        return False,f"🪙 Te faltan Kiwons. Malkor te mira como a un NPC sin misión. Precio: {price:,} KW."
+    char=get_active_character(user_id)
+    item=grant_rpg_item(user_id,int(char['id']),reserved['item_key'],f"malkor:{reserved['merchant_id']}") if char else None
+    if not item:
+        change_kiwons(user_id,price,'merchant_refund',chat_id=chat_id,note='Reembolso Malkor')
+        with db_lock:
+            conn=get_db(); conn.execute("UPDATE rpg_merchant_offers SET sold_by=0,sold_at=0 WHERE id=? AND sold_by=?",(int(offer_id),int(user_id))); conn.commit(); conn.close()
+        return False,"⚠️ Malkor no pudo entregar la pieza. Tus KW fueron devueltos."
+    return True,f"✅ {reserved['name']} es tuyo.\n🪙 -{price:,} KW\n\n🐪 {random.choice(RPG_MERCHANT_BUY_PHRASES)}"
+
 RPG_DUNGEONS = [
     {"key":"ruinas","name":"🏚️ Ruinas del Reino Caído"},
     {"key":"cripta","name":"⚰️ Cripta de las Almas"},
@@ -7061,6 +7186,7 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
                           updated_at=EXCLUDED.updated_at""",
                      (int(chat_id),int(message_thread_id) if message_thread_id is not None else None,
                       now+RPG_AUTO_ENCOUNTER_INTERVAL,now+RPG_DUNGEON_INTERVAL,now))
+        conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=CASE WHEN next_merchant_at<=0 THEN ? ELSE next_merchant_at END WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,int(chat_id)))
         conn.commit(); conn.close()
 
 def _auto_encounter_card(enemy, story):
@@ -7186,6 +7312,9 @@ def rpg_auto_world_tick(now=None):
             conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE id=?",(int(r["id"]),))
         expired_dungeons=conn.execute("SELECT * FROM rpg_dungeons WHERE status='active' AND expires_at<=?",(now,)).fetchall()
         for d in expired_dungeons: conn.execute("UPDATE rpg_dungeons SET status='expired' WHERE id=?",(int(d["id"]),))
+        expired_merchants=conn.execute("SELECT * FROM rpg_merchants WHERE status='active' AND expires_at<=?",(now,)).fetchall()
+        for m in expired_merchants: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE id=?",(int(m['id']),))
+        merchant_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_merchant_at<=?",(now,)).fetchall()
         dungeon_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_dungeon_at<=?",(now,)).fetchall()
         due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_spawn_at<=?",(now,)).fetchall()
         conn.commit(); conn.close()
@@ -7199,6 +7328,9 @@ def rpg_auto_world_tick(now=None):
         if int(d.get("message_id") or 0):
             try: delete_message(int(d["chat_id"]),int(d["message_id"]))
             except Exception: pass
+    for rr in merchant_due:
+        try: spawn_merchant(dict(rr),now)
+        except Exception: logger.exception("Error creando Mercader Errante en chat %s",rr["chat_id"])
     dungeon_due_chats=set()
     for rr in dungeon_due:
         dungeon_due_chats.add(int(rr["chat_id"]))
@@ -7924,28 +8056,34 @@ def handle_rpg_callback(query):
         ok,msg2=_omega_open_chest(event_id,uid,chat_id)
         send_message(chat_id,msg2)
         return True
-    if data=="forge_home":
+    if data.startswith("merchant_buy:"):
         if not _is_private_chat_obj(msg.get("chat")):
-            send_message(chat_id,"🔒 La Forja se administra en privado.",reply_markup=_private_launch_keyboard("forge")); return True
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🔒 Las compras de Malkor son privadas.","show_alert":True}); return True
+        try: oid=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=merchant_buy(uid,oid,chat_id); send_message(chat_id,msg2)
+        with db_lock:
+            mc=get_db(); rr=mc.execute("SELECT merchant_id FROM rpg_merchant_offers WHERE id=?",(oid,)).fetchone(); mc.close()
+        if rr:
+            txt,kb=merchant_private_text_keyboard(int(rr['merchant_id'])); send_message(chat_id,txt,reply_markup=kb)
+        return True
+    if data=="merchant_sold":
+        telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"❌ Esa pieza ya se agotó.","show_alert":False}); return True
+    if data=="forge_home":
         send_message(chat_id,forge_text(uid),reply_markup=forge_keyboard(uid)); return True
     if data.startswith("forge_view:"):
-        if not _is_private_chat_obj(msg.get("chat")): return True
         txt,kb=forge_recipe_text(uid,data.split(":",1)[1])
         send_message(chat_id,txt or "Esa receta ya no existe.",reply_markup=kb); return True
     if data.startswith("forge_make:"):
-        if not _is_private_chat_obj(msg.get("chat")): return True
         key=data.split(":",1)[1]; ok,msg2=forge_make(uid,key,chat_id)
         txt,kb=forge_recipe_text(uid,key)
         send_message(chat_id,msg2,reply_markup=kb if txt else forge_keyboard(uid)); return True
     if data.startswith("forge_upgrade:"):
-        if not _is_private_chat_obj(msg.get("chat")):
-            send_message(chat_id,"🔒 El Forjador trabaja en privado.",reply_markup=_private_launch_keyboard("forge")); return True
         iid=int(data.split(":",1)[1]); ok,msg2=forge_upgrade_item(uid,iid,chat_id)
         send_message(chat_id,msg2)
         if ok: show_inventory_item(chat_id,uid,iid)
         return True
     if data.startswith("forge_locked:"):
-        if not _is_private_chat_obj(msg.get("chat")): return True
         txt,kb=forge_recipe_text(uid,data.split(":",1)[1])
         send_message(chat_id,txt or "Esa receta ya no existe.",reply_markup=kb); return True
     if data.startswith("rpg_item:"):
@@ -8064,13 +8202,21 @@ def process_command(
             ensure_player(user)
             send_character_creator(chat_id,user.get("id"),origin_chat_id=origin_chat_id or chat_id)
             return True
-        if len(parts)>1 and parts[1] in ("shop","pets","missions"):
+        if len(parts)>1 and parts[1].startswith("merchant_"):
+            user=message.get("from",{}); ensure_player(user)
+            if chat.get("type")!="private": return True
+            try: merchant_id=int(parts[1].split("_",1)[1])
+            except Exception: merchant_id=0
+            txt,kb=merchant_private_text_keyboard(merchant_id); send_message(chat_id,txt,reply_markup=kb); return True
+        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
                 balance,kb=rpg_shop_keyboard(user.get("id")); send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
             elif parts[1]=="pets":
                 send_message(chat_id,pet_gacha_text(user.get("id")),reply_markup=pet_gacha_keyboard())
+            elif parts[1]=="forge":
+                send_message(chat_id,forge_text(user.get("id")),reply_markup=forge_keyboard(user.get("id")))
             else:
                 send_message(chat_id,mission_board_text(user.get("id")),reply_markup=mission_board_keyboard(user.get("id")))
             return True
@@ -8192,6 +8338,24 @@ def process_command(
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_auto_chats SET enabled=0 WHERE chat_id=?",(int(chat_id),)); conn.commit(); conn.close()
         send_message(chat_id,"🔕 Encuentros y mazmorras automáticas desactivados en este chat."); return True
+
+    if command in ("/mercader", "/malkor"):
+        uid=message.get("from",{}).get("id")
+        if not is_owner(uid): send_message(chat_id,"Solo Kiu puede invocar manualmente a Malkor."); return True
+        if chat.get("type") not in ("group","supergroup"): send_message(chat_id,"Invoca a Malkor desde el grupo RPG."); return True
+        register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        with db_lock:
+            mc=get_db(); row=mc.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); mc.close()
+        if row and spawn_merchant(dict(row),int(time.time()),forced=True): send_message(chat_id,"🧪 Malkor fue invocado para pruebas.")
+        else: send_message(chat_id,"No pude invocar a Malkor.")
+        return True
+
+    if command in ("/quitarmercader", "/cerrarmalkor"):
+        uid=message.get("from",{}).get("id")
+        if not is_owner(uid): send_message(chat_id,"Solo Kiu puede cerrar el puesto de Malkor."); return True
+        with db_lock:
+            mc=get_db(); mc.execute("UPDATE rpg_merchants SET status='expired' WHERE chat_id=? AND status='active'",(int(chat_id),)); mc.commit(); mc.close()
+        send_message(chat_id,"🐪 Malkor recogió el puesto antes de tiempo. Seguramente vio venir a Hacienda."); return True
 
     if command in ("/testwill", "/activarhiddenblade"):
         uid=message.get("from",{}).get("id")
@@ -8427,8 +8591,6 @@ def process_command(
 
     if command in ("/forja", "/forge", "/forjador", "/mejorar"):
         user_id=message.get("from",{}).get("id")
-        if chat.get("type")!="private":
-            send_message(chat_id,"🔒 La Forja de KiwRPG se usa en privado.",reply_markup=_private_launch_keyboard("forge")); return True
         send_message(chat_id,forge_text(user_id),reply_markup=forge_keyboard(user_id))
         return True
 

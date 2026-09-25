@@ -4838,10 +4838,10 @@ def show_inventory_item(chat_id,user_id,inventory_id):
         if fb['hp']: extra.append(f"HP +{fb['hp']}")
         if extra: bonuses.append("Mejora: "+", ".join(extra))
     ok,reason=item_compatibility(row,char) if row.get('equip_slot') else (True,'')
-    text=f"🔍 {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n\n{row['description']}"
+    text=f"{_inventory_item_icon(row)} {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n\n{row['description']}"
     if bonuses: text+="\n\n"+" · ".join(bonuses)
     if row.get('equip_slot'):
-        slot_icons={'arma':'⚔️','casco':'🪖','armadura':'🥋','guantes':'🧤','botas':'👢','accesorio':'💍'}
+        slot_icons={'arma':'⚔️','casco':'🪖','armadura':'🛡️','guantes':'🧤','botas':'👢','accesorio':'💍'}
         si=slot_icons.get(str(row['equip_slot']),'🎽')
         text+=f"\n{si} Equipamiento: {row['equip_slot'].title()}\n📈 Nivel requerido: {row['min_level']}\n"+("✅ Compatible" if ok else f"🔒 {reason}")
     if int(row.get('equipped') or 0): text+="\n🟢 EQUIPADO"
@@ -5572,6 +5572,44 @@ def _pet_desc_at_level(cfg, level):
     shown=int(pct) if pct.is_integer() else pct
     labels={"exp":f"+{shown}% EXP en PvE y Bosses.","kiwons":f"+{shown}% Kiwons obtenidos en PvE y Bosses.","pve_damage":f"+{shown}% daño en encuentros PvE.","boss_damage":f"+{shown}% daño contra Bosses."}
     return labels.get(cfg.get('bonus'),cfg.get('desc',''))
+
+
+def public_pet_text_keyboard(user_id, user=None):
+    """Tarjeta pública de la mascota equipada: para presumirla y subirla de nivel desde el grupo."""
+    pet=_equipped_pet(user_id)
+    if not pet:
+        return "🐾 No tienes una mascota equipada todavía. Usa /mascotas en privado para elegir una.", None
+    level=max(1,int(pet.get('level') or 1)); essence=_pet_essence(user_id)
+    name=(user or {}).get('first_name') or (user or {}).get('username') or 'Aventurero'
+    username=(user or {}).get('username')
+    owner=("@"+username) if username else name
+    lines=[f"🐾 MASCOTA DE {owner}","",f"{pet.get('icon','🐾')} {pet.get('name','Mascota')}",
+           f"🏷️ {pet.get('rarity','')} · ⭐ Nivel {level}/{RPG_PET_MAX_LEVEL}",
+           f"✨ {_pet_desc_at_level(pet,level)}",f"💠 Esencia disponible: {essence}"]
+    kb=[]
+    if level<RPG_PET_MAX_LEVEL:
+        cost=RPG_PET_LEVEL_COSTS[level]
+        kb.append([{"text":f"⬆️ Subir a Nv.{level+1} · {cost}✨","callback_data":f"pet_public_level:{int(user_id)}:{pet['pet_key']}"}])
+    else:
+        lines.append("🏆 Nivel máximo alcanzado.")
+    kb.append([{"text":"🐾 Ver mis mascotas","callback_data":"pet_list"}])
+    return "\n".join(lines), {"inline_keyboard":kb}
+
+
+def _inventory_item_icon(row):
+    """Icono funcional por tipo/slot; la rareza sigue mostrándose por separado."""
+    slot=str(row.get('equip_slot') or '').lower()
+    if slot=='arma': return '⚔️'
+    if slot=='casco': return '🪖'
+    if slot=='armadura': return '🛡️'
+    if slot=='guantes': return '🧤'
+    if slot=='botas': return '👢'
+    if slot=='accesorio': return '💍'
+    typ=str(row.get('item_type') or '').lower(); name=str(row.get('name') or '').lower()
+    if 'pocion' in typ or 'poción' in typ or 'pocion' in name or 'poción' in name: return '🧪'
+    if typ in ('consumible','potion'): return '🧪'
+    if typ=='material': return '🧱'
+    return '🎒'
 
 
 def pets_text_keyboard(user_id):
@@ -7787,6 +7825,16 @@ def handle_rpg_callback(query):
     if data.startswith("pet_view:"):
         if not _is_private_chat_obj(msg.get("chat")): return True
         txt,kb=pet_detail_keyboard(uid,data.split(":",1)[1]); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("pet_public_level:"):
+        try:
+            _, owner_s, key=data.split(":",2); owner_id=int(owner_s)
+        except Exception:
+            return True
+        if int(uid)!=owner_id:
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🐾 Esa mascota no es tuya.","show_alert":False}); return True
+        ok,msg2=level_pet(uid,key)
+        txt,kb=public_pet_text_keyboard(uid,query.get("from") or {})
+        send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
     if data.startswith("pet_level:"):
         if not _is_private_chat_obj(msg.get("chat")): return True
         key=data.split(":",1)[1]; ok,msg2=level_pet(uid,key); txt,kb=pet_detail_keyboard(uid,key); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
@@ -7804,11 +7852,11 @@ def handle_rpg_callback(query):
     if data=="rpg_show_inventory":
         world=current_rpg_world()
         with db_lock:
-            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
+            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot,x.item_type FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
         kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
-            slot_icons={'arma':'⚔️','casco':'🪖','armadura':'🥋','guantes':'🧤','botas':'👢','accesorio':'💍'}; part=slot_icons.get(str(r.get('equip_slot') or ''),'')
+            part=_inventory_item_icon(dict(r))
             kb.append([{"text":f"{part} {RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}".strip(),"callback_data":f"rpg_item:{r['id']}"}])
         char=get_active_character(uid)
         if _is_private_chat_obj(msg.get("chat")) and char and is_owner(uid) and char['class_name']=='The Cleaner':
@@ -8341,9 +8389,14 @@ def process_command(
         send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico. Los objetos raros siguen siendo de drops, Bosses y recompensas.\n\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
         return True
 
-    if command in ("/mascota", "/mascotas", "/pets"):
+    if command == "/mascota":
+        user=message.get("from",{}); user_id=user.get("id")
+        txt,kb=public_pet_text_keyboard(user_id,user)
+        send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/mascotas", "/pets"):
         user_id=message.get("from",{}).get("id")
-        if chat.get("type")!="private": send_message(chat_id,"🔒 Tu colección de mascotas se administra en privado.",reply_markup=_private_launch_keyboard("pets")); return True
+        if chat.get("type")!="private": send_message(chat_id,"🔒 La colección completa se administra en privado. Usa /mascota para presumir la equipada aquí.",reply_markup=_private_launch_keyboard("pets")); return True
         txt,kb=pets_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
 
     if command in ("/gacha", "/cofre"):
@@ -8358,12 +8411,13 @@ def process_command(
         user_id = message.get("from", {}).get("id")
         world=current_rpg_world()
         with db_lock:
-            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(user_id),world)).fetchall(); conn.close()
+            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot,x.item_type FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(user_id),world)).fetchall(); conn.close()
         lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."] if rows else ["🎒 INVENTARIO","","Todavía está vacío."]
         kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
-            kb.append([{"text":f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
+            part=_inventory_item_icon(dict(r))
+            kb.append([{"text":f"{part} {RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
         char=get_active_character(user_id)
         if chat.get("type")=="private" and char and is_owner(user_id) and char['class_name']=='The Cleaner':
             active=bool(char['secret_blades_active'])

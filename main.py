@@ -211,7 +211,7 @@ app = Flask(__name__)
 # =========================================================
 
 executor = ThreadPoolExecutor(
-    max_workers=int(os.getenv("KIWBOT_WORKERS", "24"))
+    max_workers=int(os.getenv("KIWBOT_WORKERS", "8"))
 )
 
 
@@ -321,6 +321,13 @@ class PgConnection:
         else:
             self._conn.close()
 
+    def __del__(self):
+        # Última red de seguridad para rutas antiguas que salgan sin close().
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 def get_db():
     if not DATABASE_URL:
@@ -330,7 +337,7 @@ def get_db():
         )
 
     if DB_POOL is not None:
-        conn = DB_POOL.getconn(timeout=10)
+        conn = DB_POOL.getconn(timeout=float(os.getenv("KIWBOT_DB_POOL_TIMEOUT", "4")))
         return PgConnection(conn, DB_POOL)
 
     conn = psycopg.connect(
@@ -5345,15 +5352,23 @@ Los comandos administrativos y de prueba no forman parte del manual de jugador. 
     ]
 
 
+def rpg_manual_private_link():
+    username=get_bot_identity().get("username","")
+    return f"https://t.me/{username}?start=manual" if username else None
+
+def rpg_manual_open_keyboard():
+    url=rpg_manual_private_link()
+    return {"inline_keyboard":[[{"text":"📖 ABRIR MANUAL EN PRIVADO","url":url}]]} if url else None
+
 def send_rpg_manual_private(user):
     uid=int((user or {}).get("id") or 0)
     if not uid: return False
     ensure_player(user)
     for section in rpg_manual_sections():
-        send_message(uid, section)
+        if not send_private_message(uid, section):
+            return False
     kb=creator_launch_keyboard(uid)
-    send_message(uid,"📖 FIN DEL MANUAL\n\nPuedes volver a usar /manual cuando quieras. Si todavía no tienes personaje, empieza aquí:",reply_markup=kb)
-    return True
+    return bool(send_private_message(uid,"📖 FIN DEL MANUAL\n\nPuedes volver a usar /manual cuando quieras. Si todavía no tienes personaje, empieza aquí:",reply_markup=kb))
 
 def creator_keyboard(user_id=None):
     rows=[
@@ -10419,6 +10434,13 @@ def process_command(
     # -----------------------------------------------------
     if command == "/start":
         parts=str(text or "").strip().split(maxsplit=1)
+        if len(parts)>1 and parts[1].lower()=="manual":
+            if chat.get("type")!="private":
+                send_message(chat_id,"📖 Abre el manual directamente en mi chat privado.",reply_markup=rpg_manual_open_keyboard())
+                return True
+            if not send_rpg_manual_private(message.get("from",{})):
+                send_message(chat_id,"❌ No pude cargar el manual ahora mismo. Intenta /manual otra vez en unos segundos.")
+            return True
         if len(parts)>1 and parts[1].startswith("rpgcreate_create_"):
             raw=parts[1][len("rpgcreate_"):]
             origin_chat_id=None
@@ -10475,11 +10497,15 @@ def process_command(
 
     if command in ("/manual", "/manualrpg"):
         user=message.get("from",{})
+        if chat.get("type")=="private":
+            if not send_rpg_manual_private(user):
+                send_message(chat_id,"❌ No pude cargar el manual ahora mismo. Intenta otra vez en unos segundos.")
+            return True
         ok=send_rpg_manual_private(user)
-        if chat.get("type")!="private":
-            send_message(chat_id,"📖 Te mandé el Manual completo de KiwRPG por privado. Si es la primera vez que me escribes, abre mi chat e inicia el bot para que Telegram me permita enviártelo.")
-        elif not ok:
-            send_message(chat_id,"No pude abrir el manual ahora mismo.")
+        if ok:
+            send_message(chat_id,"📖 Te mandé el Manual completo de KiwRPG por privado.")
+        else:
+            send_message(chat_id,"📖 Telegram todavía no me permite iniciar tu privado. Pulsa el botón; al abrir/iniciar KiwBot, el manual se enviará automáticamente.",reply_markup=rpg_manual_open_keyboard())
         return True
 
     # -----------------------------------------------------
@@ -10685,20 +10711,20 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command in ("/comandos", "/ayudarpg"):
         uid=message.get("from",{}).get("id")
         txt=("🎮 COMANDOS KIWRPG\n\n"
-             "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo · /kiwons — Kiwons\n"
-             "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge · /forjador · /mejorar — Forja y mejoras +15\n🏪 /tienda · /shop — Tienda\n"
-             "🐾 /mascota · /mascotas · /pets — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales · /mats — Materiales\n\n"
-             "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — 10 misiones simultáneas\n⚡ /eventorpg · /misionactual — Misión Relámpago activa\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
-             "🧹 /resetcombate · /reiniciarcombate — Liberar tu combate si se traba\n🏃 /huir · /cancelar_combate — Abandonar PvE\n"
-             "👹 /boss — Boss activo\n📚 /bosses — Lista de Bosses\n⚡ /omega · /kennyomega — Kenny Omega\n🥇 /rankingomega — Ranking Omega\n"
-             "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse · /rendicion — Rendirse\n📊 /pvp · /perfilpvp — Perfil PvP\n🥇 /rankingpvp · /toppvp — Ranking PvP\n\n"
-             "💸 /transferir · /pagar — Transferir Kiwons\n🗡️ /espadas — Espadas secretas (si están disponibles)\n")
+             "🧙 /rpg — Abrir KiwRPG\n👤 /personaje — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo — Kiwons\n"
+             "🎒 /inventario — Inventario\n🛡️ /equipo — Equipo\n🔨 /forja — Forja y mejoras +15\n🏪 /tienda — Tienda\n"
+             "🐾 /mascotas — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales — Materiales\n🌀 /movimientos — Técnicas y configuración\n\n"
+             "⚔️ COMBATE\n📜 /misiones — 10 misiones simultáneas\n⚡ /eventorpg — Misión Relámpago activa\n👾 /encuentro — PvE\n🏰 /mazmorra — Mazmorra activa\n"
+             "🧹 /resetcombate — Liberar tu combate si se traba\n🏃 /huir — Abandonar PvE\n"
+             "👹 /boss — Boss activo\n📚 /bosses — Lista de Bosses\n⚡ /omega — Kenny Omega\n🥇 /rankingomega — Ranking Omega\n"
+             "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse — Rendirse\n📊 /pvp — Perfil PvP\n🥇 /rankingpvp — Ranking PvP\n\n"
+             "💸 /transferir — Transferir Kiwons\n🗡️ /espadas — Espadas secretas (si están disponibles)\n")
         if is_owner(uid):
-            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/misionrapida · /testmision [clave] · /minijuego — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testusuario @usuario — Verificar a quién resuelve el @ antes de una boda\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
-                    "/invocarboss · /spawnboss — Invocar Boss\n/quitarboss · /eliminarboss — Quitar Boss\n/invocaromega · /spawnomega — Invocar Omega\n"
-                    "/modotest · /modetest — Modo test Omega\n/resetomega — Reset Omega\n/omega1hp — Omega a 1 HP\n"
-                    "/darr — Dar recursos RPG\n/darrcolmillos · /darcolmillos — Dar colmillos\n/darkiwons · /darskiwons · /addkiwons — Dar Kiwons\n"
-                    "/quitarkiwons · /removekiwons — Quitar Kiwons\n/darpocion · /dar_pocion — Dar poción\n/reiniciarrpg · /reset_rpg — Reinicio RPG administrativo\n/rpgnotificaciones · /rpgaqui — Dejar avisos automáticos SOLO en este chat\n/apagarrpg · /rpgsilencio — Apagar avisos automáticos aquí\n")
+            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/testmision [clave] — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testusuario @usuario — Verificar a quién resuelve el @ antes de una boda\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
+                    "/invocarboss — Invocar Boss\n/quitarboss — Quitar Boss\n/invocaromega — Invocar Omega\n"
+                    "/modotest — Modo test Omega\n/resetomega — Reset Omega\n/omega1hp — Omega a 1 HP\n"
+                    "/darr — Dar recursos RPG\n/darcolmillos — Dar colmillos\n/darkiwons — Dar Kiwons\n"
+                    "/quitarkiwons — Quitar Kiwons\n/darpocion — Dar poción\n/reiniciarrpg — Reinicio RPG administrativo\n/rpgnotificaciones — Dejar avisos automáticos SOLO en este chat\n/apagarrpg — Apagar avisos automáticos aquí\n")
         send_message(chat_id,txt.strip())
         return True
 

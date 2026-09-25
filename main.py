@@ -7397,6 +7397,10 @@ def _event_auto_sync(chat_id,now=None):
         _c=get_db(); _route=_c.execute("SELECT enabled FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); _c.close()
     if not _route or int(_route.get('enabled') or 0)!=1:
         return None
+    # Si existe contexto de topic, debe coincidir con /rpgaqui. El scheduler
+    # establece explícitamente el topic guardado antes de entrar aquí.
+    if not is_active_rpg_chat(chat_id):
+        return _event_get(chat_id)
     st=_event_get(chat_id)
     # Apertura manda hasta el 30/10/2026 inclusive y sólo puede existir si fue iniciada manualmente.
     if st and st['status']=='active' and st['event_key']=='opening_2026' and now<=int(st['ends_at']): return st
@@ -7531,7 +7535,7 @@ def event_buy(chat_id,user_id,kind):
     return True,f"🐾 {cfg['pet']} se unió a tu colección."
 
 def clan_create(user_id,name):
-    name=re.sub(r'\\s+',' ',str(name or '').strip())[:32]
+    name=re.sub(r'\s+',' ',str(name or '').strip())[:32]
     if len(name)<3:return False,'El nombre del clan debe tener al menos 3 caracteres.'
     if rpg_user_clan(user_id):return False,'Ya perteneces a un clan.'
     with db_lock:
@@ -7552,9 +7556,17 @@ def clan_join(user_id,clan_id):
 def clan_leave(user_id):
     cl=rpg_user_clan(user_id)
     if not cl:return False,'No perteneces a ningún clan.'
-    if cl['role']=='leader':return False,'El líder no puede abandonar el clan mientras siga siendo líder.'
     with db_lock:
-        c=get_db(); c.execute("DELETE FROM rpg_clan_members WHERE user_id=?",(int(user_id),)); c.commit(); c.close()
+        c=get_db()
+        if cl['role']=='leader':
+            n=c.execute("SELECT COUNT(*) n FROM rpg_clan_members WHERE clan_id=?",(int(cl['id']),)).fetchone()
+            if int(n['n'])>1:
+                c.close(); return False,'👑 Eres el líder. Antes de salir debes dejar el clan sin otros miembros.'
+            c.execute("DELETE FROM rpg_clan_members WHERE clan_id=?",(int(cl['id']),))
+            c.execute("DELETE FROM rpg_clans WHERE id=?",(int(cl['id']),))
+            c.commit(); c.close()
+            return True,'🗑️ Clan disuelto. Ya no perteneces a ningún clan y el +20% EXP dejó de aplicarse.'
+        c.execute("DELETE FROM rpg_clan_members WHERE user_id=?",(int(user_id),)); c.commit(); c.close()
     return True,'🚪 Has abandonado el clan. El +20% EXP deja de aplicarse.'
 
 def clan_card(user_id):
@@ -7573,7 +7585,13 @@ def clan_keyboard(user_id):
     if not cl:
         return {"inline_keyboard":[[{"text":"🔎 Ver clanes","callback_data":"clan_list"}],[{"text":"➕ Cómo crear uno","callback_data":"clan_create_help"}]]}
     rows=[[{"text":"👥 Miembros","callback_data":f"clan_members:{int(cl['id'])}"}]]
-    if cl['role']!='leader': rows.append([{"text":"🚪 Salir del clan","callback_data":"clan_leave_confirm"}])
+    if cl['role']!='leader':
+        rows.append([{"text":"🚪 Salir del clan","callback_data":"clan_leave_confirm"}])
+    else:
+        with db_lock:
+            c=get_db(); n=c.execute("SELECT COUNT(*) n FROM rpg_clan_members WHERE clan_id=?",(int(cl['id']),)).fetchone(); c.close()
+        if int(n['n'])==1:
+            rows.append([{"text":"🗑️ Salir y disolver clan","callback_data":"clan_leave_confirm"}])
     return {"inline_keyboard":rows}
 
 def clan_list_text(user_id,limit=12):
@@ -8175,7 +8193,7 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
         conn.execute("""INSERT INTO rpg_auto_chats(chat_id,message_thread_id,next_spawn_at,next_dungeon_at,updated_at)
                         VALUES(?,?,?,?,?)
                         ON CONFLICT(chat_id) DO UPDATE SET
-                          message_thread_id=EXCLUDED.message_thread_id,
+                          message_thread_id=CASE WHEN rpg_auto_chats.enabled=1 THEN rpg_auto_chats.message_thread_id ELSE EXCLUDED.message_thread_id END,
                           next_dungeon_at=CASE WHEN rpg_auto_chats.next_dungeon_at<=0 THEN EXCLUDED.next_dungeon_at ELSE rpg_auto_chats.next_dungeon_at END,
                           updated_at=EXCLUDED.updated_at""",
                      (int(chat_id),int(message_thread_id) if message_thread_id is not None else None,
@@ -8189,8 +8207,36 @@ def set_rpg_notification_chat(chat_id, chat_type, message_thread_id=None):
     register_rpg_auto_chat(chat_id,chat_type,message_thread_id)
     with db_lock:
         conn=get_db()
+        # /rpgaqui es la única operación que puede mover el destino entre temas
+        # del mismo supergrupo. Esto evita que /testmazmorra, /malkor, etc.
+        # secuestren accidentalmente el topic activo.
         conn.execute("UPDATE rpg_auto_chats SET enabled=CASE WHEN chat_id=? THEN 1 ELSE 0 END",(int(chat_id),))
+        conn.execute("UPDATE rpg_auto_chats SET message_thread_id=?,updated_at=? WHERE chat_id=?",
+                     (int(message_thread_id) if message_thread_id is not None else None,int(time.time()),int(chat_id)))
         conn.commit(); conn.close()
+
+def is_active_rpg_chat(chat_id, message_thread_id=None):
+    """True sólo para el chat Y topic elegidos con /rpgaqui.
+
+    En grupos con temas, General y Pruebas comparten chat_id; por eso comparar
+    sólo chat_id permitía que eventos/tiendas/botones saltaran entre topics.
+    """
+    if message_thread_id is None:
+        message_thread_id=get_current_message_thread_id()
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT enabled,message_thread_id FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); c.close()
+    if not row or int(row.get('enabled') or 0)!=1:
+        return False
+    saved=row.get('message_thread_id')
+    saved=int(saved) if saved is not None else None
+    current=int(message_thread_id) if message_thread_id is not None else None
+    return saved==current
+
+
+def active_rpg_chat_hint():
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT chat_id FROM rpg_auto_chats WHERE enabled=1 ORDER BY updated_at DESC LIMIT 1").fetchone(); c.close()
+    return int(row['chat_id']) if row else 0
 
 
 def _auto_encounter_card(enemy, story):
@@ -8370,7 +8416,15 @@ def rpg_auto_world_tick(now=None):
     try:
         with db_lock:
             _ec=get_db(); _echats=_ec.execute("SELECT chat_id FROM rpg_auto_chats WHERE enabled=1").fetchall(); _ec.close()
-        for _er in _echats: _event_auto_sync(int(_er['chat_id']),now)
+        for _er in _echats:
+            _old_topic=get_current_message_thread_id()
+            try:
+                with db_lock:
+                    _tc=get_db(); _tr=_tc.execute("SELECT message_thread_id FROM rpg_auto_chats WHERE chat_id=? AND enabled=1",(int(_er['chat_id']),)).fetchone(); _tc.close()
+                set_current_message_thread_id(_tr.get('message_thread_id') if _tr else None)
+                _event_auto_sync(int(_er['chat_id']),now)
+            finally:
+                set_current_message_thread_id(_old_topic)
     except Exception: logger.exception("Error sincronizando eventos mensuales")
     dungeon_due_chats=set()
     for rr in dungeon_due:
@@ -8901,11 +8955,14 @@ def handle_rpg_callback(query):
     if data=="clan_cancel":
         send_message(chat_id,clan_card(uid),reply_markup=clan_keyboard(uid)); return True
     if data=="event_boss_attack":
+        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 Este botón pertenece a un chat RPG antiguo. Usa /rpgaqui en el chat correcto y abre /bossevento allí."); return True
         ok,msg2=event_boss_attack(chat_id,uid); send_message(chat_id,msg2)
         txt,kb=event_boss_card(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
     if data=="event_shop":
+        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 La tienda del evento solo funciona en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
     if data.startswith("event_buy:"):
+        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 Esa tienda ya no pertenece al chat RPG activo."); return True
         kind=data.split(":",1)[1]; ok,msg2=event_buy(chat_id,uid,kind); send_message(chat_id,msg2); return True
     if data.startswith("rpg_dungeon_enter:"):
         try: dungeon_id=int(data.split(":",1)[1])
@@ -9858,6 +9915,20 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,f"🧹 Asset {key} eliminado del registro.")
         return True
 
+    if command in ("/imagenesrpg","/arterpg","/bestiarioadmin"):
+        if not is_owner(user_id): return True
+        with db_lock:
+            c=get_db(); rows=c.execute("SELECT asset_key,updated_at FROM rpg_assets WHERE asset_key LIKE 'img:enemy:%' ORDER BY asset_key").fetchall(); c.close()
+        registered={str(r['asset_key'])[4:] for r in rows}
+        base=[f"enemy:{e['key']}" for e in RPG_ENEMIES]
+        ready=[k for k in base if k in registered or rpg_asset_path(k)]
+        missing=[k for k in base if k not in registered and not rpg_asset_path(k)]
+        txt=f"🖼️ ARTE RPG\n\n👾 Monstruos base: {len(base)}\n✅ Con imagen: {len(ready)}\n❌ Sin imagen: {len(missing)}\n💾 file_id registrados: {len(rows)}"
+        if missing:
+            txt+="\n\nFaltan:\n"+"\n".join("• "+k for k in missing[:30])
+        txt+="\n\nPara registrar una: responde a una foto con\n/registrarimagen enemy:golem_piedra"
+        send_message(chat_id,txt); return True
+
     if command in ("/clan","/miclan"):
         send_message(chat_id,clan_card(user_id),reply_markup=clan_keyboard(user_id)); return True
     if command=="/crearclan":
@@ -9872,13 +9943,16 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         ok,msg2=clan_leave(user_id); send_message(chat_id,msg2); return True
 
     if command in ("/eventos","/evento"):
+        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 Los eventos viven únicamente en el chat elegido con /rpgaqui. Usa /eventos allí."); return True
         st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
         if not cfg: send_message(chat_id,"📅 No hay evento programado para esta fecha."); return True
         left=max(0,int((int(st['ends_at'])-time.time())//86400))
         send_message(chat_id,f"{cfg['icon']} {cfg['title']} — {cfg['year']}\n👑 {cfg['boss']}\n⏳ ~{left} días restantes\n\n⚔️ 5 ataques diarios · 🎁 recompensas de participación\n/bossevento · /tiendaevento"); return True
     if command=="/bossevento":
+        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 El World Boss solo existe en el chat elegido con /rpgaqui."); return True
         txt,kb=event_boss_card(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
     if command=="/tiendaevento":
+        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 La tienda del evento solo existe en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
     if command=="/iniciarevento":
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede iniciar manualmente un evento."); return True

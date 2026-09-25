@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 from openai import OpenAI
 
 
@@ -3911,11 +3911,17 @@ def rpg_class_asset_key(class_name):
     return f"class:{key}"
 
 def rpg_enemy_asset_key(enemy_key, rarity="normal"):
-    # Permite una variante visual específica por rareza; si no existe usa la base.
+    # Permite variante visual por rareza tanto local como registrada en Telegram.
     variant = f"enemy:{enemy_key}:{rarity}"
-    if rpg_asset_path(variant):
+    if rpg_asset_path(variant) or _rpg_asset_get(f"img:{variant}"):
         return variant
     return f"enemy:{enemy_key}"
+
+def rpg_boss_asset_key(boss_key): return f"boss:{str(boss_key or '').strip().lower()}"
+def rpg_pet_asset_key(pet_key): return f"pet:{str(pet_key or '').strip().lower()}"
+def rpg_npc_asset_key(npc_key): return f"npc:{str(npc_key or '').strip().lower()}"
+def rpg_event_asset_key(event_key): return f"event:{str(event_key or '').strip().lower()}"
+def rpg_event_boss_asset_key(event_key): return f"eventboss:{str(event_key or '').strip().lower()}"
 
 
 # =========================================================
@@ -7724,7 +7730,10 @@ def spawn_merchant(chatrow, now=None, forced=False):
     url=_merchant_private_url(mid); kb={"inline_keyboard":[[{"text":"🛒 Visitar a Malkor en privado","url":url}]]} if url else None
     oldtopic=get_current_message_thread_id()
     try:
-        set_current_message_thread_id(topic); sent=send_message(chat_id,"🐪 MALKOR, EL MERCADER ERRANTE\n\n"+random.choice(RPG_MERCHANT_PHRASES)+"\n\n🎒 Trae 6 piezas de equipo. Cada una tiene UNA sola unidad para todo el mundo.\n⏳ Permanecerá 20 minutos.\n\n🔒 Las compras se realizan en privado.",reply_markup=kb)
+        set_current_message_thread_id(topic)
+        caption="🐪 MALKOR, EL MERCADER ERRANTE\n\n"+random.choice(RPG_MERCHANT_PHRASES)+"\n\n🎒 Trae 6 piezas de equipo. Cada una tiene UNA sola unidad para todo el mundo.\n⏳ Permanecerá 20 minutos.\n\n🔒 Las compras se realizan en privado."
+        sent=send_rpg_image(chat_id,rpg_npc_asset_key("malkor"),caption,reply_markup=kb)
+        if not sent: sent=send_message(chat_id,caption,reply_markup=kb)
     finally: set_current_message_thread_id(oldtopic)
     msgid=int((((sent or {}).get('result') or {}).get('message_id') or 0)) if isinstance(sent,dict) else 0
     with db_lock:
@@ -9828,7 +9837,9 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not b:
             send_message(chat_id,"👹 BOSS\n\nNo hay ningún Boss activo ahora mismo.\nKiu puede invocar uno con /invocarboss.")
         else:
-            send_message(chat_id,_boss_card(b,uid),reply_markup=_boss_keyboard(b,uid))
+            txt=_boss_card(b,uid); kb=_boss_keyboard(b,uid)
+            sent=send_rpg_image(chat_id,rpg_boss_asset_key(b.get('boss_key')),txt,reply_markup=kb)
+            if not sent: send_message(chat_id,txt,reply_markup=kb)
         return True
 
     if command == "/bosses":
@@ -9844,7 +9855,9 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         parts=str(text).split(maxsplit=1); key=parts[1].strip().lower() if len(parts)>1 else None
         ok,res=spawn_boss(chat_id,key)
         if not ok: send_message(chat_id,res); return True
-        send_message(chat_id,"🔥 UNA PRESENCIA ENORME HA APARECIDO...\n\n"+_boss_card(res,message.get("from",{}).get("id")),reply_markup=_boss_keyboard(res,message.get("from",{}).get("id")))
+        txt="🔥 UNA PRESENCIA ENORME HA APARECIDO...\n\n"+_boss_card(res,message.get("from",{}).get("id")); kb=_boss_keyboard(res,message.get("from",{}).get("id"))
+        sent=send_rpg_image(chat_id,rpg_boss_asset_key(res.get('boss_key')),txt,reply_markup=kb)
+        if not sent: send_message(chat_id,txt,reply_markup=kb)
         return True
 
     if command in ("/misiones", "/tablon", "/misionesrpg"):
@@ -9897,37 +9910,63 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,f"⚡ MISIÓN RELÁMPAGO ACTIVA\n\n{m['title']}\n{m['prompt']}\n\n🎁 {prize}",reply_markup=_quick_keyboard(dict(m))); return True
 
     if command=="/registrarimagen":
-        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede registrar arte oficial."); return True
-        key=(parts[1].strip() if len(parts)>1 else '')
-        rep=(message.get('reply_to_message') or {}); photos=rep.get('photo') or []
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede registrar el arte oficial del RPG."); return True
+        reply=message.get("reply_to_message") or {}; photos=reply.get("photo") or []
+        key=(parts[1].strip().lower() if len(parts)>1 else "")
         if not key or not photos:
-            send_message(chat_id,"Responde a una imagen con /registrarimagen enemy:golem_piedra (o cualquier asset_key).") ; return True
-        fid=photos[-1].get('file_id')
+            send_message(chat_id,"Responde a una foto con /registrarimagen CLAVE.\n\nEjemplos:\n/registrarimagen enemy:golem_piedra\n/registrarimagen class:guerrero\n/registrarimagen boss:fenrir\n/registrarimagen pet:slime_lunar\n/registrarimagen npc:malkor\n/registrarimagen eventboss:opening_2026"); return True
+        fid=photos[-1].get("file_id")
         if not fid: send_message(chat_id,"No pude leer el file_id de esa imagen."); return True
-        _rpg_asset_set(f"img:{key}",fid); send_message(chat_id,f"🖼️ Arte oficial registrado: {key}\nTelegram reutilizará este file_id sin volver a subir la imagen."); return True
+        _rpg_asset_set(f"img:{key}",fid)
+        send_message(chat_id,f"🖼️ Arte oficial registrado: {key}\nTelegram reutilizará este file_id sin volver a subir la imagen."); return True
+
     if command=="/borrarimagenrpg":
-        if not is_owner(user_id): return True
-        key=(parts[1].strip() if len(parts)>1 else '')
-        if key:
-            _rpg_asset_forget(f"img:{key}")
-            with db_lock:
-                c=get_db(); c.execute("DELETE FROM rpg_assets WHERE asset_key=?",(f"img:{key}",)); c.commit(); c.close()
-            send_message(chat_id,f"🧹 Asset {key} eliminado del registro.")
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede borrar arte oficial."); return True
+        key=(parts[1].strip().lower() if len(parts)>1 else "")
+        if not key: send_message(chat_id,"Usa /borrarimagenrpg CLAVE"); return True
+        _rpg_asset_forget(f"img:{key}")
+        with db_lock:
+            c=get_db(); c.execute("DELETE FROM rpg_assets WHERE asset_key=?",(f"img:{key}",)); c.commit(); c.close()
+        send_message(chat_id,f"🗑️ Arte eliminado: {key}"); return True
+
+    if command in ("/verimagen","/verarterpg"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede revisar el arte oficial."); return True
+        key=(parts[1].strip().lower() if len(parts)>1 else "")
+        if not key: send_message(chat_id,"Usa /verimagen CLAVE\nEjemplo: /verimagen enemy:golem_piedra"); return True
+        sent=send_rpg_image(chat_id,key,f"🖼️ {key}")
+        if not sent: send_message(chat_id,f"❌ No hay imagen registrada ni archivo local para {key}.")
         return True
 
     if command in ("/imagenesrpg","/arterpg","/bestiarioadmin"):
-        if not is_owner(user_id): return True
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede revisar el registro visual completo."); return True
+        catalogs={
+            "👾 Monstruos":[f"enemy:{e['key']}" for e in RPG_ENEMIES],
+            "🧙 Clases":[f"class:{k}" for k in ("guerrero","mago","picaro","paladin","arquero","the_cleaner")],
+            "👹 Bosses":[f"boss:{k}" for k in RPG_BOSSES.keys()],
+            "🐾 Mascotas":[f"pet:{k}" for k in RPG_PETS.keys()],
+            "🧑 NPC":["npc:malkor"],
+            "🎊 Eventos":["event:opening_2026"]+[f"event:event_{y}_{m:02d}" for y in (2026,2027,2028) for m in range(1,13)],
+            "👑 Bosses de evento":["eventboss:opening_2026"]+[f"eventboss:event_{y}_{m:02d}" for y in (2026,2027,2028) for m in range(1,13)],
+        }
+        all_keys=[k for arr in catalogs.values() for k in arr]
+        registered=set()
         with db_lock:
-            c=get_db(); rows=c.execute("SELECT asset_key,updated_at FROM rpg_assets WHERE asset_key LIKE ? ORDER BY asset_key", ("img:enemy:%",)).fetchall(); c.close()
-        registered={str(r['asset_key'])[4:] for r in rows}
-        base=[f"enemy:{e['key']}" for e in RPG_ENEMIES]
-        ready=[k for k in base if k in registered or rpg_asset_path(k)]
-        missing=[k for k in base if k not in registered and not rpg_asset_path(k)]
-        txt=f"🖼️ ARTE RPG\n\n👾 Monstruos base: {len(base)}\n✅ Con imagen: {len(ready)}\n❌ Sin imagen: {len(missing)}\n💾 file_id registrados: {len(rows)}"
+            c=get_db(); rows=c.execute("SELECT asset_key FROM rpg_assets WHERE asset_key LIKE ? ORDER BY asset_key",("img:%",)).fetchall(); c.close()
+        registered={str(r['asset_key'])[4:] for r in rows if str(r['asset_key']).startswith('img:')}
+        lines=["🖼️ ARTE OFICIAL KIWRPG",""]
+        for label,keys in catalogs.items():
+            have=sum(1 for k in keys if k in registered or bool(rpg_asset_path(k)))
+            lines.append(f"{label}: {have}/{len(keys)} ✅ · {len(keys)-have} ❌")
+        lines += ["",f"💾 file_id registrados: {len(registered)}",f"📚 Assets catalogados: {len(all_keys)}", "", "🔎 Ver una: /verimagen CLAVE", "📥 Registrar/reemplazar: responde a una foto con /registrarimagen CLAVE", "🗑️ Borrar: /borrarimagenrpg CLAVE"]
+        missing=[k for k in all_keys if k not in registered and not rpg_asset_path(k)]
         if missing:
-            txt+="\n\nFaltan:\n"+"\n".join("• "+k for k in missing[:30])
-        txt+="\n\nPara registrar una: responde a una foto con\n/registrarimagen enemy:golem_piedra"
-        send_message(chat_id,txt); return True
+            lines += ["", "Primeros que faltan:"]+[f"• {k}" for k in missing[:18]]
+            if len(missing)>18: lines.append(f"… y {len(missing)-18} más.")
+        send_message(chat_id,"\n".join(lines)); return True
 
     if command in ("/clan","/miclan"):
         send_message(chat_id,clan_card(user_id),reply_markup=clan_keyboard(user_id)); return True
@@ -9947,10 +9986,16 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
         if not cfg: send_message(chat_id,"📅 No hay evento programado para esta fecha."); return True
         left=max(0,int((int(st['ends_at'])-time.time())//86400))
-        send_message(chat_id,f"{cfg['icon']} {cfg['title']} — {cfg['year']}\n👑 {cfg['boss']}\n⏳ ~{left} días restantes\n\n⚔️ 5 ataques diarios · 🎁 recompensas de participación\n/bossevento · /tiendaevento"); return True
+        txt=f"{cfg['icon']} {cfg['title']} — {cfg['year']}\n👑 {cfg['boss']}\n⏳ ~{left} días restantes\n\n⚔️ 5 ataques diarios · 🎁 recompensas de participación\n/bossevento · /tiendaevento"
+        sent=send_rpg_image(chat_id,rpg_event_asset_key(cfg['key']),txt)
+        if not sent: send_message(chat_id,txt)
+        return True
     if command=="/bossevento":
         if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 El World Boss solo existe en el chat elegido con /rpgaqui."); return True
-        txt,kb=event_boss_card(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
+        st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); txt,kb=event_boss_card(chat_id,user_id)
+        sent=send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),txt,reply_markup=kb) if cfg else None
+        if not sent: send_message(chat_id,txt,reply_markup=kb)
+        return True
     if command=="/tiendaevento":
         if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 La tienda del evento solo existe en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
@@ -9962,10 +10007,17 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,"📍 Este no es el chat RPG activo. Usa /rpgaqui en el grupo donde quieres que vivan eventos, mazmorras, Malkor y misiones."); return True
         arg=(parts[1].strip().lower() if len(parts)>1 else '')
         if arg!='apertura': send_message(chat_id,"Por ahora el evento manual especial es /iniciarevento apertura"); return True
-        cfg=_opening_cfg(); _event_activate(chat_id,cfg,True); send_message(chat_id,"🎊 LAS PUERTAS DE KIWRPG SE HAN ABIERTO\n\nComienza el Festival de Apertura 2026.\n✨ Bonificaciones inaugurales · ⚔️ desafíos especiales · 🎟️ recompensas de fundador.\n👑 Aeternus espera a la comunidad.\n\nEl festival cerrará automáticamente el 30 de octubre a las 23:59."); return True
+        cfg=_opening_cfg(); _event_activate(chat_id,cfg,True)
+        txt="🎊 LAS PUERTAS DE KIWRPG SE HAN ABIERTO\n\nComienza el Festival de Apertura 2026.\n✨ Bonificaciones inaugurales · ⚔️ desafíos especiales · 🎟️ recompensas de fundador.\n👑 Aeternus espera a la comunidad.\n\nEl festival cerrará automáticamente el 30 de octubre a las 23:59."
+        sent=send_rpg_image(chat_id,rpg_event_asset_key(cfg['key']),txt)
+        if not sent: send_message(chat_id,txt)
+        return True
     if command=="/testbossevento":
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede probar el World Boss."); return True
-        st=_event_auto_sync(chat_id); txt,kb=event_boss_card(chat_id,user_id); send_message(chat_id,"🧪 PRUEBA DE WORLD BOSS\n\n"+txt,reply_markup=kb); return True
+        st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); txt,kb=event_boss_card(chat_id,user_id); txt="🧪 PRUEBA DE WORLD BOSS\n\n"+txt
+        sent=send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),txt,reply_markup=kb) if cfg else None
+        if not sent: send_message(chat_id,txt,reply_markup=kb)
+        return True
     if command=="/boss1hpevento":
         if not is_owner(user_id): return True
         st=_event_auto_sync(chat_id)
@@ -10039,7 +10091,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command == "/mascota":
         user=message.get("from",{}); user_id=user.get("id")
         txt,kb=public_pet_text_keyboard(user_id,user)
-        send_message(chat_id,txt,reply_markup=kb); return True
+        pet=_equipped_pet(user_id)
+        sent=send_rpg_image(chat_id,rpg_pet_asset_key(pet.get('pet_key')),txt,reply_markup=kb) if pet else None
+        if not sent: send_message(chat_id,txt,reply_markup=kb)
+        return True
 
     if command in ("/mascotas", "/pets"):
         user_id=message.get("from",{}).get("id")
@@ -11741,6 +11796,27 @@ def rpg_asset_file(filename):
     # Solo sirve archivos dentro de ./assets
     return send_from_directory(str(RPG_ASSETS_DIR), filename)
 
+@app.route("/rpg/art/class/<key>", methods=["GET"])
+def rpg_registered_class_art(key):
+    """Sirve al Mini App el mismo arte oficial registrado en Telegram sin exponer el token del bot."""
+    asset_key=f"class:{str(key or '').strip().lower()}"
+    file_id=_rpg_asset_get(f"img:{asset_key}")
+    if not file_id or not TELEGRAM_API:
+        return rpg_class_art(key)
+    try:
+        meta=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/getFile",params={"file_id":file_id},timeout=TELEGRAM_TIMEOUT).json()
+        file_path=((meta.get("result") or {}).get("file_path") or "")
+        if not file_path:
+            return rpg_class_art(key)
+        raw=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/file/bot{TELEGRAM_TOKEN}/{file_path}",timeout=TELEGRAM_TIMEOUT)
+        if not raw.ok:
+            return rpg_class_art(key)
+        mime=raw.headers.get("Content-Type") or "image/jpeg"
+        return Response(raw.content,200,{"Content-Type":mime,"Cache-Control":"public, max-age=3600"})
+    except Exception:
+        logger.exception("No pude servir arte web de clase %s",asset_key)
+        return rpg_class_art(key)
+
 @app.route("/rpg/class-art/<key>.svg", methods=["GET"])
 def rpg_class_art(key):
     art={"guerrero":("#8b1e1e","#e5b45a","⚔️","GUERRERO"),"mago":("#31206f","#9b7cff","🔮","MAGO"),"picaro":("#173d35","#62d3a6","🗡️","PÍCARO"),"paladin":("#263d66","#e8d58b","🛡️","PALADÍN"),"arquero":("#35551f","#b8dc72","🏹","ARQUERO"),"the_cleaner":("#15151b","#d8b85a","🪽","THE CLEANER")}
@@ -11789,7 +11865,7 @@ def rpg_draw_submit():
 def rpg_create_page():
     html="""<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
 body{font-family:system-ui,-apple-system,sans-serif;background:#0d0f14;color:#fff;margin:0;padding:20px}.wrap{max-width:680px;margin:auto}.hero{text-align:center;margin:10px 0 22px}.muted{color:#aeb6c5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#171b24;border:1px solid #2a3040;border-radius:16px;padding:16px;cursor:pointer}.card.sel{outline:2px solid #fff}.emoji{font-size:32px}.stats{font-size:14px;color:#dce2ed;margin-top:8px}.owner{border-color:#d6b85a}.name{width:100%;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #343b4b;background:#11151d;color:#fff;font-size:16px;margin:18px 0 10px}.btn{width:100%;padding:15px;border:0;border-radius:13px;font-weight:800;font-size:16px;cursor:pointer}.status{text-align:center;margin-top:12px;min-height:24px}@media(max-width:500px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><div class="hero"><h1>🧙 Crea tu personaje</h1><div class="muted">Elige una clase, revisa sus estadísticas y comienza tu aventura.</div></div><div id="classes" class="grid"></div><input id="name" class="name" maxlength="24" placeholder="Nombre de tu personaje"><button id="create" class="btn">✨ Crear personaje</button><div id="status" class="status"></div></div><script>
-const tg=window.Telegram.WebApp;tg.ready();tg.expand();const base=[{key:'guerrero',e:'⚔️',n:'Guerrero',hp:120,a:14,d:8,x:'Resistente y estable. Buen equilibrio entre ataque y defensa.',img:'/rpg/class-art/guerrero.svg'},{key:'mago',e:'🔮',n:'Mago',hp:85,a:18,d:4,x:'Gran daño y magia capaz de atravesar defensas, a cambio de resistencia.',img:'/rpg/class-art/mago.svg'},{key:'picaro',e:'🗡️',n:'Pícaro',hp:95,a:16,d:5,x:'Ágil y agresivo. Especialista en críticos y evasión.',img:'/rpg/class-art/picaro.svg'},{key:'paladin',e:'🛡️',n:'Paladín',hp:130,a:11,d:10,x:'Defensa, bloqueo y recuperación.',img:'/rpg/class-art/paladin.svg'},{key:'arquero',e:'🏹',n:'Arquero',hp:100,a:15,d:6,x:'Preciso y consistente. Premia las buenas tiradas.',img:'/rpg/class-art/arquero.svg'}];let selected=null,classes=[...base];const uid=tg.initDataUnsafe?.user?.id;if(uid&&String(uid)==='OWNER_ID_PLACEHOLDER')classes.push({key:'the_cleaner',e:'🪽',n:'The Cleaner',hp:130,a:18,d:9,x:'Clase exclusiva de Kiu. One Winged Angel.',img:'/rpg/class-art/the_cleaner.svg',owner:true});const box=document.getElementById('classes');function draw(){box.innerHTML='';classes.forEach(c=>{let el=document.createElement('div');el.className='card'+(selected===c.key?' sel':'')+(c.owner?' owner':'');el.innerHTML=`${c.img?`<img src="${c.img}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:12px;margin-bottom:10px" onerror="this.remove()">`:''}<div class="emoji">${c.e}</div><h3>${c.n}</h3><div class="stats">❤️ ${c.hp} HP · 🗡️ ${c.a} ATK · 🛡️ ${c.d} DEF</div><p class="muted">${c.x}</p>`;el.onclick=()=>{selected=c.key;draw()};box.appendChild(el)})}draw();document.getElementById('create').onclick=async()=>{const st=document.getElementById('status'),name=document.getElementById('name').value.trim();if(!selected){st.textContent='Elige una clase.';return}if(!name){st.textContent='Escribe el nombre de tu personaje.';return}st.textContent='Creando...';try{const r=await fetch('/rpg/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,class_key:selected,name})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1300)}}catch(e){st.textContent='No pude conectar con KiwBot.'}};if(!tg.initData)document.getElementById('status').textContent='Abre este creador desde KiwBot en Telegram.';</script></body></html>"""
+const tg=window.Telegram.WebApp;tg.ready();tg.expand();const base=[{key:'guerrero',e:'⚔️',n:'Guerrero',hp:120,a:14,d:8,x:'Resistente y estable. Buen equilibrio entre ataque y defensa.',img:'/rpg/art/class/guerrero'},{key:'mago',e:'🔮',n:'Mago',hp:85,a:18,d:4,x:'Gran daño y magia capaz de atravesar defensas, a cambio de resistencia.',img:'/rpg/art/class/mago'},{key:'picaro',e:'🗡️',n:'Pícaro',hp:95,a:16,d:5,x:'Ágil y agresivo. Especialista en críticos y evasión.',img:'/rpg/art/class/picaro'},{key:'paladin',e:'🛡️',n:'Paladín',hp:130,a:11,d:10,x:'Defensa, bloqueo y recuperación.',img:'/rpg/art/class/paladin'},{key:'arquero',e:'🏹',n:'Arquero',hp:100,a:15,d:6,x:'Preciso y consistente. Premia las buenas tiradas.',img:'/rpg/art/class/arquero'}];let selected=null,classes=[...base];const uid=tg.initDataUnsafe?.user?.id;if(uid&&String(uid)==='OWNER_ID_PLACEHOLDER')classes.push({key:'the_cleaner',e:'🪽',n:'The Cleaner',hp:130,a:18,d:9,x:'Clase exclusiva de Kiu. One Winged Angel.',img:'/rpg/art/class/the_cleaner',owner:true});const box=document.getElementById('classes');function draw(){box.innerHTML='';classes.forEach(c=>{let el=document.createElement('div');el.className='card'+(selected===c.key?' sel':'')+(c.owner?' owner':'');el.innerHTML=`${c.img?`<img src="${c.img}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:12px;margin-bottom:10px" onerror="this.remove()">`:''}<div class="emoji">${c.e}</div><h3>${c.n}</h3><div class="stats">❤️ ${c.hp} HP · 🗡️ ${c.a} ATK · 🛡️ ${c.d} DEF</div><p class="muted">${c.x}</p>`;el.onclick=()=>{selected=c.key;draw()};box.appendChild(el)})}draw();document.getElementById('create').onclick=async()=>{const st=document.getElementById('status'),name=document.getElementById('name').value.trim();if(!selected){st.textContent='Elige una clase.';return}if(!name){st.textContent='Escribe el nombre de tu personaje.';return}st.textContent='Creando...';try{const r=await fetch('/rpg/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,class_key:selected,name})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1300)}}catch(e){st.textContent='No pude conectar con KiwBot.'}};if(!tg.initData)document.getElementById('status').textContent='Abre este creador desde KiwBot en Telegram.';</script></body></html>"""
     return html.replace('OWNER_ID_PLACEHOLDER', str(OWNER_TELEGRAM_ID))
 
 @app.route("/rpg/api/create", methods=["POST"])

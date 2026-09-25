@@ -2176,7 +2176,17 @@ def send_dice(chat_id, emoji="🎲", reply_to_message_id=None):
     data = {"chat_id": chat_id, "emoji": emoji}
     if reply_to_message_id:
         data["reply_parameters"] = {"message_id": reply_to_message_id}
-    return telegram("sendDice", data)
+    result=telegram("sendDice", data)
+    # Visible unos segundos y después fuera: evita llenar el chat de dados.
+    try:
+        mid=int((((result or {}).get("result") or {}).get("message_id") or 0))
+        if mid:
+            timer=threading.Timer(4.0, lambda: delete_message(chat_id,mid))
+            timer.daemon=True
+            timer.start()
+    except Exception:
+        pass
+    return result
 
 
 def send_photo(chat_id, photo, caption="", reply_to_message_id=None, reply_markup=None):
@@ -4057,7 +4067,7 @@ def _rpg_apply_defeat(conn, char):
     old_exp = int(char["exp"])
     lost = int(round(old_exp * 0.20))
     new_exp = max(0, old_exp - lost)
-    until = int(time.time()) + 300
+    until = int(time.time()) + 180
     conn.execute("UPDATE characters SET hp=0, exp=?, defeated_until=?, updated_at=? WHERE id=?",
                  (new_exp, until, int(time.time()), int(char["id"])))
     return lost, until
@@ -4323,7 +4333,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n\n"
                     f"💀 {char['name']} ha sido derrotado.\n📉 -{lost_exp} EXP (20% de tu progreso del nivel)\n"
-                    "⏳ Recuperación: 5 minutos.\n🧪 Una Esencia Vital puede levantarte antes.")
+                    "⏳ Recuperación: 3 minutos.\n"
+                    "🤝 Otro aventurero puede ayudarte a volver con 50% de vida.\n"
+                    "🧪 Una Esencia Vital puede levantarte antes.",
+                    reply_markup={"inline_keyboard":[[{"text":"🤝 Ayudar a levantar","callback_data":f"rpg_help_revive:{user_id}"}]]})
             else:
                 send_message(chat_id,
                     f"{ability['emoji']} {char['name']} usa {ability['name']}\n🎲 {roll}\n{fail}"
@@ -4354,7 +4367,7 @@ def rpg_defend_action(chat_id,user_id):
                 lost,_=_rpg_apply_defeat(conn,cdict)
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
-                send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 5 minutos.")
+                send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 3 minutos.")
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(hp,int(time.time()),int(char["id"])))
                 conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,int(time.time()),int(chat_id),int(user_id)))
@@ -6318,7 +6331,7 @@ def boss_join(chat_id,user_id,boss_id):
         conn=get_db(); conn.execute("INSERT INTO rpg_boss_participants(boss_id,user_id,character_id,hp,max_hp,joined_at) VALUES(?,?,?,?,?,?) ON CONFLICT(boss_id,user_id) DO NOTHING",(int(boss_id),int(user_id),int(char['id']),int(eff['max_hp']),int(eff['max_hp']),int(time.time()))); conn.commit(); conn.close()
     return True,f"⚔️ {_pvp_name(user_id)} entró al combate contra {b['name']}."
 
-BOSS_RECOVERY_SECONDS = 300
+BOSS_RECOVERY_SECONDS = 180
 
 def boss_rejoin(chat_id,user_id,boss_id):
     b=_boss_active(chat_id)
@@ -6621,8 +6634,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 # =========================================================
 # KIWRPG V7.1 — MUNDO VIVO / MONSTRUOS AUTOMÁTICOS
 # =========================================================
-RPG_AUTO_ENCOUNTER_INTERVAL = 5 * 60
-RPG_AUTO_ENCOUNTER_TTL = 4 * 60 + 30
+RPG_AUTO_ENCOUNTER_INTERVAL = 3 * 60
+RPG_AUTO_ENCOUNTER_TTL = 2 * 60 + 40
 
 RPG_AUTO_STORIES = [
     "🌲 Algo se mueve entre los árboles cerca del camino.",
@@ -6856,6 +6869,19 @@ def _mission_catalog():
 
 RPG_MISSION_CATALOG = _mission_catalog()
 
+RPG_WILL_MYTHIC_MISSION = {
+    "key":"will_assassin_aereo",
+    "event":"pve_win",
+    "goal":20,
+    "rarity":"mitica",
+    "icon":"🔴",
+    "reward":12000,
+    "title":"El Asesino Aéreo",
+    "story":"Un guerrero imposible de seguir ha dejado un desafío: demuestra que puedes volar por encima del resto."
+}
+RPG_WILL_MYTHIC_CHANCE = 0.02
+
+
 def _mission_cycle_id(now=None):
     return int((int(now or time.time())) // RPG_MISSION_CYCLE_SECONDS)
 
@@ -6876,29 +6902,57 @@ def _mission_ensure_tables():
             updated_at BIGINT NOT NULL,
             PRIMARY KEY(cycle_id,user_id,mission_key)
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_mission_selected(
+            cycle_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            mission_key TEXT NOT NULL,
+            selected_at BIGINT NOT NULL,
+            PRIMARY KEY(cycle_id,user_id)
+        )""")
         conn.commit(); conn.close()
 
 def _mission_board(cycle_id=None):
     c=_mission_cycle_id() if cycle_id is None else int(cycle_id)
-    # Misma selección para todos durante el ciclo; cambia completamente al renovarse.
     rng=random.Random(0x4B4957 ^ c)
     by_event={}
     for m in RPG_MISSION_CATALOG:
         by_event.setdefault(m["event"],[]).append(m)
-    chosen=[]
-    events=list(by_event)
-    rng.shuffle(events)
-    # Primero diversidad: una de cada actividad.
-    for ev in events:
-        chosen.append(dict(rng.choice(by_event[ev])))
-    # Completa hasta 10 sin repetir la misma misión.
+    events=list(by_event.keys()); rng.shuffle(events)
+    chosen=[dict(rng.choice(by_event[ev])) for ev in events]
     remaining=[m for m in RPG_MISSION_CATALOG if m["key"] not in {x["key"] for x in chosen}]
     rng.shuffle(remaining)
     chosen.extend(dict(x) for x in remaining[:max(0,RPG_MISSION_BOARD_SIZE-len(chosen))])
-    # Orden visual por dificultad/rareza.
-    order={"comun":0,"poco_comun":1,"raro":2,"epica":3,"legendaria":4}
-    chosen=sorted(chosen[:RPG_MISSION_BOARD_SIZE],key=lambda x:(order.get(x["rarity"],9),x["goal"]))
-    return chosen
+    if rng.random() < RPG_WILL_MYTHIC_CHANCE:
+        chosen[-1]=dict(RPG_WILL_MYTHIC_MISSION)
+    order={"comun":0,"poco_comun":1,"raro":2,"epica":3,"legendaria":4,"mitica":5}
+    return sorted(chosen[:RPG_MISSION_BOARD_SIZE],key=lambda x:(order.get(x["rarity"],9),x["goal"]))
+
+def _mission_selected_key(user_id,cycle_id=None):
+    _mission_ensure_tables()
+    c=_mission_cycle_id() if cycle_id is None else int(cycle_id)
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("SELECT mission_key FROM rpg_mission_selected WHERE cycle_id=? AND user_id=?",
+                         (c,int(user_id))).fetchone()
+        conn.close()
+    return str(row["mission_key"]) if row else ""
+
+def mission_select(user_id,mission_key):
+    _mission_ensure_tables()
+    uid=int(user_id); c=_mission_cycle_id()
+    mission=next((m for m in _mission_board(c) if m["key"]==str(mission_key)),None)
+    if not mission:
+        return False,"Esa misión ya no pertenece al tablón actual."
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_mission_selected(cycle_id,user_id,mission_key,selected_at)
+                        VALUES(?,?,?,?)
+                        ON CONFLICT(cycle_id,user_id) DO UPDATE SET
+                          mission_key=EXCLUDED.mission_key,selected_at=EXCLUDED.selected_at""",
+                     (c,uid,mission["key"],int(time.time())))
+        conn.commit(); conn.close()
+    return True,f"🎯 Misión seleccionada: {mission['title']}"
+
 
 def mission_event(user_id,event,amount=1):
     """Avanza todas las misiones activas compatibles y paga al completarlas."""
@@ -6906,7 +6960,11 @@ def mission_event(user_id,event,amount=1):
         uid=int(user_id); amount=max(0,int(amount))
         if not uid or amount<=0: return []
         _mission_ensure_tables()
-        cycle=_mission_cycle_id(); board=[m for m in _mission_board(cycle) if m["event"]==event]
+        cycle=_mission_cycle_id()
+        selected=_mission_selected_key(uid,cycle)
+        if not selected:
+            return []
+        board=[m for m in _mission_board(cycle) if m["event"]==event and m["key"]==selected]
         if not board: return []
         completed=[]
         now=int(time.time())
@@ -6956,6 +7014,7 @@ def mission_event(user_id,event,amount=1):
 def mission_board_text(user_id):
     _mission_ensure_tables()
     uid=int(user_id); cycle=_mission_cycle_id(); board=_mission_board(cycle)
+    selected=_mission_selected_key(uid,cycle)
     with db_lock:
         conn=get_db()
         rows=conn.execute("""SELECT mission_key,progress,completed FROM rpg_mission_progress
@@ -6964,19 +7023,30 @@ def mission_board_text(user_id):
     prog={r["mission_key"]:dict(r) for r in rows}
     left=max(0,_mission_cycle_ends(cycle)-int(time.time()))
     lines=["📜 TABLÓN DE MISIONES","",
-           "10 misiones activas · puedes completar TODAS.",
+           "Elige la misión que quieres realizar.",
+           "Solo la seleccionada avanza; cambiarla no borra tu progreso.",
            f"🔄 Nuevo tablón en {left//3600}h {(left%3600)//60}m",""]
     for i,m in enumerate(board,1):
         r=prog.get(m["key"],{})
         p=min(int(m["goal"]),int(r.get("progress") or 0))
         done=p>=int(m["goal"])
-        mark="✅" if done else m["icon"]
-        lines.append(f"{i}. {mark} {m['title']}")
+        mark="✅" if done else ("🎯" if selected==m["key"] else m["icon"])
+        rarity="MÍTICA" if m["rarity"]=="mitica" else m["rarity"].replace("_"," ").upper()
+        lines.append(f"{i}. {mark} {m['title']} · {rarity}")
         lines.append(f"   {m.get('story','')}")
         lines.append(f"   🎯 {p:,}/{m['goal']:,} · 🪙 {m['reward']:,} KW")
     done_count=sum(1 for m in board if int(prog.get(m["key"],{}).get("progress") or 0)>=int(m["goal"]))
     lines += ["",f"🏁 Completadas: {done_count}/10"]
     return "\n".join(lines)
+
+def mission_board_keyboard(user_id):
+    c=_mission_cycle_id(); board=_mission_board(c); selected=_mission_selected_key(user_id,c)
+    rows=[]
+    for i,m in enumerate(board,1):
+        prefix="🎯" if selected==m["key"] else ("🔴" if m["rarity"]=="mitica" else m["icon"])
+        rows.append([{"text":f"{prefix} {i}. {m['title']}","callback_data":f"mission_select:{m['key']}"}])
+    return {"inline_keyboard":rows}
+
 
 def _delete_old_combat_card(chat_id,msg):
     """Borra la tarjeta anterior después de generar la siguiente; los dados siguen visibles."""
@@ -6987,9 +7057,46 @@ def _delete_old_combat_card(chat_id,msg):
         pass
 
 
+RPG_HELP_REVIVE_REWARD = 350
+
+def help_revive_player(helper_id,target_id):
+    helper_id=int(helper_id); target_id=int(target_id)
+    if helper_id==target_id:
+        return False,"No puedes levantarte tú mismo. 😌"
+    with db_lock:
+        conn=get_db()
+        target=conn.execute("SELECT * FROM characters WHERE user_id=? AND active=1 FOR UPDATE",(target_id,)).fetchone()
+        if not target:
+            conn.rollback(); conn.close(); return False,"Ese jugador no tiene un personaje activo."
+        if int(target["hp"])>0 or int(target.get("defeated_until") or 0)<=int(time.time()):
+            conn.rollback(); conn.close(); return False,"Ese aventurero ya no necesita ayuda."
+        eff=effective_character_stats(target)
+        hp=max(1,int(eff["max_hp"])*50//100)
+        conn.execute("UPDATE characters SET hp=?,defeated_until=0,updated_at=? WHERE id=?",
+                     (hp,int(time.time()),int(target["id"])))
+        conn.commit(); conn.close()
+    change_kiwons(helper_id,RPG_HELP_REVIVE_REWARD,"rpg_help_revive",
+                  note=f"Ayudó a levantar al jugador {target_id}")
+    return True,f"🤝 ¡Rescate completado!\n❤️ Vuelve con {hp}/{eff['max_hp']} HP.\n🪙 +{RPG_HELP_REVIVE_REWARD} KW para quien ayudó."
+
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("rpg_help_revive:"):
+        try: target_id=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=help_revive_player(uid,target_id)
+        send_message(chat_id,msg2)
+        if ok: _delete_old_combat_card(chat_id,msg)
+        return True
+    if data.startswith("mission_select:"):
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 Elige tus misiones en privado.",reply_markup=_private_launch_keyboard("missions"))
+            return True
+        key=data.split(":",1)[1]
+        ok,msg2=mission_select(uid,key)
+        send_message(chat_id,msg2+"\n\n"+mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
+        return True
     if data.startswith("auto_encounter_claim:"):
         spawn_id=int(data.split(":",1)[1])
         ok,msg2,spawn=claim_auto_encounter(chat_id,uid,spawn_id)
@@ -7393,13 +7500,15 @@ def process_command(
             ensure_player(user)
             send_character_creator(chat_id,user.get("id"),origin_chat_id=origin_chat_id or chat_id)
             return True
-        if len(parts)>1 and parts[1] in ("shop","pets"):
+        if len(parts)>1 and parts[1] in ("shop","pets","missions"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
                 balance,kb=rpg_shop_keyboard(user.get("id")); send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
-            else:
+            elif parts[1]=="pets":
                 send_message(chat_id,pet_gacha_text(user.get("id")),reply_markup=pet_gacha_keyboard())
+            else:
+                send_message(chat_id,mission_board_text(user.get("id")),reply_markup=mission_board_keyboard(user.get("id")))
             return True
 
     # -----------------------------------------------------
@@ -7618,7 +7727,11 @@ def process_command(
     if command in ("/misiones", "/tablon", "/misionesrpg"):
         uid=message.get("from",{}).get("id")
         ensure_player(message.get("from",{}))
-        send_message(chat_id,mission_board_text(uid))
+        if chat.get("type")!="private":
+            send_message(chat_id,"📜 El Tablón de Misiones se abre en privado.",
+                         reply_markup=_private_launch_keyboard("missions"))
+            return True
+        send_message(chat_id,mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
         return True
 
     if command in ("/encuentro", "/combatir"):

@@ -4413,7 +4413,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                         with db_lock:
                             dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
                         e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
-                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
+                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard((get_active_character(user_id) or {}).get("class_name","Guerrero"),0,0,user_id))
                     else:
                         with db_lock:
                             dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
@@ -4764,6 +4764,39 @@ def materials_text(user_id):
     lines += ["","Se usarán para el Mercader Errante, intercambios y futuras recetas."]
     return "\n".join(lines)
 
+
+def equipable_items_keyboard(user_id):
+    """Muestra únicamente objetos del inventario que el personaje puede equipar ahora."""
+    char=get_active_character(user_id)
+    if not char:
+        return "No tienes un personaje activo.", None
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""SELECT i.id,i.quantity,i.equipped,i.serial_number,x.name,x.rarity,x.equip_slot,x.allowed_classes,x.min_level,x.atk_bonus,x.def_bonus,x.hp_bonus
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=? AND x.equip_slot IS NOT NULL AND x.equip_slot<>''
+            ORDER BY x.rarity,x.name,i.id""",(int(user_id),world)).fetchall()
+        conn.close()
+    available=[]
+    for raw in rows:
+        row=dict(raw)
+        ok,_=item_compatibility(row,char)
+        if ok and not int(row.get("equipped") or 0):
+            available.append(row)
+    if not available:
+        return "⚔️ EQUIPAR\n\nNo tienes equipo compatible pendiente de equipar.", None
+    lines=["⚔️ EQUIPAR", "", "Solo aparecen objetos que puedes equipar ahora:"]
+    kb=[]
+    for r in available:
+        bonuses=[]
+        if int(r.get("atk_bonus") or 0): bonuses.append(f"⚔️ +{r['atk_bonus']}")
+        if int(r.get("def_bonus") or 0): bonuses.append(f"🛡️ +{r['def_bonus']}")
+        if int(r.get("hp_bonus") or 0): bonuses.append(f"❤️ +{r['hp_bonus']}")
+        extra=(" · "+" ".join(bonuses)) if bonuses else ""
+        lines.append(f"{RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']} · {str(r['equip_slot']).title()}{extra}")
+        kb.append([{"text":f"⚔️ {r['name']} · {str(r['equip_slot']).title()}","callback_data":f"rpg_equip:{r['id']}"}])
+    return "\n".join(lines), {"inline_keyboard":kb}
 
 def equipment_text(user_id):
     char=get_active_character(user_id)
@@ -6897,14 +6930,19 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
             conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró."
         battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
         if battle:
-            if int(battle.get("dungeon_event_id") or 0)==int(dungeon_id):
-                room=max(1,int(battle.get("dungeon_room") or 1))
-                name=d["dungeon_name"]
+            # Entrar a una mazmorra es idempotente: si este mismo botón ya creó
+            # la pelea de esta mazmorra, simplemente volvemos a mostrarla.
+            # Nunca creamos un segundo enemigo ni pisamos el combate existente.
+            if int(battle.get("dungeon_event_id") or 0) == int(dungeon_id):
+                room=int(battle.get("dungeon_room") or 1)
                 enemy_name=battle.get("enemy_name") or "Enemigo"
-                enemy_hp=int(battle.get("enemy_hp") or 0); enemy_max=int(battle.get("enemy_max_hp") or enemy_hp)
+                enemy_hp=max(0,int(battle.get("enemy_hp") or 0))
+                enemy_max=max(1,int(battle.get("enemy_max_hp") or enemy_hp or 1))
                 conn.rollback(); conn.close()
-                return True,f"🏰 {name}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n⚔️ {enemy_name}\n❤️ {enemy_hp}/{enemy_max} HP\n\nContinúa tu combate."
-            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Usa /resetcombate si quedó trabado."
+                return True,(f"🏰 {d['dungeon_name']}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n"
+                             f"⚔️ {enemy_name}\n❤️ {enemy_hp}/{enemy_max} HP\n\n"
+                             "Ya estabas dentro. Continúa el combate.")
+            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Termínalo antes de entrar a la mazmorra."
         run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(int(dungeon_id),int(user_id))).fetchone()
         if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
         if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
@@ -7361,11 +7399,7 @@ def handle_rpg_callback(query):
         try: dungeon_id=int(data.split(":",1)[1])
         except Exception: return True
         ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
-        
-        char=get_active_character(uid) if ok else None
-        battle=get_rpg_battle(chat_id,uid) if ok else None
-        kb=rpg_battle_keyboard(char["class_name"],int(battle.get("ultimate_cd") or 0),int(battle.get("special_cd") or 0),uid) if (ok and char and battle) else None
-        send_message(chat_id,msg2,reply_markup=kb)
+        send_message(chat_id,msg2,reply_markup=rpg_battle_keyboard((get_active_character(uid) or {}).get("class_name","Guerrero"),0,0,uid) if ok else None)
         return True
     if data.startswith("rpg_help_revive:"):
         try: target_id=int(data.split(":",1)[1])
@@ -7828,6 +7862,7 @@ def process_command(
             "/tienda — compra consumibles y equipo básico con Kiwons\n"
             "/materiales — materiales reunidos\n"
             "/equipo — equipo y estadísticas totales\n"
+            "/equipar — muestra solo equipo que puedes equipar\n"
             "/personaje — muestra tu personaje\n"
             "/heroes — salón de eras anteriores\n\n"
             "En combate elige tus movimientos con botones. KiwBot lanza el dado REAL 🎲 de Telegram automáticamente."
@@ -8039,16 +8074,6 @@ def process_command(
         send_message(chat_id,mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
         return True
 
-    if command in ("/resetcombate", "/reiniciarcombate"):
-        uid=int(message.get("from",{}).get("id"))
-        removed=cancel_rpg_encounter(chat_id,uid)
-        cleanup_combat_dice(chat_id,uid)
-        if removed:
-            send_message(chat_id,"🔄 Tu combate trabado fue reiniciado. Ya puedes entrar a otro encuentro o mazmorra.")
-        else:
-            send_message(chat_id,"ℹ️ No tenías un combate PvE/mazmorra activo para reiniciar.")
-        return True
-
     if command == "/mazmorra":
         d=_active_dungeon(chat_id)
         if not d:
@@ -8060,14 +8085,10 @@ def process_command(
         if not is_owner(message.get("from",{}).get("id")):
             send_message(chat_id,"Solo Kiu puede forzar una mazmorra de prueba."); return True
         register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
-        now=int(time.time())
         with db_lock:
-            tc=get_db()
-            tc.execute("UPDATE rpg_dungeons SET status='expired' WHERE chat_id=? AND status='active'",(int(chat_id),))
-            tc.commit()
-            row=tc.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); tc.close()
-        if row and _spawn_dungeon(dict(row),now): send_message(chat_id,"🧪 Mazmorra de prueba creada. Usa el botón 🏰 Entrar a la mazmorra.")
-        else: send_message(chat_id,"No se pudo crear la mazmorra de prueba.")
+            tc=get_db(); row=tc.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); tc.close()
+        if row and _spawn_dungeon(dict(row),int(time.time())): send_message(chat_id,"🧪 Mazmorra de prueba creada.")
+        else: send_message(chat_id,"Ya hay una mazmorra activa o no se pudo crear.")
         return True
 
     if command in ("/encuentro", "/combatir"):
@@ -8149,6 +8170,24 @@ def process_command(
     if command in ("/materiales", "/mats"):
         user_id=message.get("from",{}).get("id")
         send_message(chat_id,materials_text(user_id))
+        return True
+
+    if command in ("/equipar", "/equip"):
+        user_id=message.get("from",{}).get("id")
+        text2,kb=equipable_items_keyboard(user_id)
+        send_message(chat_id,text2,reply_markup=kb)
+        return True
+
+    if command in ("/resetcombate", "/reiniciarcombate"):
+        user_id=message.get("from",{}).get("id")
+        with db_lock:
+            conn=get_db()
+            battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
+            if not battle:
+                conn.close(); send_message(chat_id,"⚔️ No tienes ningún combate trabado en este chat."); return True
+            conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+            conn.commit(); conn.close()
+        send_message(chat_id,"♻️ Tu combate de este chat fue reiniciado. Ya puedes volver a entrar o iniciar otro.")
         return True
 
     if command in ("/equipo", "/equipamiento"):
@@ -9950,6 +9989,38 @@ def configure_webhook():
     )
 
 
+def configure_bot_commands():
+    # Menú nativo de Telegram. /start se omite a propósito: queda disponible
+    # internamente para enlaces privados, pero no aparece como comando sugerido.
+    commands=[
+        {"command":"rpg","description":"Ver comandos de KiwRPG"},
+        {"command":"personaje","description":"Ver tu personaje"},
+        {"command":"perfil","description":"Ver tu perfil RPG"},
+        {"command":"saldo","description":"Ver tus Kiwons"},
+        {"command":"inventario","description":"Ver tus objetos"},
+        {"command":"equipo","description":"Ver equipo y estadísticas"},
+        {"command":"equipar","description":"Equipar objetos compatibles"},
+        {"command":"forja","description":"Abrir la forja"},
+        {"command":"tienda","description":"Abrir la tienda"},
+        {"command":"mascota","description":"Ver tu mascota"},
+        {"command":"gacha","description":"Gacha de mascotas"},
+        {"command":"misiones","description":"Abrir el tablón de misiones"},
+        {"command":"mazmorra","description":"Ver la mazmorra activa"},
+        {"command":"encuentro","description":"Iniciar un encuentro"},
+        {"command":"boss","description":"Ver el Boss activo"},
+        {"command":"omega","description":"Ver a Kenny Omega"},
+        {"command":"duelo","description":"Duelo amistoso"},
+        {"command":"duelopvp","description":"Duelo clasificatorio"},
+        {"command":"pvp","description":"Ver tu temporada PvP"},
+        {"command":"rankingpvp","description":"Ranking PvP"},
+        {"command":"rendirse","description":"Abandonar el duelo actual"},
+        {"command":"transferir","description":"Transferir Kiwons"},
+        {"command":"resetcombate","description":"Reiniciar tu combate si se traba"}
+    ]
+    result=telegram("setMyCommands",{"commands":commands})
+    logger.info("setMyCommands: %s",result)
+
+
 # =========================================================
 # START
 # =========================================================
@@ -9971,6 +10042,7 @@ if __name__ == "__main__":
     )
 
     configure_webhook()
+    configure_bot_commands()
 
     # Recordatorios de Kenny Omega y cierre automático del ranking.
     threading.Thread(target=_omega_announcer_loop,daemon=True,name="omega-announcer").start()

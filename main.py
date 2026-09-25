@@ -919,7 +919,7 @@ def init_db():
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(item_key) DO UPDATE SET
             name=EXCLUDED.name, rarity=EXCLUDED.rarity, item_type=EXCLUDED.item_type,
             description=EXCLUDED.description, tradeable=EXCLUDED.tradeable""",
-            ('polvo_forja','Polvo de Forja','comun','material','Material común desprendido por los monstruos. El Forjador lo usa para reforzar armas y armaduras hasta +15.',0,0,0,None,1,'','',1,now))
+            ('polvo_forja','Polvo de Forja','comun','material','Material común desprendido por los monstruos. El Forjador lo usa para reforzar armas y armaduras hasta +15.',0,0,0,None,1,'','',1,now_seed))
 
         # KiwRPG V6.2 — equipo de Forja. Los materiales/Omega ahora tienen uso real.
         boss_equipment_items = [

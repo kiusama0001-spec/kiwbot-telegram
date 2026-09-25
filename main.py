@@ -4413,7 +4413,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                         with db_lock:
                             dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
                         e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
-                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=_rpg_combat_keyboard(user_id))
+                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
                     else:
                         with db_lock:
                             dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
@@ -6897,19 +6897,14 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
             conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró."
         battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
         if battle:
-            # Entrar a una mazmorra es idempotente: si este mismo botón ya creó
-            # la pelea de esta mazmorra, simplemente volvemos a mostrarla.
-            # Nunca creamos un segundo enemigo ni pisamos el combate existente.
-            if int(battle.get("dungeon_event_id") or 0) == int(dungeon_id):
-                room=int(battle.get("dungeon_room") or 1)
+            if int(battle.get("dungeon_event_id") or 0)==int(dungeon_id):
+                room=max(1,int(battle.get("dungeon_room") or 1))
+                name=d["dungeon_name"]
                 enemy_name=battle.get("enemy_name") or "Enemigo"
-                enemy_hp=max(0,int(battle.get("enemy_hp") or 0))
-                enemy_max=max(1,int(battle.get("enemy_max_hp") or enemy_hp or 1))
+                enemy_hp=int(battle.get("enemy_hp") or 0); enemy_max=int(battle.get("enemy_max_hp") or enemy_hp)
                 conn.rollback(); conn.close()
-                return True,(f"🏰 {d['dungeon_name']}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n"
-                             f"⚔️ {enemy_name}\n❤️ {enemy_hp}/{enemy_max} HP\n\n"
-                             "Ya estabas dentro. Continúa el combate.")
-            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Termínalo antes de entrar a la mazmorra."
+                return True,f"🏰 {name}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n⚔️ {enemy_name}\n❤️ {enemy_hp}/{enemy_max} HP\n\nContinúa tu combate."
+            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Usa /resetcombate si quedó trabado."
         run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(int(dungeon_id),int(user_id))).fetchone()
         if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
         if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
@@ -7366,7 +7361,11 @@ def handle_rpg_callback(query):
         try: dungeon_id=int(data.split(":",1)[1])
         except Exception: return True
         ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
-        send_message(chat_id,msg2,reply_markup=_rpg_combat_keyboard(uid) if ok else None)
+        
+        char=get_active_character(uid) if ok else None
+        battle=get_rpg_battle(chat_id,uid) if ok else None
+        kb=rpg_battle_keyboard(char["class_name"],int(battle.get("ultimate_cd") or 0),int(battle.get("special_cd") or 0),uid) if (ok and char and battle) else None
+        send_message(chat_id,msg2,reply_markup=kb)
         return True
     if data.startswith("rpg_help_revive:"):
         try: target_id=int(data.split(":",1)[1])
@@ -8040,6 +8039,16 @@ def process_command(
         send_message(chat_id,mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
         return True
 
+    if command in ("/resetcombate", "/reiniciarcombate"):
+        uid=int(message.get("from",{}).get("id"))
+        removed=cancel_rpg_encounter(chat_id,uid)
+        cleanup_combat_dice(chat_id,uid)
+        if removed:
+            send_message(chat_id,"🔄 Tu combate trabado fue reiniciado. Ya puedes entrar a otro encuentro o mazmorra.")
+        else:
+            send_message(chat_id,"ℹ️ No tenías un combate PvE/mazmorra activo para reiniciar.")
+        return True
+
     if command == "/mazmorra":
         d=_active_dungeon(chat_id)
         if not d:
@@ -8051,10 +8060,14 @@ def process_command(
         if not is_owner(message.get("from",{}).get("id")):
             send_message(chat_id,"Solo Kiu puede forzar una mazmorra de prueba."); return True
         register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        now=int(time.time())
         with db_lock:
-            tc=get_db(); row=tc.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); tc.close()
-        if row and _spawn_dungeon(dict(row),int(time.time())): send_message(chat_id,"🧪 Mazmorra de prueba creada.")
-        else: send_message(chat_id,"Ya hay una mazmorra activa o no se pudo crear.")
+            tc=get_db()
+            tc.execute("UPDATE rpg_dungeons SET status='expired' WHERE chat_id=? AND status='active'",(int(chat_id),))
+            tc.commit()
+            row=tc.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); tc.close()
+        if row and _spawn_dungeon(dict(row),now): send_message(chat_id,"🧪 Mazmorra de prueba creada. Usa el botón 🏰 Entrar a la mazmorra.")
+        else: send_message(chat_id,"No se pudo crear la mazmorra de prueba.")
         return True
 
     if command in ("/encuentro", "/combatir"):

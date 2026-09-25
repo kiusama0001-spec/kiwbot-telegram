@@ -7194,14 +7194,13 @@ def mission_board_keyboard(user_id):
 
 
 def _delete_old_combat_card(chat_id,msg):
-    """Borra la tarjeta anterior después de generar la siguiente; los dados siguen visibles."""
-    try:
-        mid=int((msg or {}).get("message_id") or 0)
-        if mid:
-            try: _DICE_CLEANUP_EXECUTOR.submit(delete_message,chat_id,mid)
-            except Exception: pass
-    except Exception:
-        pass
+    """Conserva las tarjetas/mensajes del combate.
+
+    PERFORMANCE/DICEFIX: la limpieza automática solo puede borrar IDs que
+    provienen directamente de sendDice y están registrados en _COMBAT_DICE.
+    Nunca se borra una tarjeta normal del bot al avanzar de turno.
+    """
+    return None
 
 
 RPG_HELP_REVIVE_REWARD = 350
@@ -9232,6 +9231,10 @@ def process_update(
         if not chat_id or not user_id:
             return
 
+        # PERFORMANCE/DICEFIX: asocia cualquier dado de este update al usuario
+        # correcto. Thread-local evita mezclar jugadores entre workers.
+        set_current_combat_user(user_id)
+
         logger.info(
             "Procesando update %s | chat=%s | user=%s",
             update_id,
@@ -9546,6 +9549,12 @@ def process_update(
             "Error procesando update: %s",
             e
         )
+
+    finally:
+        # PERFORMANCE/DICEFIX: los workers del executor se reutilizan. Nunca
+        # dejamos que el usuario/topic de un update contamine al siguiente.
+        set_current_combat_user(None)
+        set_current_message_thread_id(None)
 
 
 # =========================================================

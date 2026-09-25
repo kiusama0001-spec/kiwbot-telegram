@@ -617,6 +617,41 @@ def init_db():
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_dungeon_at BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1")
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_merchant_at BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_minigame_at BIGINT NOT NULL DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_quick_missions (
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
+                mission_key TEXT NOT NULL, mission_type TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL,
+                answer TEXT DEFAULT '', payload TEXT DEFAULT '', reward_kw BIGINT NOT NULL DEFAULT 0, reward_exp BIGINT NOT NULL DEFAULT 0,
+                reward_item TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'active', winner_id BIGINT NOT NULL DEFAULT 0,
+                message_id BIGINT NOT NULL DEFAULT 0, spawned_at BIGINT NOT NULL, expires_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_quick_mission_attempts (
+                mission_id BIGINT NOT NULL, user_id BIGINT NOT NULL, attempts BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL, PRIMARY KEY(mission_id,user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_cat_rescues (
+                user_id BIGINT PRIMARY KEY, rescues BIGINT NOT NULL DEFAULT 0,
+                sword_claimed BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL
+            )
+        """)
+        # Parejas KiwRPG: propuesta, matrimonio y anillo reservado.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_marriages (
+                id BIGSERIAL PRIMARY KEY,
+                user_a BIGINT NOT NULL, user_b BIGINT NOT NULL, proposed_by BIGINT NOT NULL,
+                ring_inventory_id BIGINT NOT NULL DEFAULT 0, chat_id BIGINT NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending', created_at BIGINT NOT NULL,
+                accepted_at BIGINT NOT NULL DEFAULT 0, ended_at BIGINT NOT NULL DEFAULT 0,
+                ended_by BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_marriages_a_status ON rpg_marriages(user_a,status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_marriages_b_status ON rpg_marriages(user_b,status)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_merchants (
                 id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
@@ -668,6 +703,13 @@ def init_db():
             )
         """)
         cur.execute("INSERT INTO rpg_world_state(singleton,world_id,started_at) VALUES (1,1,?) ON CONFLICT(singleton) DO NOTHING", (int(time.time()),))
+        # Premios especiales de Misiones Relámpago.
+        cur.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,image_file_id,animation_file_id,tradeable,created_at)
+                       VALUES('anillo_bodas','Anillo de Bodas','raro','boda','Un pequeño símbolo para una gran promesa. No concede poder en combate: guarda la intención de elegir a alguien para compartir el camino, las victorias y hasta las derrotas. Sirve para pedirle matrimonio a otro aventurero. Cuando dos caminos deciden avanzar juntos, el anillo guarda la fecha en que comenzó su historia.',0,0,0,NULL,'','',1,?)
+                       ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description""",(int(time.time()),))
+        cur.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,image_file_id,animation_file_id,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                       VALUES('espada_gato','Espada del Gato Perdido','raro','arma','Forjada para quienes no dejaron atrás a ninguna pequeña criatura. En la empuñadura hay cinco huellas: una por cada gato que encontró el camino a casa.',3,1,5,NULL,'','',1,?,'arma','Guerrero,Pícaro,Paladín,The Cleaner',5)
+                       ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes=EXCLUDED.allowed_classes,min_level=EXCLUDED.min_level""",(int(time.time()),))
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_hall_of_fame (
@@ -4854,7 +4896,7 @@ def show_inventory_item(chat_id,user_id,inventory_id):
         if fb['hp']: extra.append(f"HP +{fb['hp']}")
         if extra: bonuses.append("Mejora: "+", ".join(extra))
     ok,reason=item_compatibility(row,char) if row.get('equip_slot') else (True,'')
-    text=f"{_inventory_item_icon(row)} {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n\n{row['description']}"
+    text=f"{_inventory_item_icon(row)} {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n🆔 ID: {row['id']}\n\n{row['description']}"
     if bonuses: text+="\n\n"+" · ".join(bonuses)
     if row.get('equip_slot'):
         slot_icons={'arma':'⚔️','casco':'🪖','armadura':'🛡️','guantes':'🧤','botas':'👢','accesorio':'💍'}
@@ -6382,6 +6424,7 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         dmg=max(1,int(round(raw)))
         pet_pct=_pet_bonus(user_id,'boss_damage')
         if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
+        if _marriage_row(user_id,("active",)): dmg=max(1,int(round(dmg*marriage_boss_multiplier(user_id))))
         if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
     sc=max(0,int(run['special_cd'])-1); uc=max(0,int(run['ultimate_cd'])-1)
     if ab.get('special'): sc=int(ab.get('cooldown',2))
@@ -6916,6 +6959,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
             pet_pct=_pet_bonus(user_id,'boss_damage')
             if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
+            # Parejas casadas pelean con +10% de daño contra Bosses.
+            if _marriage_row(user_id,("active",)): dmg=max(1,int(round(dmg*marriage_boss_multiplier(user_id))))
             if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
             if boss_was_defending: dmg=max(1,int(round(dmg*.5)))
             if ab.get('heal_pct'): heal=max(1,int(round(int(p['max_hp'])*float(ab['heal_pct'])*RPG_DICE_MULT[roll])))
@@ -7153,6 +7198,384 @@ def merchant_buy(user_id, offer_id, chat_id=None):
         return False,"⚠️ Malkor no pudo entregar la pieza. Tus KW fueron devueltos."
     return True,f"✅ {reserved['name']} es tuyo.\n🪙 -{price:,} KW\n\n🐪 {random.choice(RPG_MERCHANT_BUY_PHRASES)}"
 
+# =========================================================
+# KIWRPG V10 — MISIONES RELÁMPAGO / MINIJUEGOS CADA 30 MIN
+# =========================================================
+RPG_QUICK_MISSION_INTERVAL = 30 * 60
+RPG_QUICK_MISSION_TTL = 10 * 60
+RPG_MARRIAGE_BOSS_BONUS = 10
+
+
+def _marriage_row(user_id, statuses=("active",)):
+    uid=int(user_id)
+    marks=",".join("?" for _ in statuses)
+    with db_lock:
+        conn=get_db(); row=conn.execute(
+            f"SELECT * FROM rpg_marriages WHERE (user_a=? OR user_b=?) AND status IN ({marks}) ORDER BY id DESC LIMIT 1",
+            (uid,uid,*statuses)).fetchone(); conn.close()
+    return dict(row) if row else None
+
+
+def _marriage_partner_id(row,user_id):
+    if not row: return 0
+    uid=int(user_id)
+    return int(row['user_b']) if int(row['user_a'])==uid else int(row['user_a'])
+
+
+def _player_name_by_id(user_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT display_name FROM players WHERE user_id=?",(int(user_id),)).fetchone(); conn.close()
+    return str(row['display_name']) if row and row['display_name'] else f"Jugador {int(user_id)}"
+
+
+def _marriage_ring_row(user_id, for_update=False):
+    world=current_rpg_world(); suffix=" FOR UPDATE" if for_update else ""
+    with db_lock:
+        conn=get_db(); row=conn.execute(
+            "SELECT i.* FROM rpg_inventory i WHERE i.user_id=? AND i.world_id=? AND i.item_key='anillo_bodas' AND i.quantity>0 AND i.equipped=0 AND i.locked=0 ORDER BY i.id LIMIT 1"+suffix,
+            (int(user_id),world)).fetchone(); conn.close()
+    return dict(row) if row else None
+
+
+def marriage_profile_line(user_id):
+    row=_marriage_row(user_id,("active",))
+    if not row: return "💞 Pareja: —"
+    pid=_marriage_partner_id(row,user_id)
+    return f"💞 Pareja: {_player_name_by_id(pid)} · 💍 Casados"
+
+
+def marriage_boss_multiplier(user_id):
+    return 1.10 if _marriage_row(user_id,("active",)) else 1.0
+
+
+def marriage_shared_inventory_text(user_id):
+    row=_marriage_row(user_id,("active",))
+    if not row: return "💞 No tienes una pareja en KiwRPG."
+    uid=int(user_id); pid=_marriage_partner_id(row,uid); world=current_rpg_world()
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""SELECT i.user_id,i.quantity,i.equipped,x.name,x.rarity,x.item_type
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.world_id=? AND i.user_id IN (?,?) ORDER BY i.user_id,x.rarity,x.name LIMIT 80""",
+            (world,uid,pid)).fetchall(); conn.close()
+    names={uid:_player_name_by_id(uid),pid:_player_name_by_id(pid)}
+    lines=["💞 INVENTARIO DE PAREJA",f"{names[uid]} + {names[pid]}","",
+           "Ambos pueden consultar aquí lo que han reunido durante su aventura. El equipo conserva a su dueño para evitar desequiparlo por accidente.",""]
+    for owner in (uid,pid):
+        lines.append(f"🎒 {names[owner]}")
+        mine=[r for r in rows if int(r['user_id'])==owner]
+        if not mine: lines.append("— Vacío")
+        for r in mine[:35]:
+            icon=_inventory_item_icon(dict(r)); eq=" · equipado" if int(r['equipped'] or 0) else ""
+            # El ID permite pasar objetos no equipados a la pareja con /compartiritem.
+            lines.append(f"{icon} {r['name']} ×{int(r['quantity'] or 1)}{eq}")
+        lines.append("")
+    lines.append("🤝 Para pasar un objeto no equipado a tu pareja usa /compartiritem ID desde tu /inventario.")
+    return "\n".join(lines).strip()
+
+
+def share_inventory_item_with_spouse(user_id,inventory_id):
+    uid=int(user_id); iid=int(inventory_id); marriage=_marriage_row(uid,("active",))
+    if not marriage: return False,"Necesitas estar casado para compartir objetos con tu pareja."
+    pid=_marriage_partner_id(marriage,uid); pchar=get_active_character(pid)
+    if not pchar: return False,"Tu pareja necesita un personaje activo para recibir objetos."
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        try:
+            row=conn.execute("SELECT i.*,x.name FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE",(iid,uid,world)).fetchone()
+            if not row: conn.rollback(); conn.close(); return False,"No encontré ese objeto en tu inventario."
+            if int(row['equipped'] or 0): conn.rollback(); conn.close(); return False,"Desequipa el objeto antes de compartirlo."
+            if int(row['locked'] or 0): conn.rollback(); conn.close(); return False,"Ese objeto está reservado o bloqueado y no puede compartirse ahora."
+            conn.execute("UPDATE rpg_inventory SET user_id=?,character_id=? WHERE id=?",(pid,int(pchar['id']),iid))
+            conn.commit(); name=str(row['name']); conn.close()
+            return True,f"🤝 {name} pasó al inventario de {_player_name_by_id(pid)}."
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def propose_marriage(message,target):
+    proposer=message.get('from',{}); uid=int(proposer.get('id') or 0); tid=int(target.get('id') or 0); chat_id=int((message.get('chat') or {}).get('id') or 0)
+    if not uid or not tid or uid==tid: return False,"No puedes proponerte matrimonio a ti mismo. Eso sería ahorrar demasiado en la boda."
+    if target.get('is_bot'): return False,"Los bots todavía no pueden firmar el acta. Malkor dice que lo está negociando."
+    ensure_player(proposer); ensure_player(target)
+    if _marriage_row(uid,("active","pending")): return False,"Ya tienes un matrimonio o una propuesta pendiente."
+    if _marriage_row(tid,("active","pending")): return False,"Esa persona ya tiene un matrimonio o una propuesta pendiente."
+    ring=_marriage_ring_row(uid)
+    if not ring: return False,"💍 Necesitas un Anillo de Bodas en tu inventario para hacer la propuesta."
+    a,b=sorted((uid,tid)); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            # Serializa propuestas para ambos jugadores y evita dobles bodas por clics simultáneos.
+            conn.execute("SELECT pg_advisory_xact_lock(?)",(a,))
+            conn.execute("SELECT pg_advisory_xact_lock(?)",(b,))
+            busy=conn.execute("SELECT id FROM rpg_marriages WHERE (user_a IN (?,?) OR user_b IN (?,?)) AND status IN ('active','pending') LIMIT 1",(uid,tid,uid,tid)).fetchone()
+            if busy: conn.rollback(); conn.close(); return False,"Uno de los dos ya tiene un matrimonio o una propuesta pendiente."
+            locked=conn.execute("UPDATE rpg_inventory SET locked=1 WHERE id=? AND user_id=? AND item_key='anillo_bodas' AND quantity>0 AND locked=0 RETURNING id",(int(ring['id']),uid)).fetchone()
+            if not locked: conn.rollback(); conn.close(); return False,"Ese anillo ya no está disponible."
+            row=conn.execute("""INSERT INTO rpg_marriages(user_a,user_b,proposed_by,ring_inventory_id,chat_id,status,created_at)
+                VALUES(?,?,?,?,?,'pending',?) RETURNING id""",(a,b,uid,int(ring['id']),chat_id,now)).fetchone()
+            conn.commit(); mid=int(row['id']); conn.close()
+        except Exception:
+            conn.rollback(); conn.close(); raise
+    pname=player_display_name(proposer); tname=player_display_name(target)
+    text=(f"💍 UNA PREGUNTA IMPORTANTE…\n\n{pname} se acerca a {tname}. Entre bosses, mazmorras, derrotas y victorias, "
+          f"hay aventuras que se vuelven más bonitas cuando alguien decide caminar a tu lado.\n\n"
+          f"{tname}, {pname} quiere compartir contigo su camino en KiwRPG.\n\n¿Aceptas este Anillo de Bodas y formar una pareja?")
+    kb={"inline_keyboard":[[{"text":"💍 Sí, acepto","callback_data":f"marry_accept:{mid}"},{"text":"🥀 No aceptar","callback_data":f"marry_reject:{mid}"}]]}
+    send_message(chat_id,text,reply_markup=kb)
+    return True,""
+
+
+def marriage_answer(marriage_id,user_id,accept=True):
+    mid=int(marriage_id); uid=int(user_id); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            row=conn.execute("SELECT * FROM rpg_marriages WHERE id=? FOR UPDATE",(mid,)).fetchone()
+            if not row or row['status']!='pending': conn.rollback(); conn.close(); return False,"Esa propuesta ya no está disponible.",None
+            proposer=int(row['proposed_by']); target=int(row['user_b']) if int(row['user_a'])==proposer else int(row['user_a'])
+            if uid!=target: conn.rollback(); conn.close(); return False,"Esa propuesta no era para ti. 👀",None
+            ring_id=int(row['ring_inventory_id'] or 0)
+            if not accept:
+                if ring_id: conn.execute("UPDATE rpg_inventory SET locked=0 WHERE id=? AND user_id=?",(ring_id,proposer))
+                conn.execute("UPDATE rpg_marriages SET status='rejected',ended_at=?,ended_by=? WHERE id=?",(now,uid,mid)); conn.commit(); out=dict(row); conn.close(); return True,"rejected",out
+            inv=conn.execute("SELECT id,quantity FROM rpg_inventory WHERE id=? AND user_id=? AND item_key='anillo_bodas' AND locked=1 FOR UPDATE",(ring_id,proposer)).fetchone()
+            if not inv: conn.rollback(); conn.close(); return False,"El Anillo de Bodas reservado ya no está disponible.",None
+            if int(inv['quantity'])>1: conn.execute("UPDATE rpg_inventory SET quantity=quantity-1,locked=0 WHERE id=?",(ring_id,))
+            else: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(ring_id,))
+            conn.execute("UPDATE rpg_marriages SET status='active',accepted_at=? WHERE id=?",(now,mid)); conn.commit(); out=dict(row); conn.close(); return True,"accepted",out
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def divorce_marriage(user_id,target_id=0):
+    uid=int(user_id); row=_marriage_row(uid,("active",))
+    if not row: return False,"No tienes un matrimonio activo.",None
+    pid=_marriage_partner_id(row,uid)
+    if target_id and int(target_id)!=pid: return False,"Esa persona no es tu pareja actual.",None
+    with db_lock:
+        conn=get_db(); changed=conn.execute("UPDATE rpg_marriages SET status='divorced',ended_at=?,ended_by=? WHERE id=? AND status='active' RETURNING id",(int(time.time()),uid,int(row['id']))).fetchone(); conn.commit(); conn.close()
+    return bool(changed),"divorced",row
+
+
+RPG_QUICK_MISSION_MAX_ATTEMPTS = 3
+
+# 40 variantes realmente distintas. Son eventos públicos y el primer jugador que resuelve una gana.
+RPG_QUICK_MISSIONS = [
+    # 🎯 Puntería — tres intentos por jugador.
+    {"key":"aim_dragon","type":"target","title":"🎯 Escama del dragón","prompt":"El dragón tiene una escama suelta y el herrero la quiere. Tres tiros; intenta acertar antes de que el dragón note que esto era una pésima idea.","kw":900,"exp":90},
+    {"key":"aim_tavern","type":"target","title":"🍎 La apuesta de la taberna","prompt":"Una manzana, un barril y demasiada gente apostando KW. Tienes 3 tiros. Por favor, apunta al barril y no al tabernero.","kw":800,"exp":85},
+    {"key":"aim_mage","type":"target","title":"🧙 El sombrero fugitivo","prompt":"El viento robó el sombrero del mago. Derríbalo con uno de tus 3 intentos. El mago ha pedido expresamente que NO le dispares a él.","kw":950,"exp":95},
+    {"key":"aim_goblin","type":"target","title":"🥄 La cuchara goblin","prompt":"Un goblin te reta a derribar su cuchara favorita. No preguntes. Tienes 3 oportunidades y su honor culinario está en juego.","kw":850,"exp":90},
+    {"key":"love_arrow","type":"target","title":"🌹 Flecha de dos destinos","prompt":"Una vieja leyenda dice que algunas flechas no buscan herir: buscan encontrar un camino compartido. Haz centro en 3 oportunidades y el pequeño cofre que protege se abrirá.","kw":500,"exp":100,"item":"anillo_bodas"},
+
+    # 🎲 Azar.
+    {"key":"par_malkor","type":"parity","title":"🎲 El dado ilegal de Malkor","prompt":"Malkor jura que el dado no está trucado. Esa frase no ayuda. ¿Par o impar?","kw":750,"exp":80},
+    {"key":"par_slime","type":"parity","title":"👾 Matemáticas de slime","prompt":"El slime aprendió a contar esta mañana y ya quiere apostar. Elige par o impar antes de que descubra las fracciones.","kw":800,"exp":85},
+    {"key":"par_chicken","type":"parity","title":"🐔 El oráculo pollo","prompt":"El pollo sagrado picoteará un número del destino. Sí, este reino tiene problemas. ¿Par o impar?","kw":850,"exp":90},
+    {"key":"par_cursed","type":"parity","title":"🪙 La moneda maldita","prompt":"La moneda susurra que conoce tu futuro. Demuéstrale que exagera: elige par o impar.","kw":900,"exp":95},
+    {"key":"love_destiny","type":"parity","title":"💞 Cuando dos caminos coinciden","prompt":"Dos senderos se cruzan bajo la misma luna. Elige par o impar; si el destino coincide contigo, una promesa todavía sin nombre quedará en tus manos.","kw":500,"exp":100,"item":"anillo_bodas"},
+
+    # 🔢 Acertijos numéricos.
+    {"key":"num_mimic","type":"number","title":"🦷 El Mimic pésimo mintiendo","prompt":"El cofre tiene dientes y asegura ser un cofre normal. Claro. Adivina su número del 1 al 5 en 3 intentos antes de que intente comerte.","kw":1000,"exp":105},
+    {"key":"num_door","type":"number","title":"🚪 La puerta que insulta","prompt":"La puerta eligió un número del 1 al 5 y se ríe cada vez que fallas. Tienes 3 intentos para hacerla callar.","kw":900,"exp":95},
+    {"key":"num_wizard","type":"number","title":"🔮 El mago olvidó su contraseña","prompt":"Su contraseña es literalmente un número del 1 al 5. Adivínalo en 3 intentos y finjamos que esto es seguridad arcana.","kw":850,"exp":90},
+    {"key":"num_bomb","type":"number","title":"💣 Ingeniería goblin","prompt":"Hay cinco botones. El goblin dice que solo uno es correcto y luego salió corriendo. Tienes 3 intentos. Qué profesional.","kw":1050,"exp":110},
+    {"key":"love_box","type":"number","title":"💍 La caja que esperó a alguien","prompt":"Entre ruinas encuentras una caja intacta. Dentro hay un anillo que nunca llegó a entregarse. Descubre su número del 1 al 5 en 3 intentos; quizá esta vez sí encuentre una historia.","kw":500,"exp":100,"item":"anillo_bodas"},
+
+    # 🧩 Secuencias de emojis.
+    {"key":"emoji_dragon","type":"emoji","title":"🐉 Idioma dragón","prompt":"El dragón solo entiende una frase diplomática. Manda exactamente: 🐉🤝🧙","answer":"🐉🤝🧙","kw":800,"exp":85},
+    {"key":"emoji_necromancer","type":"emoji","title":"💀 Ritual muy poco confiable","prompt":"El nigromante olvidó el ritual. Ayúdalo mandando exactamente: 💀🕯️🌙✨","answer":"💀🕯️🌙✨","kw":900,"exp":95},
+    {"key":"emoji_controller","type":"emoji","title":"🎮 Combo ancestral","prompt":"Una pared parece sospechosamente un mando. Manda exactamente: ⬆️⬆️⬇️⬇️🔥","answer":"⬆️⬆️⬇️⬇️🔥","kw":1000,"exp":105},
+    {"key":"emoji_party","type":"emoji","title":"🍻 Fiesta después del boss","prompt":"El gremio exige una celebración reglamentaria. Manda exactamente: ⚔️🍻🎉🐉","answer":"⚔️🍻🎉🐉","kw":850,"exp":90},
+    {"key":"love_message","type":"emoji","title":"💌 Una promesa sin destinatario","prompt":"En una pared alguien dejó escrito: «Que encuentre a quien quiera caminar conmigo». Repite exactamente el sello que dejó debajo: 💍❤️✨","answer":"💍❤️✨","kw":500,"exp":100,"item":"anillo_bodas"},
+
+    # ⚡ Reflejos.
+    {"key":"speed_loot","type":"speed","title":"💎 ¡LOOT!","prompt":"Cayó algo brillante al suelo. Nadie sabe qué es, pero eso jamás ha detenido a un jugador. ¡Sé el primero!","kw":800,"exp":80},
+    {"key":"gatos_perdidos","type":"speed","title":"🐈 Los gatos perdidos","prompt":"Se oye un maullido entre los callejones. Sé el primero en rescatarlo. Cada victoria salva un gato; al rescatar 5 recibirás la Espada del Gato Perdido.","kw":900,"exp":90},
+    {"key":"speed_fairy","type":"speed","title":"🧚 HEY! LISTEN!","prompt":"Un hada lleva cinco minutos gritándote. Sé el primero en prestarle atención antes de que diga HEY otras cuarenta veces.","kw":850,"exp":85},
+    {"key":"speed_cheese","type":"speed","title":"🧀 Queso legendario +99","prompt":"Apareció un queso con aura dorada. Malkor ya está calculando cuánto cobrar. ¡Agárralo primero!","kw":750,"exp":80},
+    {"key":"love_carriage","type":"speed","title":"💍 Lo que cayó del carruaje","prompt":"Una diminuta caja cae de un carruaje y se abre al tocar el suelo. Dentro brilla un anillo sin nombres grabados. Quizá está esperando que alguien escriba su propia historia. Sé el primero en recogerlo.","kw":500,"exp":100,"item":"anillo_bodas"},
+
+    # 👥 Menciona a otro jugador. Debe incluir @usuario en el mensaje.
+    {"key":"mention_tank","type":"mention","title":"🛡️ Elige a tu tanque","prompt":"Se acerca un boss. Menciona con @ a la persona del grupo que pondrías delante mientras tú dices «confío en ti» desde una distancia segura.","kw":900,"exp":90},
+    {"key":"mention_healer","type":"mention","title":"❤️ Necesitamos sanador","prompt":"Tu HP está en 1. Menciona con @ a alguien del grupo a quien confiarías tu última poción.","kw":850,"exp":85},
+    {"key":"mention_duo","type":"mention","title":"⚔️ Compañero de raid","prompt":"El juego acaba de anunciar una raid para dos. Menciona con @ a quien llevarías contigo sin pensarlo demasiado.","kw":950,"exp":95},
+    {"key":"mention_sacrifice","type":"mention","title":"🐉 El dragón pide un voluntario","prompt":"El dragón exige hablar con alguien. Menciona con @ a un aventurero... y explícale después por qué lo elegiste tú jajaja.","kw":900,"exp":90},
+    {"key":"mention_loot","type":"mention","title":"🎁 ¿Con quién compartirías el loot?","prompt":"Encontraste un cofre con dos recompensas. Menciona con @ a otro jugador con quien compartirías la segunda.","kw":1000,"exp":100},
+
+    # ✍️ Texto: gana el primer mensaje que cumpla la condición objetiva.
+    {"key":"text_battlecry","type":"text","title":"📣 Grito de batalla","prompt":"Escribe un grito de batalla de al menos 20 caracteres que incluya la palabra «victoria». El primero válido gana.","answer":"victoria|20","kw":900,"exp":95},
+    {"key":"text_epitaph","type":"text","title":"🪦 Epitafio del slime","prompt":"El slime cayó heroicamente. Escribe su epitafio en al menos 25 caracteres e incluye la palabra «slime». Sí, merece respeto.","answer":"slime|25","kw":850,"exp":90},
+    {"key":"text_quest","type":"text","title":"📜 Crea una misión absurda","prompt":"Escribe una mini misión de al menos 35 caracteres que incluya las palabras «goblin» y «queso». No preguntes por qué.","answer":"goblin,queso|35","kw":1050,"exp":110},
+    {"key":"text_boss","type":"text","title":"👑 Últimas palabras del boss","prompt":"Inventa las últimas palabras de un boss en al menos 30 caracteres e incluye «volveré». Dramático obligatorio.","answer":"volveré|30","kw":950,"exp":100},
+    {"key":"text_tavern","type":"text","title":"🍺 Rumor de taberna","prompt":"Inventa un rumor del reino de al menos 35 caracteres e incluye «Malkor». El primero que cumpla la condición gana.","answer":"malkor|35","kw":1000,"exp":105},
+
+    # 🎨 Dibujo: el bot valida que llegue una imagen/foto; el contenido es por honor aventurero.
+    {"key":"draw_slime","type":"draw","title":"🎨 Dibuja un slime","prompt":"Dibuja un slime como puedas —papel, notas o arte digital— y manda la imagen al chat. No tiene que ser bonito; tiene que ser TU slime. Primera imagen gana.","kw":1000,"exp":105},
+    {"key":"draw_sword","type":"draw","title":"🗡️ Diseña una espada ridícula","prompt":"Dibuja la espada más absurda que usaría un héroe. Manda una imagen de tu dibujo; primera entrega gana.","kw":1100,"exp":115},
+    {"key":"draw_cat","type":"draw","title":"🐈 Retrato del gato del gremio","prompt":"Dibuja un gato aventurero. Si parece un pan con orejas también cuenta. Manda una imagen; primera entrega gana.","kw":1000,"exp":105},
+    {"key":"draw_boss","type":"draw","title":"👹 Diseña al próximo boss","prompt":"Dibuja un boss para el reino y manda la imagen. Puede dar miedo o parecer que debe impuestos; primera entrega gana.","kw":1150,"exp":120},
+    {"key":"draw_malkor","type":"draw","title":"🧳 Retrato policial de Malkor","prompt":"Malkor desapareció con el descuento. Dibuja cómo crees que se ve el sospechoso y manda la imagen. Primera entrega válida gana.","kw":1050,"exp":110},
+]
+
+def _quick_active(chat_id, now=None):
+    now=int(now or time.time())
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_quick_missions WHERE chat_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(int(chat_id),now)).fetchone(); conn.close()
+    return row
+
+def _quick_keyboard(m):
+    mid=int(m['id']); typ=m['mission_type']
+    if typ=='target':
+        return {"inline_keyboard":[[{"text":"⬅️","callback_data":f"qm:{mid}:target:L"},{"text":"🎯","callback_data":f"qm:{mid}:target:C"},{"text":"➡️","callback_data":f"qm:{mid}:target:R"}]]}
+    if typ=='parity':
+        return {"inline_keyboard":[[{"text":"2️⃣ PAR","callback_data":f"qm:{mid}:parity:par"},{"text":"1️⃣ IMPAR","callback_data":f"qm:{mid}:parity:impar"}]]}
+    if typ=='number':
+        return {"inline_keyboard":[[{"text":str(n),"callback_data":f"qm:{mid}:number:{n}"} for n in range(1,6)]]}
+    if typ=='speed':
+        return {"inline_keyboard":[[{"text":"⚡ ¡RECLAMAR!","callback_data":f"qm:{mid}:speed:go"}]]}
+    return None
+
+def _quick_reward(m,user_id):
+    uid=int(user_id); kw=int(m['reward_kw'] or 0); exp=int(m['reward_exp'] or 0); item=str(m['reward_item'] or '')
+    if kw: change_kiwons(uid,kw,'quick_mission',chat_id=int(m['chat_id']),note=f"Misión relámpago {m['title']}")
+    char=get_active_character(uid)
+    if char and exp: grant_rpg_exp(int(char['id']),exp)
+    item_msg=''
+    if item and char:
+        got=grant_rpg_item(uid,int(char['id']),item,f"mision_relampago:{int(m['id'])}")
+        if got: item_msg=f"\n💍 Premio especial: {got['name']}\n✨ No es poder ni estadísticas: es una promesa esperando a la persona correcta."
+    if str(m.get('mission_key') or '')=='gatos_perdidos':
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT rescues,sword_claimed FROM rpg_cat_rescues WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            rescues=int(row['rescues'] or 0) if row else 0; claimed=int(row['sword_claimed'] or 0) if row else 0
+            rescues+=1
+            conn.execute("""INSERT INTO rpg_cat_rescues(user_id,rescues,sword_claimed,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET rescues=EXCLUDED.rescues,sword_claimed=EXCLUDED.sword_claimed,updated_at=EXCLUDED.updated_at""",(uid,rescues,claimed,int(time.time())))
+            conn.commit(); conn.close()
+        item_msg+=f"\n🐾 Gatos rescatados: {min(rescues,5)}/5"
+        if rescues>=5 and not claimed and char:
+            got=grant_rpg_item(uid,int(char['id']),'espada_gato','cinco_gatos_rescatados')
+            if got:
+                with db_lock:
+                    conn=get_db(); conn.execute("UPDATE rpg_cat_rescues SET sword_claimed=1,updated_at=? WHERE user_id=?",(int(time.time()),uid)); conn.commit(); conn.close()
+                item_msg+=f"\n\n🐱⚔️ CINCO VIDAS DEVUELTAS A CASA\nLas cinco huellas de la empuñadura comienzan a brillar.\nHas recibido: {got['name']}"
+    return f"🪙 +{kw:,} KW"+(f" · ✨ +{exp:,} EXP" if char and exp else '')+item_msg
+
+def _quick_finish(m,user_id):
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_quick_missions WHERE id=? FOR UPDATE",(int(m['id']),)).fetchone()
+        if not row or row['status']!='active' or int(row['expires_at'])<=int(time.time()): conn.rollback(); conn.close(); return False,"Llegaste tarde. La misión ya terminó."
+        conn.execute("UPDATE rpg_quick_missions SET status='completed',winner_id=? WHERE id=?",(int(user_id),int(m['id']))); conn.commit(); conn.close()
+    reward=_quick_reward(dict(row),user_id)
+    return True,f"🏆 {_pvp_name(user_id)} completó «{row['title']}» primero.\n{reward}"
+
+def _quick_attempt(m,user_id):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT attempts FROM rpg_quick_mission_attempts WHERE mission_id=? AND user_id=? FOR UPDATE",(int(m['id']),int(user_id))).fetchone(); n=int(row['attempts'] or 0) if row else 0
+        if n>=RPG_QUICK_MISSION_MAX_ATTEMPTS: conn.rollback(); conn.close(); return False,n
+        n+=1
+        conn.execute("""INSERT INTO rpg_quick_mission_attempts(mission_id,user_id,attempts,updated_at) VALUES(?,?,?,?) ON CONFLICT(mission_id,user_id) DO UPDATE SET attempts=EXCLUDED.attempts,updated_at=EXCLUDED.updated_at""",(int(m['id']),int(user_id),n,now)); conn.commit(); conn.close()
+    return True,n
+
+def quick_mission_callback(user_id,mid,kind,choice):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_quick_missions WHERE id=?",(int(mid),)).fetchone(); conn.close()
+    if not row or row['status']!='active' or int(row['expires_at'])<=now: return False,"⏳ Esa misión relámpago ya terminó."
+    m=dict(row)
+    if kind!=m['mission_type']: return False,"Ese botón ya no corresponde a esta misión."
+    if kind=='speed': return _quick_finish(m,user_id)
+    ok,n=_quick_attempt(m,user_id)
+    if not ok: return False,"❌ Ya gastaste tus 3 oportunidades en esta misión."
+    success=False; reveal=''
+    if kind=='target':
+        # Centro tiene 45% de éxito; laterales 22%. Cada disparo es independiente.
+        chance=.45 if choice=='C' else .22; success=random.random()<chance
+        reveal="🎯 ¡CENTRO!" if success else random.choice(["💨 Rozó el borde.","🪵 Se clavó fuera del centro.","😬 El tabernero acaba de esconderse."])
+    elif kind=='parity':
+        num=random.randint(1,10); success=(choice=='par' and num%2==0) or (choice=='impar' and num%2==1); reveal=f"🎲 Salió {num}."
+    elif kind=='number':
+        secret=int(m['answer'] or 0)
+        if not secret:
+            secret=random.randint(1,5)
+            with db_lock:
+                conn=get_db(); conn.execute("UPDATE rpg_quick_missions SET answer=? WHERE id=? AND answer=''",(str(secret),int(mid))); conn.commit(); row2=conn.execute("SELECT answer FROM rpg_quick_missions WHERE id=?",(int(mid),)).fetchone(); conn.close(); secret=int(row2['answer'])
+        success=int(choice)==secret; reveal="🔓 ¡Código correcto!" if success else ("⬆️ Es más alto." if int(choice)<secret else "⬇️ Es más bajo.")
+    if success: return _quick_finish(m,user_id)
+    return False,f"{reveal}\nIntento {n}/3. Te quedan {3-n}."
+
+def handle_quick_mission_text(message,text):
+    """Resuelve misiones que dependen de mensajes: emoji, mención, texto creativo o dibujo."""
+    chat_id=(message.get('chat') or {}).get('id'); uid=(message.get('from') or {}).get('id')
+    if not chat_id or not uid: return False
+    m=_quick_active(chat_id)
+    if not m: return False
+    typ=str(m['mission_type'] or '')
+    raw=str(text or '').strip()
+    if raw.startswith('/'): return False
+    if typ=='emoji':
+        if raw!=str(m['answer']).strip(): return False
+    elif typ=='mention':
+        # Exige una @mención textual real y evita que @ solo o texto normal cuenten.
+        import re
+        mentions=re.findall(r'(?<!\w)@[A-Za-z0-9_]{4,32}', raw)
+        if not mentions: return False
+    elif typ=='text':
+        spec=str(m['answer'] or '')
+        words_part,_,min_part=spec.partition('|')
+        try: min_len=int(min_part or 1)
+        except Exception: min_len=1
+        low=raw.casefold()
+        required=[w.strip().casefold() for w in words_part.split(',') if w.strip()]
+        if len(raw)<min_len or not all(w in low for w in required): return False
+    elif typ=='draw':
+        # Telegram entrega fotos en `photo`; también aceptamos documento image/*.
+        doc=message.get('document') or {}
+        is_image=bool(message.get('photo')) or str(doc.get('mime_type') or '').startswith('image/')
+        if not is_image: return False
+    else:
+        return False
+    ok,msg=_quick_finish(dict(m),uid); send_message(chat_id,msg); return True
+
+def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
+    now=int(now or time.time()); chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
+    with db_lock:
+        conn=get_db(); active=conn.execute("SELECT id FROM rpg_quick_missions WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
+        if active and not forced:
+            conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
+        if forced: conn.execute("UPDATE rpg_quick_missions SET status='expired' WHERE chat_id=? AND status='active'",(chat_id,))
+        # No repetir ninguna de las últimas N-1 misiones: con 40 entradas, recorre las 40 antes de repetir.
+        recent_rows=conn.execute("SELECT mission_key FROM rpg_quick_missions WHERE chat_id=? ORDER BY id DESC LIMIT ?",(chat_id,max(0,len(RPG_QUICK_MISSIONS)-1))).fetchall()
+        recent_keys={str(r['mission_key']) for r in recent_rows}
+        candidates=[m for m in RPG_QUICK_MISSIONS if str(m['key']) not in recent_keys]
+        if not candidates: candidates=list(RPG_QUICK_MISSIONS)
+        if forced_key:
+            picked=next((x for x in RPG_QUICK_MISSIONS if str(x['key'])==str(forced_key)),None)
+            if not picked:
+                conn.rollback(); conn.close(); return False
+            cfg=dict(picked)
+        else:
+            cfg=dict(random.choice(candidates))
+        answer=str(cfg.get('answer',''))
+        if cfg['type']=='number': answer=str(random.randint(1,5))
+        row=conn.execute("""INSERT INTO rpg_quick_missions(chat_id,message_thread_id,mission_key,mission_type,title,prompt,answer,payload,reward_kw,reward_exp,reward_item,status,winner_id,message_id,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',0,0,?,?) RETURNING id""",(chat_id,int(topic) if topic is not None else None,cfg['key'],cfg['type'],cfg['title'],cfg['prompt'],answer,'',int(cfg['kw']),int(cfg['exp']),str(cfg.get('item','')),now,now+RPG_QUICK_MISSION_TTL)).fetchone(); qid=int(row['id'])
+        conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,now,chat_id)); conn.commit(); conn.close()
+    with db_lock:
+        conn=get_db(); m=dict(conn.execute("SELECT * FROM rpg_quick_missions WHERE id=?",(qid,)).fetchone()); conn.close()
+    prize=f"🪙 {m['reward_kw']:,} KW · ✨ {m['reward_exp']:,} EXP"+(" · 💍 Anillo de Bodas" if m['reward_item']=='anillo_bodas' else '')
+    card=f"⚡ MISIÓN RELÁMPAGO\n\n{m['title']}\n{m['prompt']}\n\n🏆 El primero en completarla gana.\n🎁 {prize}\n⏳ 10 minutos."
+    old=get_current_message_thread_id(); set_current_message_thread_id(topic)
+    try:
+        sent=send_message(chat_id,card,reply_markup=_quick_keyboard(m))
+    finally: set_current_message_thread_id(old)
+    mid=int((((sent or {}).get('result') or {}).get('message_id') or 0)) if isinstance(sent,dict) else 0
+    with db_lock:
+        conn=get_db(); conn.execute("UPDATE rpg_quick_missions SET message_id=? WHERE id=?",(mid,qid)); conn.commit(); conn.close()
+    return True
+
 RPG_DUNGEONS = [
     {"key":"ruinas","name":"🏚️ Ruinas del Reino Caído"},
     {"key":"cripta","name":"⚰️ Cripta de las Almas"},
@@ -7187,6 +7610,7 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
                      (int(chat_id),int(message_thread_id) if message_thread_id is not None else None,
                       now+RPG_AUTO_ENCOUNTER_INTERVAL,now+RPG_DUNGEON_INTERVAL,now))
         conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=CASE WHEN next_merchant_at<=0 THEN ? ELSE next_merchant_at END WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,int(chat_id)))
+        conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=CASE WHEN next_minigame_at<=0 THEN ? ELSE next_minigame_at END WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,int(chat_id)))
         conn.commit(); conn.close()
 
 def _auto_encounter_card(enemy, story):
@@ -7314,6 +7738,9 @@ def rpg_auto_world_tick(now=None):
         for d in expired_dungeons: conn.execute("UPDATE rpg_dungeons SET status='expired' WHERE id=?",(int(d["id"]),))
         expired_merchants=conn.execute("SELECT * FROM rpg_merchants WHERE status='active' AND expires_at<=?",(now,)).fetchall()
         for m in expired_merchants: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE id=?",(int(m['id']),))
+        expired_quick=conn.execute("SELECT * FROM rpg_quick_missions WHERE status='active' AND expires_at<=?",(now,)).fetchall()
+        for q in expired_quick: conn.execute("UPDATE rpg_quick_missions SET status='expired' WHERE id=?",(int(q['id']),))
+        quick_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_minigame_at<=?",(now,)).fetchall()
         merchant_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_merchant_at<=?",(now,)).fetchall()
         dungeon_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_dungeon_at<=?",(now,)).fetchall()
         due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_spawn_at<=?",(now,)).fetchall()
@@ -7328,6 +7755,9 @@ def rpg_auto_world_tick(now=None):
         if int(d.get("message_id") or 0):
             try: delete_message(int(d["chat_id"]),int(d["message_id"]))
             except Exception: pass
+    for rr in quick_due:
+        try: spawn_quick_mission(dict(rr),now)
+        except Exception: logger.exception("Error creando misión relámpago en chat %s",rr["chat_id"])
     for rr in merchant_due:
         try: spawn_merchant(dict(rr),now)
         except Exception: logger.exception("Error creando Mercader Errante en chat %s",rr["chat_id"])
@@ -7486,7 +7916,7 @@ RPG_WILL_MYTHIC_MISSION = {
     "icon":"🔴",
     "reward":12000,
     "title":"El Asesino Aéreo",
-    "story":"Un guerrero imposible de seguir ha dejado un desafío: demuestra que puedes volar por encima del resto."
+    "story":"Will Ospreay te encuentra en mitad de una batalla y, en vez de apartarte, pelea a tu lado. Durante 20 victorias ambos avanzan como equipo. Si demuestras que puedes caer, levantarte y seguir luchando, al final tendrá algo que heredarte."
 }
 RPG_WILL_MYTHIC_CHANCE = 0.02
 
@@ -7565,6 +7995,12 @@ def mission_select(user_id,mission_key):
 
 def send_hidden_blade_unlock_video(user_id):
     caption=("🔴 MISIÓN MÍTICA COMPLETADA — EL ASESINO AÉREO\n\n"
+             "La última batalla termina. Will Ospreay recupera el aliento, te mira y sonríe.\n\n"
+             "—Peleaste a mi lado cuando pudiste haberte marchado. Caíste, te levantaste y seguiste avanzando. "
+             "Eso es lo que separa a quienes simplemente luchan de quienes dejan una marca.\n\n"
+             "Will da un paso hacia ti.\n\n"
+             "—Pero todavía te falta una cosa. Es hora de heredarte algo mío.\n"
+             "Es hora de que aprendas… HIDDEN BLADE.\n\n"
              "🗡️ TÉCNICA DESBLOQUEADA: HIDDEN BLADE\n"
              "La técnica queda ligada permanentemente a tu cuenta.")
     cached=_rpg_asset_get("will_ospreay_hidden_blade")
@@ -7593,11 +8029,31 @@ def send_hidden_blade_unlock_video(user_id):
         logger.exception("No pude enviar Hidden Blade: %s",exc)
         return send_private_message(user_id,caption)
 
+def send_will_quick_mission_video(chat_id, caption, reply_markup=None):
+    """Muestra a Will Ospreay en la misión relámpago sin desbloquear Hidden Blade."""
+    cached=_rpg_asset_get("will_ospreay_hidden_blade")
+    if cached:
+        return send_animation(int(chat_id),cached,caption)
+    path=Path(__file__).with_name("will-ospreay-hidden-blade.mp4")
+    if not path.exists() or not TELEGRAM_API:
+        return send_message(chat_id,caption,reply_markup=reply_markup)
+    try:
+        with path.open("rb") as fh:
+            resp=TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendAnimation",data={"chat_id":str(int(chat_id)),"caption":caption},files={"animation":("will-ospreay-hidden-blade.mp4",fh,"video/mp4")},timeout=TELEGRAM_TIMEOUT)
+        payload=resp.json() if resp.ok else {}
+        anim=((payload.get("result") or {}).get("animation") or {})
+        if anim.get("file_id"): _rpg_asset_set("will_ospreay_hidden_blade",anim["file_id"])
+        return payload
+    except Exception:
+        logger.exception("No pude mostrar a Will Ospreay en la misión relámpago")
+        return send_message(chat_id,caption,reply_markup=reply_markup)
+
 def _selected_mission_progress(user_id,event=None):
     try:
         uid=int(user_id); cycle=_mission_cycle_id(); key=_mission_selected_key(uid,cycle)
         if not key: return ""
         m=next((x for x in _mission_board(cycle) if x["key"]==key),None)
+        if not m and key==RPG_WILL_MYTHIC_MISSION["key"]: m=dict(RPG_WILL_MYTHIC_MISSION)
         if not m or (event and m["event"]!=event): return ""
         with db_lock:
             conn=get_db(); row=conn.execute(
@@ -7620,6 +8076,8 @@ def mission_event(user_id,event,amount=1):
         if not selected:
             return []
         board=[m for m in _mission_board(cycle) if m["event"]==event and m["key"]==selected]
+        if not board and selected==RPG_WILL_MYTHIC_MISSION["key"] and event==RPG_WILL_MYTHIC_MISSION["event"]:
+            board=[dict(RPG_WILL_MYTHIC_MISSION)]
         if not board: return []
         completed=[]
         now=int(time.time())
@@ -7752,6 +8210,36 @@ def help_revive_player(helper_id,target_id):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("qm:"):
+        try:
+            _,mid,kind,choice=data.split(":",3)
+            ok,msg2=quick_mission_callback(uid,int(mid),kind,choice)
+        except Exception:
+            logger.exception("Error en misión relámpago")
+            send_message(chat_id,"La misión tropezó con un slime. Intenta otra vez."); return True
+        send_message(chat_id,msg2)
+        return True
+    if data.startswith("marry_accept:") or data.startswith("marry_reject:"):
+        try: mid=int(data.split(":",1)[1])
+        except Exception: return True
+        accept=data.startswith("marry_accept:")
+        ok,state,row=marriage_answer(mid,uid,accept)
+        if not ok: send_message(chat_id,state); return True
+        proposer=int(row['proposed_by']); partner=_marriage_partner_id(row,proposer)
+        pn=_player_name_by_id(proposer); tn=_player_name_by_id(partner)
+        if state=='accepted':
+            send_message(chat_id,
+                f"💍✨ TENEMOS UNA NUEVA PAREJA ✨💍\n\n{pn} y {tn} han decidido caminar juntos.\n\n"
+                "No significa prometer que cada batalla será fácil, sino elegir a alguien con quien celebrar las victorias, "
+                "reírse de las derrotas y seguir avanzando cuando el mapa todavía tenga lugares por descubrir.\n\n"
+                f"💞 Desde ahora comparten su aventura y reciben +{RPG_MARRIAGE_BOSS_BONUS}% de daño contra Bosses.\n"
+                "Que esta sea una historia que valga la pena recordar.")
+        else:
+            send_message(chat_id,
+                f"🥀 La propuesta no fue aceptada.\n\n{tn} decidió no tomar el anillo de {pn}. El anillo vuelve a su inventario.\n\n"
+                "A veces dos caminos se encuentran sin estar destinados a convertirse en uno. Y también está bien: "
+                "cada aventura merece continuar con sinceridad.")
+        return True
     if data.startswith("rpg_dungeon_enter:"):
         try: dungeon_id=int(data.split(":",1)[1])
         except Exception: return True
@@ -8181,6 +8669,7 @@ def process_command(
     command = command_name(
         text
     )
+    user_id = int((message.get("from") or {}).get("id") or 0)
 
 
     # -----------------------------------------------------
@@ -8303,19 +8792,93 @@ def process_command(
         lines += ["",f"⏳ Finaliza en: {left}",f"📅 Temporada: {num}",f"⚔️ Mínimo para premio de participación: {PVP_MIN_REWARD_DUELS} duelos"]
         send_message(chat_id,"\n".join(lines)); return True
 
+    if command in ("/casar", "/proponer", "/matrimonio"):
+        if chat.get("type") not in ("group","supergroup"):
+            send_message(chat_id,"💍 La propuesta se hace en el grupo para que el momento quede anunciado ante todos."); return True
+        target=resolve_target_for_economy(message,text)
+        if not target:
+            send_message(chat_id,"💍 Usa /casar @usuario o responde al mensaje de la persona a quien quieres proponerle matrimonio."); return True
+        ok,msg2=propose_marriage(message,target)
+        if not ok: send_message(chat_id,msg2)
+        return True
+
+    if command in ("/pareja", "/matrimonioestado"):
+        row=_marriage_row(user_id,("active",))
+        if not row: send_message(chat_id,"💞 Actualmente no tienes pareja en KiwRPG."); return True
+        pid=_marriage_partner_id(row,user_id)
+        since=int(row.get('accepted_at') or 0); date=time.strftime('%d/%m/%Y',time.localtime(since)) if since else '—'
+        send_message(chat_id,f"💞 PAREJA KIWRPG\n\n{_player_name_by_id(user_id)} + {_player_name_by_id(pid)}\n💍 Desde: {date}\n⚔️ Bonus juntos: +{RPG_MARRIAGE_BOSS_BONUS}% daño contra Bosses\n🎒 /inventariopareja para ver lo que ambos llevan.")
+        return True
+
+    if command in ("/inventariopareja", "/mochilapareja"):
+        send_message(chat_id,marriage_shared_inventory_text(user_id)); return True
+
+    if command in ("/compartiritem", "/pasaritem"):
+        parts=str(text or "").strip().split()
+        if len(parts)<2 or not parts[1].isdigit(): send_message(chat_id,"🤝 Usa /compartiritem ID. El ID aparece al abrir el objeto desde /inventario."); return True
+        ok,msg2=share_inventory_item_with_spouse(user_id,int(parts[1])); send_message(chat_id,msg2); return True
+
+    if command in ("/divorcio", "/divorciar"):
+        target=resolve_target_for_economy(message,text)
+        tid=int(target.get('id')) if target else 0
+        ok,state,row=divorce_marriage(user_id,tid)
+        if not ok: send_message(chat_id,state); return True
+        pid=_marriage_partner_id(row,user_id); a=_player_name_by_id(user_id); b=_player_name_by_id(pid)
+        send_message(chat_id,
+            f"🥀 UN CAMINO LLEGA A SU FIN\n\n{a} y {b} ya no continúan como pareja.\n\n"
+            "Enamorarse no es prometer que dos personas caminarán para siempre. Es compartir un trayecto, construir recuerdos y, "
+            "a veces, aceptar que ese trayecto también puede tener un final.\n\n"
+            "Lo vivido no desaparece porque el camino cambie. Desde ahora, cada uno continúa su propia aventura.\n\n"
+            "⚔️ El bonus de pareja contra Bosses ha terminado.")
+        return True
+
+    if command in ("/testanillo", "/daranilloprueba"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
+        char=get_active_character(user_id)
+        if not char: send_message(chat_id,"Necesitas un personaje activo para recibir el anillo."); return True
+        got=grant_rpg_item(user_id,int(char['id']),'anillo_bodas','test_boda')
+        send_message(chat_id,"🧪 💍 Anillo de Bodas añadido a tu inventario." if got else "No pude añadir el anillo."); return True
+
+    if command in ("/testboda", "/testcasar"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
+        target=resolve_target_for_economy(message,text)
+        if not target: send_message(chat_id,"🧪 Usa /testboda @usuario o responde a su mensaje."); return True
+        if not _marriage_ring_row(user_id):
+            char=get_active_character(user_id)
+            if char: grant_rpg_item(user_id,int(char['id']),'anillo_bodas','test_boda_auto')
+        ok,msg2=propose_marriage(message,target)
+        if not ok: send_message(chat_id,msg2)
+        return True
+
+    if command in ("/testdivorcio",):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
+        ok,state,row=divorce_marriage(user_id,0)
+        send_message(chat_id,"🧪 Matrimonio de prueba terminado." if ok else state); return True
+
+    if command in ("/testwillmision", "/testmisionwill"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
+        _mission_ensure_tables(); c=_mission_cycle_id(); m=RPG_WILL_MYTHIC_MISSION
+        with db_lock:
+            conn=get_db(); conn.execute("""INSERT INTO rpg_mission_selected(cycle_id,user_id,mission_key,selected_at) VALUES(?,?,?,?)
+                ON CONFLICT(cycle_id,user_id) DO UPDATE SET mission_key=EXCLUDED.mission_key,selected_at=EXCLUDED.selected_at""",(c,int(user_id),m['key'],int(time.time())))
+            conn.execute("""INSERT INTO rpg_mission_progress(cycle_id,user_id,mission_key,progress,completed,rewarded,updated_at) VALUES(?,?,?,19,0,0,?)
+                ON CONFLICT(cycle_id,user_id,mission_key) DO UPDATE SET progress=19,completed=0,rewarded=0,updated_at=EXCLUDED.updated_at""",(c,int(user_id),m['key'],int(time.time())))
+            conn.commit(); conn.close()
+        send_message(chat_id,"🧪 Misión de Will preparada en 19/20. Tu próxima victoria PvE debe completar El Asesino Aéreo, desbloquear Hidden Blade y mostrar el MP4."); return True
+
     if command in ("/comandos", "/ayudarpg"):
         uid=message.get("from",{}).get("id")
         txt=("🎮 COMANDOS KIWRPG\n\n"
-             "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💰 /saldo · /kiwons — Kiwons\n"
+             "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo · /kiwons — Kiwons\n"
              "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge · /forjador · /mejorar — Forja y mejoras +15\n🏪 /tienda · /shop — Tienda\n"
              "🐾 /mascota · /mascotas · /pets — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales · /mats — Materiales\n\n"
-             "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — Misiones\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
+             "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — Tablón privado\n⚡ /eventorpg · /misionactual — Misión Relámpago activa\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
              "🧹 /resetcombate · /reiniciarcombate — Liberar tu combate si se traba\n🏃 /huir · /cancelar_combate — Abandonar PvE\n"
              "👹 /boss — Boss activo\n📚 /bosses — Lista de Bosses\n⚡ /omega · /kennyomega — Kenny Omega\n🥇 /rankingomega — Ranking Omega\n"
              "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse · /rendicion — Rendirse\n📊 /pvp · /perfilpvp — Perfil PvP\n🥇 /rankingpvp · /toppvp — Ranking PvP\n\n"
              "💸 /transferir · /pagar — Transferir Kiwons\n🗡️ /espadas — Espadas secretas (si están disponibles)\n")
         if is_owner(uid):
-            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/testwill — Probar Hidden Blade\n/resetwill — Reset Will\n"
+            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/misionrapida · /testmision [clave] · /minijuego — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
                     "/invocarboss · /spawnboss — Invocar Boss\n/quitarboss · /eliminarboss — Quitar Boss\n/invocaromega · /spawnomega — Invocar Omega\n"
                     "/modotest · /modetest — Modo test Omega\n/resetomega — Reset Omega\n/omega1hp — Omega a 1 HP\n"
                     "/darr — Dar recursos RPG\n/darrcolmillos · /darcolmillos — Dar colmillos\n/darkiwons · /darskiwons · /addkiwons — Dar Kiwons\n"
@@ -8491,6 +9054,42 @@ def process_command(
             return True
         send_message(chat_id,mission_board_text(uid),reply_markup=mission_board_keyboard(uid))
         return True
+
+    if command in ("/misionesaleatorias", "/listamisiones", "/catalogomisiones"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede revisar el catálogo completo de Misiones Relámpago."); return True
+        groups={}
+        for m in RPG_QUICK_MISSIONS: groups.setdefault(m['type'],[]).append(m)
+        labels={'target':'🎯 Puntería','parity':'🎲 Azar','number':'🔢 Acertijos','emoji':'🧩 Emojis','speed':'⚡ Reflejos','mention':'👥 Menciona a alguien','text':'✍️ Escribe algo','draw':'🎨 Dibuja algo'}
+        lines=[f"⚡ CATÁLOGO DE MISIONES RELÁMPAGO — {len(RPG_QUICK_MISSIONS)} TOTAL", "", "🔁 Ciclo de 40: ninguna misión vuelve a salir hasta que hayan pasado las otras 39.", ""]
+        n=1
+        for typ in ('target','parity','number','emoji','speed','mention','text','draw'):
+            if typ not in groups: continue
+            lines.append(labels.get(typ,typ))
+            for m in groups[typ]:
+                lines.append(f"{n:02d}. {m['title']}  [{m['key']}]"); n+=1
+            lines.append('')
+        send_message(chat_id,"\n".join(lines)); return True
+
+    if command in ("/misionrapida", "/testmision", "/minijuego"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede forzar una Misión Relámpago."); return True
+        register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); conn.close()
+        forced_key=(parts[1].strip() if len(parts)>1 else None)
+        if forced_key and not any(str(m['key'])==forced_key for m in RPG_QUICK_MISSIONS):
+            send_message(chat_id,"❌ Esa clave no existe. Usa /misionesaleatorias para ver las 40 claves."); return True
+        if row and spawn_quick_mission(dict(row),int(time.time()),True,forced_key):
+            send_message(chat_id,"🧪 Misión de prueba creada"+(f": {forced_key}" if forced_key else " al azar")+".")
+        else: send_message(chat_id,"No se pudo crear la misión de prueba.")
+        return True
+
+    if command in ("/eventorpg", "/misionactual"):
+        m=_quick_active(chat_id)
+        if not m: send_message(chat_id,"⚡ No hay una Misión Relámpago activa ahora mismo."); return True
+        prize=f"🪙 {int(m['reward_kw']):,} KW · ✨ {int(m['reward_exp']):,} EXP"+(" · 💍 Anillo de Bodas" if m['reward_item']=='anillo_bodas' else '')
+        send_message(chat_id,f"⚡ MISIÓN RELÁMPAGO ACTIVA\n\n{m['title']}\n{m['prompt']}\n\n🎁 {prize}",reply_markup=_quick_keyboard(dict(m))); return True
 
     if command == "/mazmorra":
         d=_active_dungeon(chat_id)
@@ -8734,7 +9333,8 @@ def process_command(
             chat_id,
             "👤 PERFIL DE JUGADOR\n\n"
             f"Jugador: {player_display_name(user)}\n"
-            f"Kiwons: {balance:,} KW\n\n"
+            f"Kiwons: {balance:,} KW\n"
+            f"{marriage_profile_line(user_id)}\n\n"
             f"{rpg_text}"
         )
         return True
@@ -9871,6 +10471,9 @@ def process_update(
         if handle_reset_password_message(message, text):
             return
         if handle_character_name_message(message, text):
+            return
+
+        if handle_quick_mission_text(message, text):
             return
 
         # Un dado solo afecta al RPG cuando existe un encuentro pendiente

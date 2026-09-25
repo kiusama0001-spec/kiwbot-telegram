@@ -40,6 +40,8 @@ WEBHOOK_URL = os.getenv(
     ""
 ).strip()
 
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://kiwbot-telegram.onrender.com").strip().rstrip("/")
+
 OWNER_TELEGRAM_ID = int(
     os.getenv("OWNER_ID", "7745029153")
 )
@@ -7414,18 +7416,18 @@ RPG_QUICK_MISSIONS = [
     {"key":"mention_loot","type":"mention","title":"🎁 ¿Con quién compartirías el loot?","prompt":"Encontraste un cofre con dos recompensas. Menciona con @ a otro jugador con quien compartirías la segunda.","kw":1000,"exp":100},
 
     # ✍️ Texto: gana el primer mensaje que cumpla la condición objetiva.
-    {"key":"text_battlecry","type":"text","title":"📣 Grito de batalla","prompt":"Escribe un grito de batalla de al menos 20 caracteres que incluya la palabra «victoria». El primero válido gana.","answer":"victoria|20","kw":900,"exp":95},
-    {"key":"text_epitaph","type":"text","title":"🪦 Epitafio del slime","prompt":"El slime cayó heroicamente. Escribe su epitafio en al menos 25 caracteres e incluye la palabra «slime». Sí, merece respeto.","answer":"slime|25","kw":850,"exp":90},
-    {"key":"text_quest","type":"text","title":"📜 Crea una misión absurda","prompt":"Escribe una mini misión de al menos 35 caracteres que incluya las palabras «goblin» y «queso». No preguntes por qué.","answer":"goblin,queso|35","kw":1050,"exp":110},
-    {"key":"text_boss","type":"text","title":"👑 Últimas palabras del boss","prompt":"Inventa las últimas palabras de un boss en al menos 30 caracteres e incluye «volveré». Dramático obligatorio.","answer":"volveré|30","kw":950,"exp":100},
-    {"key":"text_tavern","type":"text","title":"🍺 Rumor de taberna","prompt":"Inventa un rumor del reino de al menos 35 caracteres e incluye «Malkor». El primero que cumpla la condición gana.","answer":"malkor|35","kw":1000,"exp":105},
+    {"key":"text_battlecry","type":"text","title":"📣 Grito de batalla","prompt":"Escribe exactamente esta frase en el chat:\n«Aunque quede 1 HP, la victoria todavía es nuestra.»","answer":"Aunque quede 1 HP, la victoria todavía es nuestra.","kw":900,"exp":95},
+    {"key":"text_epitaph","type":"text","title":"🪦 Epitafio del slime","prompt":"Escribe exactamente esta frase en el chat:\n«Aquí descansa un slime que pegó más fuerte de lo esperado.»","answer":"Aquí descansa un slime que pegó más fuerte de lo esperado.","kw":850,"exp":90},
+    {"key":"text_quest","type":"text","title":"📜 El juramento del queso","prompt":"Escribe exactamente esta frase en el chat:\n«Acepto la misión del goblin y protegeré el queso legendario.»","answer":"Acepto la misión del goblin y protegeré el queso legendario.","kw":1050,"exp":110},
+    {"key":"text_boss","type":"text","title":"👑 Últimas palabras del boss","prompt":"Escribe exactamente esta frase en el chat:\n«Podrán quedarse con el loot, pero volveré con más fases.»","answer":"Podrán quedarse con el loot, pero volveré con más fases.","kw":950,"exp":100},
+    {"key":"text_tavern","type":"text","title":"🍺 Rumor de taberna","prompt":"Escribe exactamente esta frase en el chat:\n«Dicen que Malkor sí hace descuentos, pero nadie ha sobrevivido para probarlo.»","answer":"Dicen que Malkor sí hace descuentos, pero nadie ha sobrevivido para probarlo.","kw":1000,"exp":105},
 
     # 🎨 Dibujo: el bot valida que llegue una imagen/foto; el contenido es por honor aventurero.
-    {"key":"draw_slime","type":"draw","title":"🎨 Dibuja un slime","prompt":"Dibuja un slime como puedas —papel, notas o arte digital— y manda la imagen al chat. No tiene que ser bonito; tiene que ser TU slime. Primera imagen gana.","kw":1000,"exp":105},
-    {"key":"draw_sword","type":"draw","title":"🗡️ Diseña una espada ridícula","prompt":"Dibuja la espada más absurda que usaría un héroe. Manda una imagen de tu dibujo; primera entrega gana.","kw":1100,"exp":115},
-    {"key":"draw_cat","type":"draw","title":"🐈 Retrato del gato del gremio","prompt":"Dibuja un gato aventurero. Si parece un pan con orejas también cuenta. Manda una imagen; primera entrega gana.","kw":1000,"exp":105},
+    {"key":"draw_slime","type":"draw","title":"🎨 Dibuja un slime","prompt":"Pulsa «🎨 Tomar reto y dibujar». Se abrirá el lienzo de KiwBot. Dibuja tu slime y entrégalo: el PRIMERO que envíe un dibujo válido gana.","kw":1000,"exp":105},
+    {"key":"draw_sword","type":"draw","title":"🗡️ Diseña una espada ridícula","prompt":"Pulsa «🎨 Tomar reto y dibujar». Diseña en el lienzo la espada más absurda que usaría un héroe. La PRIMERA entrega válida gana.","kw":1100,"exp":115},
+    {"key":"draw_cat","type":"draw","title":"🐈 Retrato del gato del gremio","prompt":"Pulsa «🎨 Tomar reto y dibujar». Dibuja en el lienzo un gato aventurero; si parece un pan con orejas también cuenta. La PRIMERA entrega válida gana.","kw":1000,"exp":105},
     {"key":"draw_boss","type":"draw","title":"👹 Diseña al próximo boss","prompt":"Dibuja un boss para el reino y manda la imagen. Puede dar miedo o parecer que debe impuestos; primera entrega gana.","kw":1150,"exp":120},
-    {"key":"draw_malkor","type":"draw","title":"🧳 Retrato policial de Malkor","prompt":"Malkor desapareció con el descuento. Dibuja cómo crees que se ve el sospechoso y manda la imagen. Primera entrega válida gana.","kw":1050,"exp":110},
+    {"key":"draw_malkor","type":"draw","title":"🧳 Retrato policial de Malkor","prompt":"Malkor desapareció con el descuento. Pulsa «🎨 Tomar reto y dibujar», haz su retrato policial en el lienzo y entrégalo. La PRIMERA entrega válida gana.","kw":1050,"exp":110},
 ]
 
 def _quick_active(chat_id, now=None):
@@ -7444,6 +7446,8 @@ def _quick_keyboard(m):
         return {"inline_keyboard":[[{"text":str(n),"callback_data":f"qm:{mid}:number:{n}"} for n in range(1,6)]]}
     if typ=='speed':
         return {"inline_keyboard":[[{"text":"⚡ ¡RECLAMAR!","callback_data":f"qm:{mid}:speed:go"}]]}
+    if typ=='draw':
+        return {"inline_keyboard":[[{"text":"🎨 Tomar reto y dibujar","callback_data":f"qm:{mid}:draw:open"}]]}
     return None
 
 def _quick_reward(m,user_id):
@@ -7495,6 +7499,10 @@ def quick_mission_callback(user_id,mid,kind,choice):
     if not row or row['status']!='active' or int(row['expires_at'])<=now: return False,"⏳ Esa misión relámpago ya terminó."
     m=dict(row)
     if kind!=m['mission_type']: return False,"Ese botón ya no corresponde a esta misión."
+    if kind=='draw' and choice=='open':
+        url=f"{PUBLIC_BASE_URL}/rpg/draw?mission={int(mid)}"
+        send_private_message(int(user_id), f"🎨 {m['title']}\n\n🏁 Abre el lienzo y dibuja. Puedes competir al mismo tiempo que los demás, pero solo la PRIMERA entrega válida gana.", reply_markup={"inline_keyboard":[[{"text":"🎨 Abrir lienzo","web_app":{"url":url}}]]})
+        return False,"🎨 Te envié el lienzo por privado. ¡Corre: gana la primera entrega!"
     if kind=='speed': return _quick_finish(m,user_id)
     ok,n=_quick_attempt(m,user_id)
     if not ok: return False,"❌ Ya gastaste tus 3 oportunidades en esta misión."
@@ -7532,13 +7540,8 @@ def handle_quick_mission_text(message,text):
         mentions=re.findall(r'(?<!\w)@[A-Za-z0-9_]{4,32}', raw)
         if not mentions: return False
     elif typ=='text':
-        spec=str(m['answer'] or '')
-        words_part,_,min_part=spec.partition('|')
-        try: min_len=int(min_part or 1)
-        except Exception: min_len=1
-        low=raw.casefold()
-        required=[w.strip().casefold() for w in words_part.split(',') if w.strip()]
-        if len(raw)<min_len or not all(w in low for w in required): return False
+        expected=str(m['answer'] or '').strip()
+        if raw.casefold()!=expected.casefold(): return False
     elif typ=='draw':
         # Telegram entrega fotos en `photo`; también aceptamos documento image/*.
         doc=message.get('document') or {}
@@ -10893,6 +10896,43 @@ def rpg_class_art(key):
     bg,accent,icon,label=art.get(key,art["guerrero"])
     svg=(f'<svg xmlns="http://www.w3.org/2000/svg" width="720" height="960" viewBox="0 0 720 960"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="{bg}"/><stop offset="1" stop-color="#090b10"/></linearGradient></defs><rect width="720" height="960" rx="36" fill="url(#g)"/><circle cx="360" cy="350" r="210" fill="none" stroke="{accent}" stroke-width="8" opacity=".55"/><text x="360" y="420" text-anchor="middle" font-size="190">{icon}</text><text x="360" y="710" text-anchor="middle" fill="{accent}" font-family="system-ui,sans-serif" font-size="62" font-weight="800">{label}</text><text x="360" y="775" text-anchor="middle" fill="#fff" opacity=".75" font-family="system-ui,sans-serif" font-size="28">KIWRPG - MUNDO 2</text></svg>')
     return svg,200,{"Content-Type":"image/svg+xml; charset=utf-8","Cache-Control":"public, max-age=86400"}
+
+@app.route("/rpg/draw", methods=["GET"])
+def rpg_draw_page():
+    try: mid=int(request.args.get("mission","0") or 0)
+    except Exception: mid=0
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT id,title,prompt,status,expires_at,mission_type FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
+    if not row or row['mission_type']!='draw': return "Misión de dibujo no encontrada.",404
+    title=str(row['title']); prompt=str(row['prompt'])
+    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🏁 <b>El primero que ENTREGUE un dibujo válido gana.</b> Abrir el lienzo no reserva la misión.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Entregar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
+    return html.replace('__MID__',str(mid)).replace('__TITLE__',json.dumps(title)).replace('__PROMPT__',json.dumps(prompt))
+
+@app.route("/rpg/api/draw-submit", methods=["POST"])
+def rpg_draw_submit():
+    body=request.get_json(silent=True) or {}; auth=validate_telegram_init_data(body.get('init_data',''))
+    if not auth: return jsonify({'ok':False,'message':'No pude verificar tu cuenta de Telegram.'}),403
+    uid=int(auth['user']['id'])
+    try: mid=int(body.get('mission_id',0)); strokes=int(body.get('strokes',0)); data=str(body.get('image',''))
+    except Exception: return jsonify({'ok':False,'message':'Entrega inválida.'}),400
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
+    if not row or row['mission_type']!='draw': return jsonify({'ok':False,'message':'Esa misión no es de dibujo.'}),400
+    if strokes<1: return jsonify({'ok':False,'message':'Primero dibuja algo en el lienzo 😹'}),400
+    if row['status']!='active' or int(row['expires_at'])<=int(time.time()): return jsonify({'ok':False,'message':'Llegaste tarde: alguien ya ganó o la misión terminó.'}),409
+    import base64
+    try:
+        head,b64=data.split(',',1); raw=base64.b64decode(b64,validate=True)
+        if not head.startswith('data:image/png') or len(raw)<1500 or len(raw)>4_000_000: raise ValueError('bad image')
+    except Exception: return jsonify({'ok':False,'message':'El dibujo no parece una imagen válida.'}),400
+    ok,msg=_quick_finish(dict(row),uid)
+    if not ok: return jsonify({'ok':False,'message':'🥈 '+msg}),409
+    try:
+        files={'photo':('dibujo.png',raw,'image/png')}; payload={'chat_id':str(int(row['chat_id'])),'caption':f"🎨 OBRA GANADORA — {row['title']}\n\n{msg}"}
+        if row.get('message_thread_id') is not None: payload['message_thread_id']=str(int(row['message_thread_id']))
+        TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendPhoto",data=payload,files=files,timeout=TELEGRAM_TIMEOUT)
+    except Exception: logger.exception('No pude publicar el dibujo ganador')
+    return jsonify({'ok':True,'message':'🏆 ¡Llegaste primero! Tu dibujo ganó la misión.'})
 
 @app.route("/rpg/create", methods=["GET"])
 def rpg_create_page():

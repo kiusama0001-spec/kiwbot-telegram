@@ -42,6 +42,14 @@ WEBHOOK_URL = os.getenv(
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://kiwbot-telegram.onrender.com").strip().rstrip("/")
 
+# Cloudflare Workers AI — ilustrador de KiwRPG.
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+CLOUDFLARE_IMAGE_MODEL = os.getenv(
+    "CLOUDFLARE_IMAGE_MODEL",
+    "@cf/black-forest-labs/flux-1-schnell"
+).strip()
+
 OWNER_TELEGRAM_ID = int(
     os.getenv("OWNER_ID", "7745029153")
 )
@@ -9404,6 +9412,74 @@ def command_name(
     return first.lower()
 
 
+def cloudflare_generate_test_image():
+    """Genera una sola imagen de prueba con Workers AI y devuelve bytes + content-type."""
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise RuntimeError("Faltan CLOUDFLARE_ACCOUNT_ID o CLOUDFLARE_API_TOKEN en Render.")
+
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/"
+        f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    )
+    prompt = (
+        "KiwRPG official concept art, dark fantasy cinematic RPG style, "
+        "a mysterious small shadow slime creature in ancient moonlit ruins, "
+        "dramatic volumetric lighting, detailed environment, coherent game concept art, "
+        "centered subject, no text, no logo, no interface"
+    )
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"prompt": prompt, "num_steps": 4},
+        timeout=90,
+    )
+    if response.status_code != 200:
+        detail = (response.text or "")[:700]
+        raise RuntimeError(f"Cloudflare respondió HTTP {response.status_code}: {detail}")
+
+    content_type = str(response.headers.get("content-type") or "").lower()
+    raw = response.content
+    # FLUX puede responder bytes de imagen o JSON con base64 según la ruta/versión.
+    if "application/json" in content_type:
+        payload = response.json()
+        result = payload.get("result") if isinstance(payload, dict) else None
+        b64 = None
+        if isinstance(result, dict):
+            b64 = result.get("image") or result.get("data")
+        if not b64 and isinstance(payload, dict):
+            b64 = payload.get("image")
+        if not b64:
+            raise RuntimeError(f"Cloudflare devolvió JSON sin imagen: {str(payload)[:700]}")
+        import base64
+        raw = base64.b64decode(b64)
+        content_type = "image/png"
+
+    if len(raw) < 1000:
+        raise RuntimeError("Cloudflare devolvió una imagen vacía o demasiado pequeña.")
+    return raw, (content_type.split(";", 1)[0] or "image/png")
+
+
+def send_photo_bytes(chat_id, raw, caption="", message_thread_id=None, content_type="image/png"):
+    payload = {"chat_id": str(int(chat_id))}
+    if caption:
+        payload["caption"] = str(caption)[:1024]
+    if message_thread_id is not None:
+        payload["message_thread_id"] = str(int(message_thread_id))
+    ext = "jpg" if "jpeg" in str(content_type).lower() else "png"
+    files = {"photo": (f"kiwrpg_ai_test.{ext}", raw, content_type)}
+    r = TELEGRAM_SESSION.post(
+        f"{TELEGRAM_API}/sendPhoto", data=payload, files=files, timeout=TELEGRAM_TIMEOUT
+    )
+    r.raise_for_status()
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram rechazó la imagen: {str(data)[:500]}")
+    return data
+
+
 def process_command(
     message,
     text
@@ -9428,6 +9504,32 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+
+    if command == "/testimagenia":
+        if not is_owner(user_id):
+            send_message(chat_id, "Solo Kiu puede probar el generador de imágenes.")
+            return True
+        if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+            missing=[]
+            if not CLOUDFLARE_ACCOUNT_ID: missing.append("CLOUDFLARE_ACCOUNT_ID")
+            if not CLOUDFLARE_API_TOKEN: missing.append("CLOUDFLARE_API_TOKEN")
+            send_message(chat_id, "❌ Falta en Render: " + ", ".join(missing))
+            return True
+        send_message(chat_id, "🎨 Probando Workers AI con FLUX. Generaré una sola imagen…")
+        try:
+            raw, ctype = cloudflare_generate_test_image()
+            send_photo_bytes(
+                chat_id, raw,
+                "🎨 Prueba KiwRPG — FLUX.1 schnell\n✅ Cloudflare Workers AI respondió correctamente.",
+                message.get("message_thread_id"), ctype
+            )
+            logger.info("Workers AI test OK | model=%s | bytes=%s", CLOUDFLARE_IMAGE_MODEL, len(raw))
+        except Exception as e:
+            logger.exception("Falló /testimagenia")
+            msg=str(e)
+            if len(msg)>1200: msg=msg[:1200]+"…"
+            send_message(chat_id, "❌ La prueba de imagen falló.\n\n" + msg)
+        return True
 
 
     # -----------------------------------------------------

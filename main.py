@@ -6895,9 +6895,21 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
         conn=get_db(); d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(int(dungeon_id),)).fetchone()
         if not d or int(d["chat_id"])!=int(chat_id) or d["status"]!='active' or int(d["expires_at"])<=now:
             conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró."
-        battle=conn.execute("SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
+        battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
         if battle:
-            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes un combate activo. Termínalo antes de entrar a la mazmorra."
+            # Entrar a una mazmorra es idempotente: si este mismo botón ya creó
+            # la pelea de esta mazmorra, simplemente volvemos a mostrarla.
+            # Nunca creamos un segundo enemigo ni pisamos el combate existente.
+            if int(battle.get("dungeon_event_id") or 0) == int(dungeon_id):
+                room=int(battle.get("dungeon_room") or 1)
+                enemy_name=battle.get("enemy_name") or "Enemigo"
+                enemy_hp=max(0,int(battle.get("enemy_hp") or 0))
+                enemy_max=max(1,int(battle.get("enemy_max_hp") or enemy_hp or 1))
+                conn.rollback(); conn.close()
+                return True,(f"🏰 {d['dungeon_name']}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n"
+                             f"⚔️ {enemy_name}\n❤️ {enemy_hp}/{enemy_max} HP\n\n"
+                             "Ya estabas dentro. Continúa el combate.")
+            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Termínalo antes de entrar a la mazmorra."
         run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(int(dungeon_id),int(user_id))).fetchone()
         if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
         if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))

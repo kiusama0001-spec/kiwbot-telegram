@@ -3685,46 +3685,49 @@ def transfer_kiwons(sender_id, receiver_id, amount, chat_id=None):
 
 
 def resolve_target_for_economy(message, text):
-    """Resuelve el destinatario de Kiwons por reply, text_mention o @username."""
+    """Resuelve destinatario por reply, @username exacto o text_mention.
 
-    # 1) Responder/seleccionar un mensaje: es la forma más fiable.
+    Si el texto contiene @usuario, NO se usa un text_mention distinto: esto evita
+    que Telegram/clientes raros hagan que una propuesta termine apuntando al emisor.
+    """
+    sender_id = int((message.get("from") or {}).get("id") or 0)
+
+    # 1) Reply: Telegram entrega el ID real.
     reply = message.get("reply_to_message")
     if reply:
-        reply_user = reply.get("from")
-        if reply_user and reply_user.get("id"):
-            # Nunca entregar/quitar Kiwons a KiwBot por accidente.
-            # Si el mensaje respondido fue enviado por un bot, no es un jugador válido.
-            if reply_user.get("is_bot"):
-                return None
-            return reply_user
+        u = reply.get("from") or {}
+        if u.get("id") and not u.get("is_bot") and int(u.get("id")) != sender_id:
+            return u
+        return None
 
-    # 2) Telegram text_mention: contiene el ID real aunque no haya @username.
-    for entity in message.get("entities", []):
-        if entity.get("type") == "text_mention":
-            mentioned = entity.get("user")
-            if mentioned and mentioned.get("id"):
-                if mentioned.get("is_bot"):
-                    return None
-                return mentioned
-
-    # 3) @username. Primero este grupo; si el cache local quedó viejo o apunta
-    # al propio emisor, busca la cuenta más reciente vista por KiwBot en otros chats.
+    # 2) @username escrito: resolver SIEMPRE por el username exacto guardado.
     match = re.search(r"@([A-Za-z0-9_]{3,})", str(text or ""))
     if match:
-        username = match.group(1)
-        sender_id=int((message.get("from") or {}).get("id") or 0)
-        cached = find_cached_user(message["chat"]["id"], username)
-        if cached and int(cached["user_id"]) != sender_id:
-            return {"id":cached["user_id"],"username":cached["username"],"first_name":cached["first_name"],"last_name":cached["last_name"]}
-        # Fallback global: útil cuando la persona todavía no habló en este grupo/topic.
+        username = match.group(1).lower()
+        chat_id = int((message.get("chat") or {}).get("id") or 0)
         with db_lock:
             conn=get_db()
-            row=conn.execute("""SELECT * FROM chat_users WHERE LOWER(username)=? AND user_id<>? ORDER BY updated_at DESC LIMIT 1""",
-                             (username.lower(),sender_id)).fetchone()
+            row=conn.execute("""SELECT * FROM chat_users
+                                WHERE chat_id=? AND LOWER(username)=? AND user_id<>?
+                                ORDER BY updated_at DESC LIMIT 1""",
+                             (chat_id,username,sender_id)).fetchone()
+            if not row:
+                row=conn.execute("""SELECT * FROM chat_users
+                                    WHERE LOWER(username)=? AND user_id<>?
+                                    ORDER BY updated_at DESC LIMIT 1""",
+                                 (username,sender_id)).fetchone()
             conn.close()
         if row:
-            return {"id":row["user_id"],"username":row["username"],"first_name":row["first_name"],"last_name":row["last_name"]}
+            return {"id":int(row["user_id"]),"username":row["username"],
+                    "first_name":row["first_name"],"last_name":row["last_name"]}
+        return None
 
+    # 3) text_mention solo cuando no se escribió @username.
+    for entity in message.get("entities", []):
+        if entity.get("type") == "text_mention":
+            u=entity.get("user") or {}
+            if u.get("id") and not u.get("is_bot") and int(u.get("id")) != sender_id:
+                return u
     return None
 
 
@@ -8683,6 +8686,9 @@ def process_command(
     command = command_name(
         text
     )
+    # Se usa en varios comandos de prueba. Definirlo aquí evita UnboundLocalError
+    # cuando /testmision llega sin argumentos.
+    parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
 
 
@@ -8853,6 +8859,14 @@ def process_command(
         got=grant_rpg_item(user_id,int(char['id']),'anillo_bodas','test_boda')
         send_message(chat_id,"🧪 💍 Anillo de Bodas añadido a tu inventario." if got else "No pude añadir el anillo."); return True
 
+    if command in ("/testusuario", "/testuser"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
+        target=resolve_target_for_economy(message,text)
+        if not target:
+            send_message(chat_id,"🧪 No pude resolver ese usuario. Haz que escriba un mensaje en el grupo o responde directamente a uno suyo con /testusuario."); return True
+        send_message(chat_id,f"🧪 Usuario resuelto\nID: {int(target.get('id') or 0)}\nNombre: {player_display_name(target)}\nUsername: @{target.get('username') or '—'}")
+        return True
+
     if command in ("/testboda", "/testcasar"):
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de prueba."); return True
         target=resolve_target_for_economy(message,text)
@@ -8892,7 +8906,7 @@ def process_command(
              "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse · /rendicion — Rendirse\n📊 /pvp · /perfilpvp — Perfil PvP\n🥇 /rankingpvp · /toppvp — Ranking PvP\n\n"
              "💸 /transferir · /pagar — Transferir Kiwons\n🗡️ /espadas — Espadas secretas (si están disponibles)\n")
         if is_owner(uid):
-            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/misionrapida · /testmision [clave] · /minijuego — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
+            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/misionrapida · /testmision [clave] · /minijuego — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testusuario @usuario — Verificar a quién resuelve el @ antes de una boda\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
                     "/invocarboss · /spawnboss — Invocar Boss\n/quitarboss · /eliminarboss — Quitar Boss\n/invocaromega · /spawnomega — Invocar Omega\n"
                     "/modotest · /modetest — Modo test Omega\n/resetomega — Reset Omega\n/omega1hp — Omega a 1 HP\n"
                     "/darr — Dar recursos RPG\n/darrcolmillos · /darcolmillos — Dar colmillos\n/darkiwons · /darskiwons · /addkiwons — Dar Kiwons\n"

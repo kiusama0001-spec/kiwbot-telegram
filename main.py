@@ -9918,7 +9918,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command in ("/imagenesrpg","/arterpg","/bestiarioadmin"):
         if not is_owner(user_id): return True
         with db_lock:
-            c=get_db(); rows=c.execute("SELECT asset_key,updated_at FROM rpg_assets WHERE asset_key LIKE 'img:enemy:%' ORDER BY asset_key").fetchall(); c.close()
+            c=get_db(); rows=c.execute("SELECT asset_key,updated_at FROM rpg_assets WHERE asset_key LIKE ? ORDER BY asset_key", ("img:enemy:%",)).fetchall(); c.close()
         registered={str(r['asset_key'])[4:] for r in rows}
         base=[f"enemy:{e['key']}" for e in RPG_ENEMIES]
         ready=[k for k in base if k in registered or rpg_asset_path(k)]

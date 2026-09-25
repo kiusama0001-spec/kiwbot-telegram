@@ -7384,13 +7384,39 @@ def _event_activate(chat_id,cfg,forced=False):
     return cfg
 
 def _event_auto_sync(chat_id,now=None):
+    """Sincroniza temporadas SOLO en el destino RPG activo.
+
+    Regla importante: consultar /eventos, /bossevento o /tiendaevento jamás crea
+    retroactivamente una temporada a mitad de mes. Los eventos regulares nacen
+    únicamente el día 1; Halloween/Día de Muertos nace el 31/10. Apertura sigue
+    siendo exclusivamente manual.
+    """
     now=int(now or time.time()); lt=time.localtime(now); y,m=lt.tm_year,lt.tm_mon
+    # Un chat viejo/inactivo nunca puede crear ni anunciar temporadas.
+    with db_lock:
+        _c=get_db(); _route=_c.execute("SELECT enabled FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); _c.close()
+    if not _route or int(_route.get('enabled') or 0)!=1:
+        return None
     st=_event_get(chat_id)
-    # Apertura manda hasta el 30/10/2026 inclusive.
+    # Apertura manda hasta el 30/10/2026 inclusive y sólo puede existir si fue iniciada manualmente.
     if st and st['status']=='active' and st['event_key']=='opening_2026' and now<=int(st['ends_at']): return st
+    # Sanea la activación defectuosa de V9: un evento regular iniciado en un día
+    # distinto del 1 (o del 31/10 para Festival de las Almas) no es válido.
+    if st and st['status']=='active' and st['event_key']!='opening_2026':
+        _started=time.localtime(int(st['started_at'] or 0))
+        _valid_start=(_started.tm_mday==1) or (int(st['event_month'])==11 and _started.tm_mon==10 and _started.tm_mday==31)
+        if not _valid_start:
+            with db_lock:
+                _c=get_db(); _c.execute("UPDATE rpg_event_state SET status='inactive' WHERE chat_id=?",(int(chat_id),)); _c.commit(); _c.close()
+            st=_event_get(chat_id)
     # 31 de octubre abre anticipadamente Halloween/Día de Muertos, que continúa todo noviembre.
     cfg=_event_cfg(y,11) if (m==10 and lt.tm_mday==31) else _event_cfg(y,m)
     if not cfg:return st
+    # Si hoy no es fecha de apertura, sólo devolvemos una temporada válida ya existente.
+    is_opening_day=(lt.tm_mday==1) or (m==10 and lt.tm_mday==31)
+    if not st or st['status']!='active':
+        if not is_opening_day:
+            return st
     if not st or st['status']!='active' or st['event_key']!=cfg['key']:
         if st and st.get('status')=='active' and st.get('event_key')!=cfg['key']:
             oldcfg=_event_cfg_from_state(st)
@@ -7533,10 +7559,43 @@ def clan_leave(user_id):
 
 def clan_card(user_id):
     cl=rpg_user_clan(user_id)
-    if not cl:return '🏰 No perteneces a un clan.\n/crearclan Nombre · /unirclan ID'
+    if not cl:
+        return ('🏰 CLANES\n\nNo perteneces a ningún clan.\n'
+                '✨ Todos los miembros reciben +20% EXP.\n\n'
+                'Pulsa «Ver clanes» para unirte o usa /crearclan Nombre para fundar el tuyo.')
     with db_lock:
         c=get_db(); n=c.execute("SELECT COUNT(*) n FROM rpg_clan_members WHERE clan_id=?",(int(cl['id']),)).fetchone(); c.close()
-    return f"🏰 {cl['name']} · ID {cl['id']}\n👥 {int(n['n'])} miembros\n✨ Bonus de clan: +20% EXP\n🎖️ Tu rango: {cl['role']}"
+    role='👑 Líder' if cl['role']=='leader' else '⚔️ Miembro'
+    return f"🏰 {cl['name']}\n👥 {int(n['n'])} miembros · {role}\n✨ +20% EXP activo"
+
+def clan_keyboard(user_id):
+    cl=rpg_user_clan(user_id)
+    if not cl:
+        return {"inline_keyboard":[[{"text":"🔎 Ver clanes","callback_data":"clan_list"}],[{"text":"➕ Cómo crear uno","callback_data":"clan_create_help"}]]}
+    rows=[[{"text":"👥 Miembros","callback_data":f"clan_members:{int(cl['id'])}"}]]
+    if cl['role']!='leader': rows.append([{"text":"🚪 Salir del clan","callback_data":"clan_leave_confirm"}])
+    return {"inline_keyboard":rows}
+
+def clan_list_text(user_id,limit=12):
+    if rpg_user_clan(user_id): return clan_card(user_id),clan_keyboard(user_id)
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT c.id,c.name,COUNT(m.user_id) members FROM rpg_clans c LEFT JOIN rpg_clan_members m ON m.clan_id=c.id GROUP BY c.id,c.name ORDER BY members DESC,c.id ASC LIMIT ?""",(int(limit),)).fetchall(); c.close()
+    if not rows: return '🏰 Todavía no hay clanes.\n\nPuedes crear el primero con /crearclan Nombre.',clan_keyboard(user_id)
+    text='🏰 CLANES DISPONIBLES\n\nElige uno para unirte. Todos dan +20% EXP.'
+    kb=[]
+    for r in rows:
+        text+=f"\n\n⚔️ {r['name']} · 👥 {int(r['members'])}"
+        kb.append([{"text":f"Unirme a {r['name'][:24]}","callback_data":f"clan_join:{int(r['id'])}"}])
+    kb.append([{"text":"➕ Crear mi clan","callback_data":"clan_create_help"}])
+    return text,{"inline_keyboard":kb}
+
+def clan_members_text(clan_id):
+    with db_lock:
+        c=get_db(); clan=c.execute("SELECT * FROM rpg_clans WHERE id=?",(int(clan_id),)).fetchone(); rows=c.execute("""SELECT m.user_id,m.role,COALESCE(NULLIF(p.display_name,''),CAST(m.user_id AS TEXT)) display_name FROM rpg_clan_members m LEFT JOIN players p ON p.user_id=m.user_id WHERE m.clan_id=? ORDER BY CASE WHEN m.role='leader' THEN 0 ELSE 1 END,m.joined_at""",(int(clan_id),)).fetchall(); c.close()
+    if not clan:return 'Ese clan ya no existe.'
+    out=f"🏰 {clan['name']}\n\n"
+    out+='\n'.join(('👑 ' if r['role']=='leader' else '⚔️ ')+str(r['display_name']) for r in rows)
+    return out
 
 RPG_DUNGEON_INTERVAL = 60 * 60
 RPG_DUNGEON_TTL = 20 * 60
@@ -8819,6 +8878,28 @@ def handle_rpg_callback(query):
                 "A veces dos caminos se encuentran sin estar destinados a convertirse en uno. Y también está bien: "
                 "cada aventura merece continuar con sinceridad.")
         return True
+    if data=="clan_list":
+        txt,kb=clan_list_text(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="clan_create_help":
+        send_message(chat_id,"➕ CREAR CLAN\n\nEscribe /crearclan seguido del nombre.\nEjemplo: /crearclan Los Errantes\n\nDespués los demás podrán encontrarlo desde /clan sin copiar IDs."); return True
+    if data.startswith("clan_join:"):
+        try: cid=int(data.split(":",1)[1])
+        except Exception:return True
+        ok,msg2=clan_join(uid,cid); send_message(chat_id,msg2,reply_markup=clan_keyboard(uid) if ok else None); return True
+    if data.startswith("clan_members:"):
+        try: cid=int(data.split(":",1)[1])
+        except Exception:return True
+        cl=rpg_user_clan(uid)
+        if not cl or int(cl['id'])!=cid: send_message(chat_id,"Ese no es tu clan."); return True
+        send_message(chat_id,clan_members_text(cid),reply_markup=clan_keyboard(uid)); return True
+    if data=="clan_leave_confirm":
+        cl=rpg_user_clan(uid)
+        if not cl: send_message(chat_id,"Ya no perteneces a un clan."); return True
+        send_message(chat_id,f"🚪 ¿Salir de {cl['name']}?\nPerderás el +20% EXP mientras no pertenezcas a otro clan.",reply_markup={"inline_keyboard":[[{"text":"Sí, salir","callback_data":"clan_leave_now"},{"text":"Cancelar","callback_data":"clan_cancel"}]]}); return True
+    if data=="clan_leave_now":
+        ok,msg2=clan_leave(uid); send_message(chat_id,msg2,reply_markup=clan_keyboard(uid)); return True
+    if data=="clan_cancel":
+        send_message(chat_id,clan_card(uid),reply_markup=clan_keyboard(uid)); return True
     if data=="event_boss_attack":
         ok,msg2=event_boss_attack(chat_id,uid); send_message(chat_id,msg2)
         txt,kb=event_boss_card(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
@@ -9778,7 +9859,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         return True
 
     if command in ("/clan","/miclan"):
-        send_message(chat_id,clan_card(user_id)); return True
+        send_message(chat_id,clan_card(user_id),reply_markup=clan_keyboard(user_id)); return True
     if command=="/crearclan":
         name=parts[1] if len(parts)>1 else ''
         ok,msg2=clan_create(user_id,name); send_message(chat_id,msg2); return True
@@ -9801,6 +9882,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         txt,kb=event_shop_text(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
     if command=="/iniciarevento":
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede iniciar manualmente un evento."); return True
+        with db_lock:
+            _rc=get_db(); _rr=_rc.execute("SELECT enabled FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); _rc.close()
+        if not _rr or int(_rr.get('enabled') or 0)!=1:
+            send_message(chat_id,"📍 Este no es el chat RPG activo. Usa /rpgaqui en el grupo donde quieres que vivan eventos, mazmorras, Malkor y misiones."); return True
         arg=(parts[1].strip().lower() if len(parts)>1 else '')
         if arg!='apertura': send_message(chat_id,"Por ahora el evento manual especial es /iniciarevento apertura"); return True
         cfg=_opening_cfg(); _event_activate(chat_id,cfg,True); send_message(chat_id,"🎊 LAS PUERTAS DE KIWRPG SE HAN ABIERTO\n\nComienza el Festival de Apertura 2026.\n✨ Bonificaciones inaugurales · ⚔️ desafíos especiales · 🎟️ recompensas de fundador.\n👑 Aeternus espera a la comunidad.\n\nEl festival cerrará automáticamente el 30 de octubre a las 23:59."); return True

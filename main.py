@@ -3707,18 +3707,23 @@ def resolve_target_for_economy(message, text):
                     return None
                 return mentioned
 
-    # 3) @username: buscar en usuarios vistos en ESTE grupo.
+    # 3) @username. Primero este grupo; si el cache local quedó viejo o apunta
+    # al propio emisor, busca la cuenta más reciente vista por KiwBot en otros chats.
     match = re.search(r"@([A-Za-z0-9_]{3,})", str(text or ""))
     if match:
         username = match.group(1)
+        sender_id=int((message.get("from") or {}).get("id") or 0)
         cached = find_cached_user(message["chat"]["id"], username)
-        if cached:
-            return {
-                "id": cached["user_id"],
-                "username": cached["username"],
-                "first_name": cached["first_name"],
-                "last_name": cached["last_name"]
-            }
+        if cached and int(cached["user_id"]) != sender_id:
+            return {"id":cached["user_id"],"username":cached["username"],"first_name":cached["first_name"],"last_name":cached["last_name"]}
+        # Fallback global: útil cuando la persona todavía no habló en este grupo/topic.
+        with db_lock:
+            conn=get_db()
+            row=conn.execute("""SELECT * FROM chat_users WHERE LOWER(username)=? AND user_id<>? ORDER BY updated_at DESC LIMIT 1""",
+                             (username.lower(),sender_id)).fetchone()
+            conn.close()
+        if row:
+            return {"id":row["user_id"],"username":row["username"],"first_name":row["first_name"],"last_name":row["last_name"]}
 
     return None
 
@@ -7613,6 +7618,15 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
         conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=CASE WHEN next_minigame_at<=0 THEN ? ELSE next_minigame_at END WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,int(chat_id)))
         conn.commit(); conn.close()
 
+def set_rpg_notification_chat(chat_id, chat_type, message_thread_id=None):
+    """Deja un único destino activo para eventos automáticos RPG."""
+    register_rpg_auto_chat(chat_id,chat_type,message_thread_id)
+    with db_lock:
+        conn=get_db()
+        conn.execute("UPDATE rpg_auto_chats SET enabled=CASE WHEN chat_id=? THEN 1 ELSE 0 END",(int(chat_id),))
+        conn.commit(); conn.close()
+
+
 def _auto_encounter_card(enemy, story):
     return (
         "🌍 ENCUENTRO DEL MUNDO\n\n"
@@ -8890,10 +8904,8 @@ def process_command(
         uid=message.get("from",{}).get("id")
         if not is_owner(uid): send_message(chat_id,"Solo Kiu puede cambiar el chat de notificaciones RPG."); return True
         if chat.get("type") not in ("group","supergroup"): send_message(chat_id,"Usa este comando dentro del grupo donde quieres los avisos RPG."); return True
-        register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
-        with db_lock:
-            conn=get_db(); conn.execute("UPDATE rpg_auto_chats SET enabled=CASE WHEN chat_id=? THEN 1 ELSE 0 END",(int(chat_id),)); conn.commit(); conn.close()
-        send_message(chat_id,"📍 Este es ahora el ÚNICO chat con encuentros y mazmorras automáticas de KiwRPG. Los chats anteriores quedaron silenciados."); return True
+        set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        send_message(chat_id,"📍 Este es ahora el ÚNICO chat con encuentros, mazmorras, Malkor y Misiones Relámpago automáticas de KiwRPG. Los chats anteriores quedaron silenciados."); return True
 
     if command in ("/apagarrpg", "/rpgsilencio"):
         uid=message.get("from",{}).get("id")
@@ -9074,7 +9086,9 @@ def process_command(
     if command in ("/misionrapida", "/testmision", "/minijuego"):
         if not is_owner(message.get("from",{}).get("id")):
             send_message(chat_id,"Solo Kiu puede forzar una Misión Relámpago."); return True
-        register_rpg_auto_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        # En pruebas, este chat pasa a ser el único destino automático para que
+        # encuentros/mazmorras/Malkor no aparezcan en un grupo viejo.
+        set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
         with db_lock:
             conn=get_db(); row=conn.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); conn.close()
         forced_key=(parts[1].strip() if len(parts)>1 else None)

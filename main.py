@@ -581,6 +581,36 @@ def init_db():
             )
         """)
 
+        # KiwRPG V7.1: mundo vivo — encuentros automáticos cada 5 minutos.
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS auto_spawn_id BIGINT NOT NULL DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_auto_chats (
+                chat_id BIGINT PRIMARY KEY,
+                message_thread_id BIGINT,
+                next_spawn_at BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_auto_encounters (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                message_thread_id BIGINT,
+                enemy_key TEXT NOT NULL,
+                enemy_name TEXT NOT NULL,
+                story TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                message_id BIGINT NOT NULL DEFAULT 0,
+                spawned_at BIGINT NOT NULL,
+                expires_at BIGINT NOT NULL,
+                claimed_by BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rpg_auto_encounters_chat_status
+            ON rpg_auto_encounters(chat_id,status,expires_at)
+        """)
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_assets (
                 asset_key TEXT PRIMARY KEY,
@@ -2173,18 +2203,18 @@ def send_animation(chat_id, animation, caption="", reply_to_message_id=None):
     return telegram("sendAnimation", data)
 
 
-def delete_message(
-    chat_id,
-    message_id
-):
-
-    return telegram(
-        "deleteMessage",
-        {
+def delete_message(chat_id, message_id):
+    # deleteMessage no necesita ni acepta el topic. Evita heredar message_thread_id
+    # para que la limpieza funcione también dentro de grupos con Temas.
+    old_thread=get_current_message_thread_id()
+    try:
+        set_current_message_thread_id(None)
+        return telegram("deleteMessage", {
             "chat_id": chat_id,
             "message_id": message_id
-        }
-    )
+        })
+    finally:
+        set_current_message_thread_id(old_thread)
 
 
 # =========================================================
@@ -4045,7 +4075,7 @@ def _rpg_enemy_damage(battle, eff, defending=False):
     return enemy_roll, dmg
 
 
-def start_rpg_encounter(chat_id, user_id):
+def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0):
     char = get_active_character(user_id)
     if not char:
         return False, "Necesitas un personaje activo. Usa /crear_personaje."
@@ -4055,7 +4085,9 @@ def start_rpg_encounter(chat_id, user_id):
         return False, f"💀 {char['name']} está recuperándose.\n⏳ Podrás volver a combatir en aproximadamente {remaining} min.\n\nUna 🧪 Esencia Vital puede reanimarte antes."
 
     level = int(char["level"])
-    base = random.choice(RPG_ENEMIES)
+    base = next((x for x in RPG_ENEMIES if x["key"]==forced_enemy_key), None) if forced_enemy_key else None
+    if not base:
+        base = random.choice(RPG_ENEMIES)
     rarity = roll_world_encounter_rarity()
     encounter_number = register_world_encounter(rarity)
     rd = RPG_ENCOUNTER_RARITY_DATA[rarity]
@@ -4070,8 +4102,8 @@ def start_rpg_encounter(chat_id, user_id):
         conn = get_db()
         conn.execute("""
             INSERT INTO rpg_battles
-            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number)
-            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'',?,?)
+            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id)
+            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'',?,?,?)
             ON CONFLICT(chat_id,user_id) DO UPDATE SET
                 character_id=excluded.character_id, enemy_key=excluded.enemy_key,
                 enemy_name=excluded.enemy_name, enemy_hp=excluded.enemy_hp,
@@ -4079,8 +4111,9 @@ def start_rpg_encounter(chat_id, user_id):
                 enemy_def=excluded.enemy_def, state='choosing_action',
                 started_at=excluded.started_at, updated_at=excluded.updated_at,
                 ultimate_cd=0, special_cd=0, defending=0, last_action='',
-                encounter_rarity=excluded.encounter_rarity, encounter_number=excluded.encounter_number
-        """, (int(chat_id),int(user_id),int(char["id"]),base["key"],enemy_name,enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now,rarity,encounter_number))
+                encounter_rarity=excluded.encounter_rarity, encounter_number=excluded.encounter_number,
+                auto_spawn_id=excluded.auto_spawn_id
+        """, (int(chat_id),int(user_id),int(char["id"]),base["key"],enemy_name,enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now,rarity,encounter_number,int(auto_spawn_id or 0)))
         conn.commit(); conn.close()
     eff=effective_character_stats(char)
     rare_note = ""
@@ -4242,6 +4275,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
+                mission_event(user_id,"pve_damage",damage)
+                mission_event(user_id,"pve_win",1)
+                if int(battle.get("auto_spawn_id") or 0)>0:
+                    mission_event(user_id,"auto_hunt",1)
                 newstats,levels=grant_rpg_exp(char["id"],reward_exp)
                 if ability_key=="one_winged_angel" and char["class_name"]=="The Cleaner":
                     send_one_winged_angel_finisher(chat_id)
@@ -4255,6 +4292,8 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"],encounter_rarity)
                 if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
                 return True
+
+            mission_event(user_id,"pve_damage",damage)
 
             # Curación de la propia habilidad antes de la respuesta enemiga.
             char_hp=int(char["hp"])
@@ -4451,7 +4490,22 @@ def equipped_bonuses(character_id):
 
 def effective_character_stats(char):
     b=equipped_bonuses(char["id"])
-    return {"atk":int(char["atk"])+b["atk"],"defense":int(char["defense"])+b["defense"],"max_hp":int(char["max_hp"])+b["hp"],"bonus":b}
+    # Habilidad exclusiva de The Cleaner: las Espadas del Ángel son un estado,
+    # no ocupan slot de equipo, pero su +6 ATK sí participa en el daño real.
+    secret_atk=0
+    try:
+        if (str(char.get("class_name") or "")=="The Cleaner"
+                and is_owner(char.get("user_id"))
+                and bool(int(char.get("secret_blades_active") or 0))):
+            secret_atk=6
+    except Exception:
+        secret_atk=0
+    total_bonus={"atk":b["atk"]+secret_atk,"defense":b["defense"],"hp":b["hp"]}
+    return {"atk":int(char["atk"])+total_bonus["atk"],
+            "defense":int(char["defense"])+total_bonus["defense"],
+            "max_hp":int(char["max_hp"])+total_bonus["hp"],
+            "bonus":total_bonus,
+            "secret_blades_atk":secret_atk}
 
 def item_compatibility(item, char):
     if not item.get("equip_slot"): return False,"Este objeto no es equipable."
@@ -4631,6 +4685,8 @@ def grant_rpg_item(user_id, character_id, item_key, source="drop"):
             else:
                 conn.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES (?,?,?,?,1,0,0,?,?,?,?)", (int(user_id),int(character_id),item_key,serial,now,source,world,int(user_id)))
             conn.commit(); conn.close()
+            try: mission_event(user_id,"item_gain",1)
+            except Exception: pass
             return dict(item) | {"serial_number":serial, "world_id":world}
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -4934,6 +4990,7 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
     if nd['status']=='finished':
         loser_id=int(nd['opponent_id']) if uid==int(nd['challenger_id']) else int(nd['challenger_id'])
         _pvp_record_result(duel_id,uid,loser_id,'ko')
+        mission_event(uid,"pvp_win",1)
         send_message(nd['chat_id'],f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño{heal_txt}\n\n🏆 {_pvp_name(uid)} gana el duelo.\nDuelo amistoso: sin pérdida de HP, EXP ni KW.")
         # El finisher de Kenny Omega es exclusivo de Kiu/The Cleaner y solo aparece
         # cuando One Winged Angel es el golpe que TERMINA el duelo PvP.
@@ -5469,6 +5526,8 @@ def forge_make(user_id,key,chat_id=None):
         print(f"[FORGE] Error user={user_id} item={key}: {exc}")
         return False,"⚠️ La forja no pudo completarse. Tus KW fueron devueltos."
 
+    try: mission_event(user_id,"forge",1)
+    except Exception: pass
     return True,(f"🔥 FORJA COMPLETADA\n\n"
                  f"{RPG_RARITY_ICON.get(item['rarity'],'⚪')} {item['name']}\n"
                  f"💸 -{cost:,} KW · 🪙 Saldo: {balance:,} KW\n\n"
@@ -5952,6 +6011,7 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         conn.execute("""UPDATE rpg_omega_scores SET total_damage=total_damage+?,total_turns=total_turns+1,last_attack_at=?
                         WHERE event_id=? AND user_id=?""",(dmg,now,int(event_id),int(user_id)))
         conn.commit(); conn.close()
+    mission_event(user_id,"omega_damage",dmg)
     crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''
     text=f"⚡ KENNY OMEGA — TURNO {new_turns}/{OMEGA_TURNS_PER_RUN}\n🎲 {roll} · {ab['name']}{crit}{miss}\n💥 {dmg:,} daño"+counter_text
     if own_hp<=0:
@@ -6463,6 +6523,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+        mission_event(user_id,"boss_damage",dmg)
+        if dmg>0: mission_event(user_id,"boss_hits",1)
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
         if counter:
             player_text+=f"\n🪽 CONTRAATAQUE — El Ángel Caído devuelve {counter} de daño."
@@ -6554,9 +6616,392 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
     b=_boss_active(chat_id) or b
     send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b,user_id),reply_markup=_boss_keyboard(b,user_id)); return True,''
 
+
+
+# =========================================================
+# KIWRPG V7.1 — MUNDO VIVO / MONSTRUOS AUTOMÁTICOS
+# =========================================================
+RPG_AUTO_ENCOUNTER_INTERVAL = 5 * 60
+RPG_AUTO_ENCOUNTER_TTL = 4 * 60 + 30
+
+RPG_AUTO_STORIES = [
+    "🌲 Algo se mueve entre los árboles cerca del camino.",
+    "🍺 Los clientes de la taberna juran haber visto una criatura merodeando afuera.",
+    "🛒 Un mercader abandonó su carreta al escuchar gruñidos demasiado cerca.",
+    "🌫️ La niebla se abrió por un instante... y algo salió de ella.",
+    "🔥 Los guardias encendieron una señal: hay una criatura en las afueras.",
+    "🐾 Un rastro fresco cruza el camino del gremio.",
+    "🌙 Una criatura apareció buscando comida cerca de la ciudad.",
+    "⚔️ Los exploradores encontraron un monstruo antes de llegar a la puerta.",
+]
+
+def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
+    if str(chat_type or "") not in ("group","supergroup"):
+        return
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_auto_chats(chat_id,message_thread_id,next_spawn_at,updated_at)
+                        VALUES(?,?,?,?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                          message_thread_id=EXCLUDED.message_thread_id,
+                          updated_at=EXCLUDED.updated_at""",
+                     (int(chat_id),int(message_thread_id) if message_thread_id is not None else None,
+                      now+RPG_AUTO_ENCOUNTER_INTERVAL,now))
+        conn.commit(); conn.close()
+
+def _auto_encounter_card(enemy, story):
+    return (
+        "🌍 ENCUENTRO DEL MUNDO\n\n"
+        f"{story}\n\n"
+        f"👾 {enemy['name']} ha aparecido.\n"
+        "⏳ Si nadie lo enfrenta, escapará antes del próximo encuentro.\n\n"
+        "⚔️ El primero que lo reclame entra al combate."
+    )
+
+def _auto_spawn_one(chatrow, now=None):
+    now=int(now or time.time())
+    chat_id=int(chatrow["chat_id"])
+    topic=chatrow.get("message_thread_id")
+    # No apilar apariciones pendientes.
+    with db_lock:
+        conn=get_db()
+        pending=conn.execute("""SELECT id FROM rpg_auto_encounters
+             WHERE chat_id=? AND status='pending' AND expires_at>? LIMIT 1""",(chat_id,now)).fetchone()
+        if pending:
+            conn.execute("UPDATE rpg_auto_chats SET next_spawn_at=?,updated_at=? WHERE chat_id=?",
+                         (now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id))
+            conn.commit(); conn.close(); return False
+        enemy=random.choice(RPG_ENEMIES)
+        story=random.choice(RPG_AUTO_STORIES)
+        row=conn.execute("""INSERT INTO rpg_auto_encounters
+            (chat_id,message_thread_id,enemy_key,enemy_name,story,status,message_id,spawned_at,expires_at,claimed_by)
+            VALUES(?,?,?,?,?,'pending',0,?,?,0) RETURNING id""",
+            (chat_id,int(topic) if topic is not None else None,enemy["key"],enemy["name"],story,now,now+RPG_AUTO_ENCOUNTER_TTL)).fetchone()
+        spawn_id=int(row["id"])
+        conn.execute("UPDATE rpg_auto_chats SET next_spawn_at=?,updated_at=? WHERE chat_id=?",
+                     (now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id))
+        conn.commit(); conn.close()
+    old=get_current_message_thread_id()
+    try:
+        set_current_message_thread_id(topic)
+        sent=send_message(chat_id,_auto_encounter_card(enemy,story),
+            reply_markup={"inline_keyboard":[[{"text":"⚔️ Cazar monstruo","callback_data":f"auto_encounter_claim:{spawn_id}"}]]})
+    finally:
+        set_current_message_thread_id(old)
+    mid=int((((sent or {}).get("result") or {}).get("message_id") or 0)) if isinstance(sent,dict) else 0
+    with db_lock:
+        conn=get_db()
+        if mid:
+            conn.execute("UPDATE rpg_auto_encounters SET message_id=? WHERE id=?",(mid,spawn_id))
+        else:
+            conn.execute("UPDATE rpg_auto_encounters SET status='send_failed' WHERE id=?",(spawn_id,))
+        conn.commit(); conn.close()
+    return bool(mid)
+
+def rpg_auto_world_tick(now=None):
+    now=int(now or time.time())
+    # Primero limpia monstruos ignorados.
+    with db_lock:
+        conn=get_db()
+        expired=conn.execute("""SELECT * FROM rpg_auto_encounters
+            WHERE status='pending' AND expires_at<=?""",(now,)).fetchall()
+        for r in expired:
+            conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE id=?",(int(r["id"]),))
+        due=conn.execute("SELECT * FROM rpg_auto_chats WHERE next_spawn_at<=?",(now,)).fetchall()
+        conn.commit(); conn.close()
+    for rr in expired:
+        r=dict(rr)
+        if int(r.get("message_id") or 0):
+            try: delete_message(int(r["chat_id"]),int(r["message_id"]))
+            except Exception: pass
+    for rr in due:
+        try: _auto_spawn_one(dict(rr),now)
+        except Exception: logger.exception("Error creando encuentro automático en chat %s",rr["chat_id"])
+
+def _rpg_auto_world_loop():
+    while True:
+        try: rpg_auto_world_tick()
+        except Exception: logger.exception("Error en mundo vivo KiwRPG")
+        time.sleep(20)
+
+def claim_auto_encounter(chat_id,user_id,spawn_id):
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        row=conn.execute("SELECT * FROM rpg_auto_encounters WHERE id=? FOR UPDATE",(int(spawn_id),)).fetchone()
+        if not row or int(row["chat_id"])!=int(chat_id):
+            conn.rollback(); conn.close(); return False,"Ese monstruo ya no está aquí.",None
+        if row["status"]!="pending" or int(row["expires_at"])<=now:
+            if row["status"]=="pending":
+                conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE id=?",(int(spawn_id),))
+                conn.commit()
+            else: conn.rollback()
+            conn.close(); return False,"Llegaste tarde. La criatura ya se fue.",None
+        conn.execute("UPDATE rpg_auto_encounters SET status='claimed',claimed_by=? WHERE id=?",
+                     (int(user_id),int(spawn_id)))
+        conn.commit(); data=dict(row); conn.close()
+    ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=data["enemy_key"],auto_spawn_id=spawn_id)
+    if not ok:
+        # Si el jugador no puede combatir, devolvemos la aparición al mundo mientras siga vigente.
+        with db_lock:
+            conn=get_db()
+            conn.execute("""UPDATE rpg_auto_encounters SET status='pending',claimed_by=0
+                            WHERE id=? AND expires_at>?""",(int(spawn_id),int(time.time())))
+            conn.commit(); conn.close()
+        return False,msg,data
+    if int(data.get("message_id") or 0):
+        try: delete_message(chat_id,int(data["message_id"]))
+        except Exception: pass
+    return True,msg,data
+
+
+# =========================================================
+# KIWRPG V7 — TABLÓN DE MISIONES
+# 10 misiones compartidas por ciclo de 8h; progreso individual.
+# El catálogo se genera con muchas variantes para evitar repetición.
+# =========================================================
+RPG_MISSION_CYCLE_SECONDS = 8 * 60 * 60
+RPG_MISSION_BOARD_SIZE = 10
+
+RPG_MISSION_EVENT_LABELS = {
+    "pve_win": "Derrota enemigos en Encuentros",
+    "pve_damage": "Causa daño en Encuentros",
+    "boss_damage": "Causa daño a Bosses",
+    "boss_hits": "Conecta golpes contra Bosses",
+    "forge": "Completa forjas",
+    "item_gain": "Consigue objetos o materiales",
+    "omega_damage": "Causa daño a Kenny Omega",
+    "pvp_win": "Gana duelos PvP",
+    "auto_hunt": "Caza criaturas del mundo",
+}
+
+def _mission_catalog():
+    # 108 variantes: cada actividad tiene 12 escalones y narrativa corta.
+    specs = [
+        ("pve_win",      [2,3,4,5,6,8,10,12,15,18,20,25], 180, 75),
+        ("pve_damage",   [250,400,600,900,1200,1600,2200,3000,4000,5500,7500,10000], 220, 1),
+        ("boss_damage",  [300,500,800,1200,1800,2500,3500,5000,7000,9000,12000,16000], 350, 1),
+        ("boss_hits",    [2,3,4,5,6,8,10,12,15,18,22,28], 300, 110),
+        ("forge",        [1,1,1,2,2,2,3,3,4,4,5,6], 650, 550),
+        ("item_gain",    [2,3,4,5,6,8,10,12,15,18,22,28], 220, 100),
+        ("omega_damage", [500,800,1200,1800,2500,3500,5000,7000,10000,14000,19000,25000], 500, 1),
+        ("pvp_win",      [1,1,1,2,2,2,3,3,4,4,5,6], 550, 650),
+        ("auto_hunt",    [1,2,2,3,3,4,5,6,7,8,10,12], 300, 140),
+    ]
+    narrative = {
+        "pve_win":[
+            ("Camino despejado","Los viajeros necesitan que alguien limpie el camino."),
+            ("Problemas en las afueras","Los guardias no dan abasto con las criaturas cercanas."),
+            ("Cacería del gremio","El gremio paga por reducir la población de monstruos."),
+        ],
+        "pve_damage":[
+            ("Que sepan quién manda","Un veterano quiere ver cuánto daño puedes causar."),
+            ("Prueba de fuerza","El campo de entrenamiento necesita resultados, no discursos."),
+            ("Golpes que cuentan","El gremio medirá tu potencia en combate real."),
+        ],
+        "boss_damage":[
+            ("Marca al gigante","El gremio necesita debilitar al Boss antes del asalto final."),
+            ("Contrato de alto riesgo","Hay recompensa para quien se atreva a herir a un Boss."),
+            ("Hazlo sangrar","Los exploradores necesitan confirmar que esa cosa puede caer."),
+        ],
+        "boss_hits":[
+            ("No le quites los ojos","Mantén presión sobre el Boss y abre espacio al grupo."),
+            ("Primera línea","El gremio busca combatientes capaces de plantarse ante un Boss."),
+            ("Golpea y resiste","Cada impacto ayuda a derribar a la criatura."),
+        ],
+        "forge":[
+            ("Encargo del herrero","La forja está encendida y faltan manos para terminar pedidos."),
+            ("Martillos al rojo","El herrero necesita piezas nuevas antes de cerrar el taller."),
+            ("Pedido urgente","Un aventurero pagó por equipo y lo necesita cuanto antes."),
+        ],
+        "item_gain":[
+            ("La mochila vacía","Los almacenes del gremio necesitan materiales y suministros."),
+            ("Recolector buscado","Un mercader compra cualquier cosa útil que encuentres."),
+            ("Reservas bajas","La ciudad necesita reponer materiales antes de la próxima expedición."),
+        ],
+        "omega_damage":[
+            ("El Best Bout Machine espera","Omega quiere rivales que puedan hacerlo retroceder."),
+            ("Prueba contra Omega","La arena paga por cada golpe que realmente haga daño."),
+            ("Rompe el límite","Kenny Omega sigue en pie. Dale una razón para recordarte."),
+        ],
+        "pvp_win":[
+            ("La arena llama","Hay público y una bolsa de KW esperando al vencedor."),
+            ("Duelo de reputación","El gremio quiere saber quién domina los combates entre aventureros."),
+            ("Sube al ring","Una victoria vale más que cien amenazas."),
+        ],
+        "auto_hunt":[
+            ("Pedido de la taberna","La taberna necesita ingredientes frescos. Caza criaturas que aparezcan en el camino."),
+            ("Carne para el estofado","La cocina se quedó corta. Los monstruos del camino servirán para llenar la despensa."),
+            ("Encargo del cocinero","El cocinero paga bien por criaturas recién cazadas."),
+            ("La despensa está vacía","Si nadie caza algo pronto, esta noche solo habrá pan duro."),
+        ],
+    }
+    rarities=["comun","comun","poco_comun","poco_comun","raro","raro","epica","epica","legendaria","legendaria","legendaria","legendaria"]
+    icons={"comun":"⚪","poco_comun":"🟢","raro":"🔵","epica":"🟣","legendaria":"🟡"}
+    out=[]
+    for event,goals,base,scale in specs:
+        stories=narrative[event]
+        for i,goal in enumerate(goals):
+            rarity=rarities[i]
+            reward=int(base + (i+1)*scale)
+            if event in ("pve_damage","boss_damage","omega_damage"):
+                reward=int(base + (i+1)*260)
+            title,story=stories[i % len(stories)]
+            out.append({
+                "key":f"{event}_{i+1}","event":event,"goal":int(goal),"rarity":rarity,
+                "icon":icons[rarity],"reward":reward,"title":title,"story":story
+            })
+    return out
+
+RPG_MISSION_CATALOG = _mission_catalog()
+
+def _mission_cycle_id(now=None):
+    return int((int(now or time.time())) // RPG_MISSION_CYCLE_SECONDS)
+
+def _mission_cycle_ends(cycle_id=None):
+    c=_mission_cycle_id() if cycle_id is None else int(cycle_id)
+    return (c+1)*RPG_MISSION_CYCLE_SECONDS
+
+def _mission_ensure_tables():
+    with db_lock:
+        conn=get_db()
+        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_mission_progress(
+            cycle_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            mission_key TEXT NOT NULL,
+            progress BIGINT NOT NULL DEFAULT 0,
+            completed BIGINT NOT NULL DEFAULT 0,
+            rewarded BIGINT NOT NULL DEFAULT 0,
+            updated_at BIGINT NOT NULL,
+            PRIMARY KEY(cycle_id,user_id,mission_key)
+        )""")
+        conn.commit(); conn.close()
+
+def _mission_board(cycle_id=None):
+    c=_mission_cycle_id() if cycle_id is None else int(cycle_id)
+    # Misma selección para todos durante el ciclo; cambia completamente al renovarse.
+    rng=random.Random(0x4B4957 ^ c)
+    by_event={}
+    for m in RPG_MISSION_CATALOG:
+        by_event.setdefault(m["event"],[]).append(m)
+    chosen=[]
+    events=list(by_event)
+    rng.shuffle(events)
+    # Primero diversidad: una de cada actividad.
+    for ev in events:
+        chosen.append(dict(rng.choice(by_event[ev])))
+    # Completa hasta 10 sin repetir la misma misión.
+    remaining=[m for m in RPG_MISSION_CATALOG if m["key"] not in {x["key"] for x in chosen}]
+    rng.shuffle(remaining)
+    chosen.extend(dict(x) for x in remaining[:max(0,RPG_MISSION_BOARD_SIZE-len(chosen))])
+    # Orden visual por dificultad/rareza.
+    order={"comun":0,"poco_comun":1,"raro":2,"epica":3,"legendaria":4}
+    chosen=sorted(chosen[:RPG_MISSION_BOARD_SIZE],key=lambda x:(order.get(x["rarity"],9),x["goal"]))
+    return chosen
+
+def mission_event(user_id,event,amount=1):
+    """Avanza todas las misiones activas compatibles y paga al completarlas."""
+    try:
+        uid=int(user_id); amount=max(0,int(amount))
+        if not uid or amount<=0: return []
+        _mission_ensure_tables()
+        cycle=_mission_cycle_id(); board=[m for m in _mission_board(cycle) if m["event"]==event]
+        if not board: return []
+        completed=[]
+        now=int(time.time())
+        with db_lock:
+            conn=get_db()
+            for m in board:
+                row=conn.execute("""SELECT * FROM rpg_mission_progress
+                    WHERE cycle_id=? AND user_id=? AND mission_key=? FOR UPDATE""",
+                    (cycle,uid,m["key"])).fetchone()
+                old=int(row["progress"] or 0) if row else 0
+                was_done=bool(int(row["completed"] or 0)) if row else False
+                new=min(int(m["goal"]),old+amount)
+                done=new>=int(m["goal"])
+                conn.execute("""INSERT INTO rpg_mission_progress
+                    (cycle_id,user_id,mission_key,progress,completed,rewarded,updated_at)
+                    VALUES(?,?,?,?,?,0,?)
+                    ON CONFLICT(cycle_id,user_id,mission_key)
+                    DO UPDATE SET progress=EXCLUDED.progress,
+                                  completed=GREATEST(rpg_mission_progress.completed,EXCLUDED.completed),
+                                  updated_at=EXCLUDED.updated_at""",
+                    (cycle,uid,m["key"],new,1 if done else 0,now))
+                if done and not was_done:
+                    completed.append(m)
+            conn.commit(); conn.close()
+        # Recompensa automática: no hay que reclamar una por una.
+        for m in completed:
+            with db_lock:
+                conn=get_db()
+                row=conn.execute("""UPDATE rpg_mission_progress SET rewarded=1
+                    WHERE cycle_id=? AND user_id=? AND mission_key=? AND rewarded=0
+                    RETURNING rewarded""",(cycle,uid,m["key"])).fetchone()
+                conn.commit(); conn.close()
+            if row:
+                change_kiwons(uid,int(m["reward"]),"rpg_mission_reward",
+                              note=f"Misión {m['key']} ciclo {cycle}")
+                try:
+                    send_private_message(uid,
+                        f"✅ MISIÓN COMPLETADA\n\n{m['icon']} {m['title']}\n"
+                        f"🎯 {m['goal']:,}/{m['goal']:,}\n🪙 +{m['reward']:,} KW")
+                except Exception:
+                    pass
+        return completed
+    except Exception as exc:
+        logger.exception("Mission event error: %s",exc)
+        return []
+
+def mission_board_text(user_id):
+    _mission_ensure_tables()
+    uid=int(user_id); cycle=_mission_cycle_id(); board=_mission_board(cycle)
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""SELECT mission_key,progress,completed FROM rpg_mission_progress
+            WHERE cycle_id=? AND user_id=?""",(cycle,uid)).fetchall()
+        conn.close()
+    prog={r["mission_key"]:dict(r) for r in rows}
+    left=max(0,_mission_cycle_ends(cycle)-int(time.time()))
+    lines=["📜 TABLÓN DE MISIONES","",
+           "10 misiones activas · puedes completar TODAS.",
+           f"🔄 Nuevo tablón en {left//3600}h {(left%3600)//60}m",""]
+    for i,m in enumerate(board,1):
+        r=prog.get(m["key"],{})
+        p=min(int(m["goal"]),int(r.get("progress") or 0))
+        done=p>=int(m["goal"])
+        mark="✅" if done else m["icon"]
+        lines.append(f"{i}. {mark} {m['title']}")
+        lines.append(f"   {m.get('story','')}")
+        lines.append(f"   🎯 {p:,}/{m['goal']:,} · 🪙 {m['reward']:,} KW")
+    done_count=sum(1 for m in board if int(prog.get(m["key"],{}).get("progress") or 0)>=int(m["goal"]))
+    lines += ["",f"🏁 Completadas: {done_count}/10"]
+    return "\n".join(lines)
+
+def _delete_old_combat_card(chat_id,msg):
+    """Borra la tarjeta anterior después de generar la siguiente; los dados siguen visibles."""
+    try:
+        mid=int((msg or {}).get("message_id") or 0)
+        if mid: delete_message(chat_id,mid)
+    except Exception:
+        pass
+
+
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("auto_encounter_claim:"):
+        spawn_id=int(data.split(":",1)[1])
+        ok,msg2,spawn=claim_auto_encounter(chat_id,uid,spawn_id)
+        if not ok:
+            send_message(chat_id,msg2); return True
+        char=get_active_character(uid)
+        battle=get_rpg_battle(chat_id,uid)
+        kb=rpg_battle_keyboard(char["class_name"],0) if char else None
+        asset_key=rpg_enemy_asset_key(battle["enemy_key"],battle.get("encounter_rarity","normal")) if battle else ""
+        sent=send_rpg_image(chat_id,asset_key,msg2,reply_markup=kb) if asset_key else None
+        if not sent: send_message(chat_id,msg2,reply_markup=kb)
+        return True
     if data.startswith("omega_join:"):
         eid=int(data.split(":",1)[1]); ok,msg2=omega_join(chat_id,uid,eid); e=_omega_active(chat_id)
         send_message(chat_id,msg2+("\n\n"+_omega_card(e,uid) if e else ""),
@@ -6571,6 +7016,7 @@ def handle_rpg_callback(query):
     if data.startswith("omega_atk:"):
         _,eid,key=data.split(":",2); ok,msg2=omega_attack(chat_id,uid,int(eid),key)
         if not ok: send_message(chat_id,msg2)
+        else: _delete_old_combat_card(chat_id,msg)
         return True
 
     if data.startswith("boss_delete_offer:"):
@@ -6612,6 +7058,7 @@ def handle_rpg_callback(query):
         b=_boss_active(chat_id)
         if b:
             send_message(chat_id,notice+"\n\n"+_boss_card(b,uid),reply_markup=_boss_keyboard(b,uid))
+            _delete_old_combat_card(chat_id,msg)
         else:
             send_message(chat_id,notice)
         return True
@@ -6649,10 +7096,12 @@ def handle_rpg_callback(query):
     if data.startswith("boss_def:"):
         ok,msg2=boss_action(chat_id,uid,int(data.split(":",1)[1]),defend=True)
         if not ok: send_message(chat_id,msg2); return True
+        _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("boss_atk:"):
         _,bid,key=data.split(":",2); ok,msg2=boss_action(chat_id,uid,int(bid),ability_key=key)
         if not ok: send_message(chat_id,msg2)
+        else: _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("pvp_accept:"):
         ok,msg2=accept_pvp(int(data.split(":",1)[1]),chat_id,user)
@@ -6681,19 +7130,25 @@ def handle_rpg_callback(query):
     if data.startswith("pvp_atk:"):
         _,did,key=data.split(":",2); ok,msg2=pvp_action(int(did),uid,ability_key=key)
         if not ok: send_message(chat_id,msg2)
+        else: _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("pvp_def:"):
         ok,msg2=pvp_action(int(data.split(":",1)[1]),uid,defend=True)
         if not ok: send_message(chat_id,msg2)
+        else: _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("pvp_surrender:"):
         ok,msg2=pvp_surrender(int(data.split(":",1)[1]),uid)
         if not ok: send_message(chat_id,msg2)
         return True
     if data.startswith("rpg_attack:"):
-        return resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
+        result=resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
+        _delete_old_combat_card(chat_id,msg)
+        return result
     if data=="rpg_defend":
-        return rpg_defend_action(chat_id,uid)
+        result=rpg_defend_action(chat_id,uid)
+        _delete_old_combat_card(chat_id,msg)
+        return result
     if data=="rpg_flee":
         if cancel_rpg_encounter(chat_id,uid): send_message(chat_id,"🏃 Has abandonado el encuentro. No hay recompensa ni penalización.")
         else: send_message(chat_id,"No tienes un encuentro activo.")
@@ -7041,6 +7496,7 @@ def process_command(
             "🐾 /mascota — Ver mascotas\n"
             "🎰 /gacha — Gacha de mascotas\n\n"
             "⚔️ COMBATE\n"
+            "📜 /misiones — Tablón de 10 misiones\n"
             "👾 /encuentro — Buscar enemigo PvE\n"
             "👹 /boss — Ver/entrar al Boss activo\n"
             "📚 /bosses — Lista de Bosses\n"
@@ -7159,10 +7615,17 @@ def process_command(
         send_message(chat_id,"🔥 UNA PRESENCIA ENORME HA APARECIDO...\n\n"+_boss_card(res,message.get("from",{}).get("id")),reply_markup=_boss_keyboard(res,message.get("from",{}).get("id")))
         return True
 
+    if command in ("/misiones", "/tablon", "/misionesrpg"):
+        uid=message.get("from",{}).get("id")
+        ensure_player(message.get("from",{}))
+        send_message(chat_id,mission_board_text(uid))
+        return True
+
     if command in ("/encuentro", "/combatir"):
         user = message.get("from", {})
         ensure_player(user)
         ensure_owner_secret_character(user)
+        register_rpg_auto_chat(chat_id, chat.get("type"), message.get("message_thread_id"))
         ok, result = start_rpg_encounter(chat_id, user.get("id"))
         if ok:
             char=get_active_character(user.get("id"))
@@ -9048,6 +9511,8 @@ if __name__ == "__main__":
 
     # Recordatorios de Kenny Omega y cierre automático del ranking.
     threading.Thread(target=_omega_announcer_loop,daemon=True,name="omega-announcer").start()
+    # Mundo vivo: una aparición automática cada 5 minutos por grupo activo.
+    threading.Thread(target=_rpg_auto_world_loop,daemon=True,name="rpg-auto-world").start()
 
     app.run(
         host="0.0.0.0",

@@ -4034,6 +4034,114 @@ HIDDEN_BLADE_ABILITY = {
     "special":True, "cooldown":3
 }
 
+# =========================================================
+# ESTADOS ALTERADOS V1
+# Persistencia genérica: sirve para PvE, Bosses y Omega sin tocar
+# las fórmulas base ni las tablas de combate existentes.
+# =========================================================
+RPG_STATUS_META = {
+    "burn":      {"icon":"🔥","name":"Quemadura","turns":3},
+    "poison":    {"icon":"☠️","name":"Veneno","turns":3},
+    "bleed":     {"icon":"🩸","name":"Sangrado","turns":3},
+    "paralysis": {"icon":"⚡","name":"Parálisis","turns":1},
+    "rupture":   {"icon":"🛡️","name":"Ruptura","turns":3},
+    "stun":      {"icon":"💫","name":"Aturdimiento","turns":1},
+}
+RPG_EQUIPMENT_STATUS_PROCS = {
+    "hoja_ceniza_reforzada": ("burn", .18, 3, 0.035),
+    "amuleto_lich":           ("poison", .16, 3, 0.030),
+    "garras_fenrir":          ("bleed", .22, 3, 0.040),
+    "guantes_raijin":         ("paralysis", .18, 1, 0.0),
+    "arma_omega":             ("rupture", .18, 3, 0.15),
+    "reliquia_azath":         ("stun", .12, 1, 0.0),
+}
+
+def _ensure_combat_status_table():
+    with db_lock:
+        conn=get_db()
+        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_combat_statuses(
+            scope TEXT NOT NULL, combat_id TEXT NOT NULL, target_key TEXT NOT NULL,
+            status_key TEXT NOT NULL, turns BIGINT NOT NULL DEFAULT 0,
+            potency DOUBLE PRECISION NOT NULL DEFAULT 0,
+            source_user_id BIGINT NOT NULL DEFAULT 0,
+            updated_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY(scope,combat_id,target_key,status_key)
+        )""")
+        conn.commit(); conn.close()
+
+def _status_combat_id(*parts):
+    return ":".join(str(x) for x in parts)
+
+def _status_apply(scope,combat_id,target_key,status_key,turns=None,potency=0.0,source_user_id=0):
+    if status_key not in RPG_STATUS_META: return False
+    _ensure_combat_status_table()
+    turns=max(1,int(turns or RPG_STATUS_META[status_key]["turns"]))
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_combat_statuses(scope,combat_id,target_key,status_key,turns,potency,source_user_id,updated_at)
+                        VALUES(?,?,?,?,?,?,?,?)
+                        ON CONFLICT(scope,combat_id,target_key,status_key) DO UPDATE SET
+                        turns=GREATEST(rpg_combat_statuses.turns,excluded.turns),
+                        potency=GREATEST(rpg_combat_statuses.potency,excluded.potency),
+                        source_user_id=excluded.source_user_id,updated_at=excluded.updated_at""",
+                     (str(scope),str(combat_id),str(target_key),str(status_key),turns,float(potency),int(source_user_id or 0),int(time.time())))
+        conn.commit(); conn.close()
+    return True
+
+def _status_rows(scope,combat_id,target_key):
+    _ensure_combat_status_table()
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""SELECT * FROM rpg_combat_statuses
+            WHERE scope=? AND combat_id=? AND target_key=? AND turns>0 ORDER BY status_key""",
+            (str(scope),str(combat_id),str(target_key))).fetchall(); conn.close()
+    return [dict(x) for x in rows]
+
+def _status_text(scope,combat_id,target_key):
+    rows=_status_rows(scope,combat_id,target_key)
+    if not rows: return ""
+    return " · ".join(f"{RPG_STATUS_META.get(r['status_key'],{}).get('icon','✨')} {RPG_STATUS_META.get(r['status_key'],{}).get('name',r['status_key'])} ({int(r['turns'])})" for r in rows)
+
+def _status_tick(scope,combat_id,target_key,max_hp):
+    """Resuelve un turno de estados. Devuelve (daño DOT, bloquea_accion, texto)."""
+    rows=_status_rows(scope,combat_id,target_key); dot=0; blocked=False; lines=[]
+    for r in rows:
+        key=str(r['status_key']); potency=float(r.get('potency') or 0)
+        meta=RPG_STATUS_META.get(key,{"icon":"✨","name":key})
+        if key in ("burn","poison","bleed"):
+            amount=max(1,int(round(float(max_hp)*(potency or .03))))
+            dot+=amount; lines.append(f"{meta['icon']} {meta['name']}: -{amount} HP")
+        elif key in ("paralysis","stun"):
+            blocked=True; lines.append(f"{meta['icon']} {meta['name']}: pierde la acción")
+        with db_lock:
+            conn=get_db()
+            conn.execute("""UPDATE rpg_combat_statuses SET turns=turns-1,updated_at=?
+                            WHERE scope=? AND combat_id=? AND target_key=? AND status_key=?""",
+                         (int(time.time()),str(scope),str(combat_id),str(target_key),key))
+            conn.execute("DELETE FROM rpg_combat_statuses WHERE scope=? AND combat_id=? AND target_key=? AND turns<=0",
+                         (str(scope),str(combat_id),str(target_key)))
+            conn.commit(); conn.close()
+    return dot,blocked,"\n".join(lines)
+
+def _status_defense_multiplier(scope,combat_id,target_key):
+    return .85 if any(r['status_key']=='rupture' for r in _status_rows(scope,combat_id,target_key)) else 1.0
+
+def _equipped_status_proc(character_id):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT item_key FROM rpg_inventory WHERE character_id=? AND equipped=1",(int(character_id),)).fetchall(); conn.close()
+    candidates=[]
+    for r in rows:
+        cfg=RPG_EQUIPMENT_STATUS_PROCS.get(str(r['item_key']))
+        if cfg: candidates.append(cfg)
+    random.shuffle(candidates)
+    for key,chance,turns,potency in candidates:
+        if random.random()<float(chance): return key,turns,potency
+    return None
+
+def _status_proc_line(proc):
+    if not proc: return ""
+    key,turns,_=proc; m=RPG_STATUS_META[key]
+    return f"{m['icon']} {m['name']} aplicado ({turns} turno{'s' if turns!=1 else ''})."
+
 def _ensure_special_techniques_table():
     with db_lock:
         conn=get_db()
@@ -4079,9 +4187,13 @@ def _append_hidden_blade_button(kb,user_id,prefix,special_cd=0,context_id=None):
     text="🗡️ Hidden Blade" if int(special_cd)<=0 else f"⏳ Hidden Blade ({special_cd})"
     if prefix=="rpg_attack": cb="rpg_attack:hidden_blade"
     else: cb=f"{prefix}:{int(context_id)}:hidden_blade"
-    # Antes de inventario/defensa cuando sea posible.
-    pos=max(0,len(rows)-1)
-    rows.insert(pos,[{"text":text,"callback_data":cb}])
+    # Hidden Blade es la cuarta técnica: visualmente comparte la fila de la Ultimate.
+    # Así no queda aislada debajo de botones de navegación/defensa.
+    if len(rows) >= 2 and len(rows[1]) == 1:
+        rows[1].append({"text":text,"callback_data":cb})
+    else:
+        pos=max(0,len(rows)-1)
+        rows.insert(pos,[{"text":text,"callback_data":cb}])
     return {"inline_keyboard":rows}
 
 def rpg_abilities_for(class_name):
@@ -4316,7 +4428,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             heal=0
             if roll != 1:
                 pen=float(ability.get("pen",0.0))
-                raw=(eff["atk"] * float(ability["power"]) * RPG_DICE_MULT[roll]) - (enemy_def * (1.0-pen) * 0.42)
+                pve_cid=_status_combat_id(chat_id,user_id)
+                enemy_def_eff=enemy_def*_status_defense_multiplier("pve",pve_cid,"enemy")
+                raw=(eff["atk"] * float(ability["power"]) * RPG_DICE_MULT[roll]) - (enemy_def_eff * (1.0-pen) * 0.42)
                 damage=max(1,int(round(raw)))
                 pet_pct=_pet_bonus(user_id,"pve_damage")
                 if pet_pct: damage=max(1,int(round(damage*(1.0+pet_pct/100.0))))
@@ -4327,6 +4441,13 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 if ability.get("heal_pct"):
                     heal=max(1,int(round(eff["max_hp"]*float(ability["heal_pct"])*RPG_DICE_MULT[roll])))
             enemy_hp=max(0,enemy_hp-damage)
+            pve_cid=_status_combat_id(chat_id,user_id)
+            status_proc=_equipped_status_proc(char["id"]) if damage>0 else None
+            if status_proc:
+                _status_apply("pve",pve_cid,"enemy",status_proc[0],status_proc[1],status_proc[2],user_id)
+            dot_damage,status_blocked,status_tick_text=_status_tick("pve",pve_cid,"enemy",int(battle["enemy_max_hp"]))
+            if dot_damage:
+                enemy_hp=max(0,enemy_hp-dot_damage)
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
@@ -4359,7 +4480,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 send_message(chat_id,
                     f"{ability['emoji']} {char['name']} usa {ability['name']}\n"
                     f"🎲 {roll}\n{crit}"
-                    f"⚔️ {damage} de daño.\n\n☠️ {battle['enemy_name']} ha sido derrotado.\n"
+                    f"⚔️ {damage} de daño."
+                    +(f"\n{_status_proc_line(status_proc)}" if status_proc else "")
+                    +(f"\n{status_tick_text}" if status_tick_text else "")
+                    +f"\n\n☠️ {battle['enemy_name']} ha sido derrotado.\n"
                     f"⭐ +{reward_exp} EXP\n🪙 +{reward_kw} KW"
                     +(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels!=1 else ''}! Nivel {newstats['level']}." if levels else ""))
                 drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"],encounter_rarity)
@@ -4373,7 +4497,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             if heal:
                 char_hp=min(eff["max_hp"],char_hp+heal)
 
-            enemy_roll,enemy_damage=_rpg_enemy_damage(battle,eff,False)
+            if status_blocked:
+                enemy_roll,enemy_damage=0,0
+            else:
+                enemy_roll,enemy_damage=_rpg_enemy_damage(battle,eff,False)
             char_hp=max(0,char_hp-enemy_damage)
             lost_exp=0
             if char_hp<=0:
@@ -4393,9 +4520,12 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             if char_hp<=0:
                 send_message(chat_id,
                     f"{ability['emoji']} {char['name']} usa {ability['name']}\n🎲 {roll}\n{fail}"
-                    f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
-                    f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n\n"
-                    f"💀 {char['name']} ha sido derrotado.\n📉 -{lost_exp} EXP (20% de tu progreso del nivel)\n"
+                    f"⚔️ {damage} de daño.{heal_text}"
+                    +(f"\n{_status_proc_line(status_proc)}" if status_proc else "")
+                    +(f"\n{status_tick_text}" if status_tick_text else "")
+                    +f"\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
+                    +(f"{battle['enemy_name']} pierde su acción por un estado alterado.\n\n" if status_blocked else f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n\n")
+                    +f"💀 {char['name']} ha sido derrotado.\n📉 -{lost_exp} EXP (20% de tu progreso del nivel)\n"
                     "⏳ Recuperación: 3 minutos.\n"
                     "🤝 Otro aventurero puede ayudarte a volver con 50% de vida.\n"
                     "🧪 Una Esencia Vital puede levantarte antes.",
@@ -4403,9 +4533,12 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             else:
                 send_message(chat_id,
                     f"{ability['emoji']} {char['name']} usa {ability['name']}\n🎲 {roll}\n{fail}"
-                    f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
-                    f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
-                    f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
+                    f"⚔️ {damage} de daño.{heal_text}"
+                    +(f"\n{_status_proc_line(status_proc)}" if status_proc else "")
+                    +(f"\n{status_tick_text}" if status_tick_text else "")
+                    +f"\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
+                    +(f"{battle['enemy_name']} pierde su acción por un estado alterado.\n" if status_blocked else f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n")
+                    +f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
                     reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id))
             return True
         except Exception:
@@ -5927,6 +6060,8 @@ def _omega_card(event,user_id=None):
         f"🎲 Cada intento: {OMEGA_TURNS_PER_RUN} turnos",
         "♻️ Nuevo intento cada 2 horas",
     ]
+    omega_states=_status_text('omega',str(event['id']),'omega')
+    if omega_states: lines.append(f"✨ Estados: {omega_states}")
     if user_id is not None:
         score,run=_omega_score(event['id'],user_id)
         if score:
@@ -6051,11 +6186,18 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
     if not roll: return False,"Telegram no devolvió el dado. Intenta otra vez."
     eff=_boss_stats_for(user_id,char); dmg=0
     if roll!=1:
-        raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(OMEGA_DEF*(1-float(ab.get('pen',0)))*.40)
+        omega_cid=str(event_id)
+        omega_def_eff=OMEGA_DEF*_status_defense_multiplier('omega',omega_cid,'omega')
+        raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(omega_def_eff*(1-float(ab.get('pen',0)))*.40)
         dmg=max(1,int(round(raw)))
         pet_pct=_pet_bonus(user_id,'boss_damage')
         if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
         if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
+    omega_cid=str(event_id)
+    omega_status_proc=_equipped_status_proc(char['id']) if dmg>0 else None
+    if omega_status_proc:
+        _status_apply('omega',omega_cid,'omega',omega_status_proc[0],omega_status_proc[1],omega_status_proc[2],user_id)
+    omega_dot,omega_blocked,omega_tick_text=_status_tick('omega',omega_cid,'omega',int(e.get('max_hp') or OMEGA_MAX_HP))
     sc=max(0,int(run['special_cd'])-1); uc=max(0,int(run['ultimate_cd'])-1)
     if ab.get('special'): sc=int(ab.get('cooldown',2))
     if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
@@ -6064,7 +6206,7 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
     own_max=int(run.get('max_hp') or _boss_stats_for(user_id,char)['max_hp'])
     counter_text=""
     # Kenny responde exactamente en los turnos 4 y 8 de cada tanda.
-    if new_turns in (4,8) and own_hp>0:
+    if new_turns in (4,8) and own_hp>0 and not omega_blocked:
         kroll=random.randint(1,6)
         kmoves=[
             ("⚡ V-Trigger",1.00),
@@ -6077,12 +6219,14 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         kdmg=0 if kroll==1 else max(1,int(round(kraw)))
         own_hp=max(0,own_hp-kdmg)
         counter_text=f"\n\n🔥 KENNY OMEGA CONTRAATACA\n🎲 {kroll} · {kname}\n💥 Kenny te causa {kdmg:,} daño.\n❤️ Tu HP: {own_hp:,}/{own_max:,}"
+    # El daño periódico puede dejar a Omega a 1 HP, pero el golpe final siempre debe ser un ataque real.
+    omega_dot=min(int(omega_dot),max(0,int(e.get('hp') or 0)-int(dmg)-1))
     with db_lock:
         conn=get_db()
         # HP global: nunca baja de cero.
         rowhp=conn.execute("""UPDATE rpg_omega_events SET hp=GREATEST(0,hp-?)
                               WHERE id=? AND status='active' RETURNING hp,max_hp""",
-                           (dmg,int(event_id))).fetchone()
+                           (dmg+omega_dot,int(event_id))).fetchone()
         conn.execute("""UPDATE rpg_omega_runs SET turns_used=?,special_cd=?,ultimate_cd=?,hp=?,max_hp=?
                         WHERE event_id=? AND user_id=?""",(new_turns,sc,uc,own_hp,own_max,int(event_id),int(user_id)))
         conn.execute("""UPDATE rpg_omega_scores SET total_damage=total_damage+?,total_turns=total_turns+1,last_attack_at=?
@@ -6091,7 +6235,11 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
     mission_event(user_id,"omega_damage",dmg)
     mission_line=_selected_mission_progress(user_id,"omega_damage")
     crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''
-    text=f"⚡ KENNY OMEGA — TURNO {new_turns}/{OMEGA_TURNS_PER_RUN}\n🎲 {roll} · {ab['name']}{crit}{miss}\n💥 {dmg:,} daño"+counter_text
+    text=f"⚡ KENNY OMEGA — TURNO {new_turns}/{OMEGA_TURNS_PER_RUN}\n🎲 {roll} · {ab['name']}{crit}{miss}\n💥 {dmg:,} daño"
+    if omega_status_proc: text+='\n'+_status_proc_line(omega_status_proc)
+    if omega_tick_text: text+='\n'+omega_tick_text
+    if omega_blocked and new_turns in (4,8): text+='\n💫 Kenny pierde su contraataque por el estado alterado.'
+    text+=counter_text
     if mission_line: text+="\n\n"+mission_line
     if own_hp<=0:
         # La derrota personal termina la tanda y arranca las 2 horas desde ahora.
@@ -6304,6 +6452,8 @@ def _boss_card(b,user_id=None):
         conn=get_db(); rows=conn.execute("SELECT p.user_id,p.damage,p.defeated,p.defeated_until,p.hp,p.max_hp,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name FROM rpg_boss_participants p LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? ORDER BY p.damage DESC",(int(b['id']),)).fetchall(); conn.close()
     phase=_boss_phase(b); left=max(0,int(b['expires_at'])-int(time.time())); mins=left//60
     lines=[f"👹 BOSS — {b['name']}",f"⭐ Nv. {b['level']} · Fase {phase}/3",f"❤️ {b['hp']}/{b['max_hp']}",f"⚔️ ATK {b['atk']} · 🛡️ DEF {b['defense']}"]
+    boss_states=_status_text('boss',str(b['id']),'boss')
+    if boss_states: lines.append(f"✨ Estados: {boss_states}")
     if user_id is not None:
         mine=next((r for r in rows if int(r['user_id'])==int(user_id)),None)
         if mine:
@@ -6365,7 +6515,8 @@ def _boss_keyboard_base(b,user_id):
           [{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]
     if has_special_technique(user_id,"hidden_blade"):
         htxt="🗡️ Hidden Blade" if scd<=0 else f"⏳ Hidden Blade ({scd})"
-        rows.insert(2,[{"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"}])
+        # Cuarta técnica, junto a la Ultimate.
+        rows[1].append({"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"})
     if char and is_owner(user_id) and char['class_name']=='The Cleaner':
         active=bool(char['secret_blades_active']); rows.append([{"text":"🗡️🗡️ Guardar Espadas" if active else "🗡️🗡️ Sacar Espadas","callback_data":f"boss_blades:{b['id']}"}])
     return {"inline_keyboard":rows}
@@ -6583,7 +6734,9 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
         eff=_boss_stats_for(user_id,char); dmg=0; heal=0; boss_was_defending=int(b.get('defending') or 0)
         if roll!=1:
-            raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
+            boss_cid=str(boss_id)
+            boss_def_eff=int(b['defense'])*_status_defense_multiplier('boss',boss_cid,'boss')
+            raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(boss_def_eff*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
             pet_pct=_pet_bonus(user_id,'boss_damage')
             if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
             if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
@@ -6605,9 +6758,14 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+        boss_cid=str(boss_id)
+        boss_status_proc=_equipped_status_proc(char['id']) if dmg>0 else None
+        if boss_status_proc:
+            _status_apply('boss',boss_cid,'boss',boss_status_proc[0],boss_status_proc[1],boss_status_proc[2],user_id)
         mission_event(user_id,"boss_damage",dmg)
         if dmg>0: mission_event(user_id,"boss_hits",1)
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
+        if boss_status_proc: player_text+='\n'+_status_proc_line(boss_status_proc)
         if counter:
             player_text+=f"\n🪽 CONTRAATAQUE — El Ángel Caído devuelve {counter} de daño."
         if boss_phase_change:
@@ -6655,8 +6813,22 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
     # IA decide DESPUÉS de la acción del jugador y antes de resolver su propio resultado.
     b=_boss_active(chat_id); p=_boss_participant(boss_id,user_id)
     if not b: return True,''
-    choice=_boss_ai_choice(b,p); ai_text=''
-    if choice=='defend':
+    boss_cid=str(boss_id)
+    boss_dot,boss_blocked,boss_tick_text=_status_tick('boss',boss_cid,'boss',int(b['max_hp']))
+    if boss_dot:
+        with db_lock:
+            conn=get_db(); rr=conn.execute("UPDATE rpg_boss_instances SET hp=GREATEST(1,hp-?) WHERE id=? AND status='active' RETURNING hp",(boss_dot,int(boss_id))).fetchone(); conn.commit(); conn.close()
+        if rr and int(rr['hp'])<=0:
+            with db_lock:
+                conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET status='defeated',defeated_at=?,last_hit_user_id=? WHERE id=?",(int(time.time()),int(user_id),int(boss_id))); conn.commit(); conn.close()
+            dead=dict(b); dead['hp']=0; n=_boss_reward_all(dead)
+            send_message(chat_id,player_text+f"\n\n{boss_tick_text}\n\n☠️ {b['name']} HA SIDO DERROTADO POR UN ESTADO ALTERADO\n🎁 Recompensas entregadas a {n} participantes.")
+            return True,''
+        b=_boss_active(chat_id) or b
+    choice='status_blocked' if boss_blocked else _boss_ai_choice(b,p); ai_text=''
+    if choice=='status_blocked':
+        ai_text=(boss_tick_text+'\n' if boss_tick_text else '')+f"💫 {b['name']} pierde su acción por un estado alterado."
+    elif choice=='defend':
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET defending=1,defends_used=defends_used+1 WHERE id=? AND defends_used<3",(int(boss_id),)); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} analiza el peligro.\n🛡️ Se pone en guardia: el próximo golpe recibido hará 50% menos daño."

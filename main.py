@@ -690,6 +690,7 @@ def init_db():
         cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS allowed_classes TEXT DEFAULT ''")
         cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS min_level BIGINT NOT NULL DEFAULT 1")
         cur.execute("ALTER TABLE rpg_items ADD COLUMN IF NOT EXISTS heal_percent BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_inventory ADD COLUMN IF NOT EXISTS forge_level BIGINT NOT NULL DEFAULT 0")
 
         # Metadatos V3 para los objetos ya existentes.
         cur.execute("UPDATE rpg_items SET item_type='accesorio', equip_slot='accesorio', allowed_classes='Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner', min_level=1 WHERE item_key='anillo_carmesi'")
@@ -911,6 +912,14 @@ def init_db():
                 VALUES (?,?,?,?,?,0,0,0,NULL,1,?,'','',1)
                 ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,description=excluded.description
             """,(key,name,rarity,itype,desc,now_seed))
+
+        # KiwRPG V8.1 — material común para mejorar equipo hasta +15.
+        cur.execute("""INSERT INTO rpg_items
+            (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,equip_slot,allowed_classes,min_level,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(item_key) DO UPDATE SET
+            name=EXCLUDED.name, rarity=EXCLUDED.rarity, item_type=EXCLUDED.item_type,
+            description=EXCLUDED.description, tradeable=EXCLUDED.tradeable""",
+            ('polvo_forja','Polvo de Forja','comun','material','Material común desprendido por los monstruos. El Forjador lo usa para reforzar armas y armaduras hasta +15.',0,0,0,None,1,'','',1,now))
 
         # KiwRPG V6.2 — equipo de Forja. Los materiales/Omega ahora tienen uso real.
         boss_equipment_items = [
@@ -4517,6 +4526,14 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     +(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels!=1 else ''}! Nivel {newstats['level']}." if levels else ""))
                 drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"],encounter_rarity)
                 if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
+                # Material común independiente: no reemplaza el loot normal.
+                dust_chance=0.65 if encounter_rarity=="normal" else 0.80
+                if random.random()<dust_chance:
+                    qty=1 if random.random()<0.85 else 2
+                    got=0
+                    for _ in range(qty):
+                        if grant_rpg_item(user_id,int(char["id"]),"polvo_forja",f"monstruo:{battle['enemy_key']}"): got+=1
+                    if got: send_message(chat_id,f"🧱 El monstruo dejó Polvo de Forja ×{got}.")
                 dungeon_id=int(battle.get("dungeon_event_id") or 0); dungeon_room=int(battle.get("dungeon_room") or 0)
                 if dungeon_id>0:
                     if dungeon_room<RPG_DUNGEON_ROOMS:
@@ -4732,10 +4749,29 @@ def handle_character_name_message(message, text):
     send_message(chat_id,f"✨ ¿Crear este personaje?\n\n🧙 {name}\n{info['emoji']} {info['label']}\n❤️ {stats['hp']} HP · 🗡️ {stats['atk']} ATK · 🛡️ {stats['defense']} DEF",reply_markup={"inline_keyboard":[[{"text":"✅ Crear personaje","callback_data":"rpg_create_confirm"}],[{"text":"↩️ Cambiar clase","callback_data":"rpg_create_back"},{"text":"❌ Cancelar","callback_data":"rpg_create_cancel"}]]})
     return True
 
+def _forge_level_bonus(slot, level):
+    """Bonos pequeños y predecibles: +15 mejora, pero no rompe el combate."""
+    lv=max(0,min(15,int(level or 0))); slot=str(slot or "")
+    if slot=="arma": return {"atk":lv//3,"defense":0,"hp":0}
+    if slot=="armadura": return {"atk":0,"defense":lv//3,"hp":(lv//5)*5}
+    if slot=="casco": return {"atk":0,"defense":lv//4,"hp":(lv//5)*5}
+    if slot=="guantes": return {"atk":lv//5,"defense":lv//5,"hp":0}
+    if slot=="botas": return {"atk":0,"defense":lv//5,"hp":(lv//5)*5}
+    if slot=="accesorio": return {"atk":lv//5,"defense":lv//6,"hp":(lv//5)*5}
+    return {"atk":0,"defense":0,"hp":0}
+
 def equipped_bonuses(character_id):
     with db_lock:
-        conn=get_db(); row=conn.execute("""SELECT COALESCE(SUM(x.atk_bonus),0) atk, COALESCE(SUM(x.def_bonus),0) defense, COALESCE(SUM(x.hp_bonus),0) hp FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.character_id=? AND i.equipped=1""",(int(character_id),)).fetchone(); conn.close()
-    return {"atk":int(row["atk"] or 0),"defense":int(row["defense"] or 0),"hp":int(row["hp"] or 0)}
+        conn=get_db(); rows=conn.execute("""SELECT x.atk_bonus,x.def_bonus,x.hp_bonus,x.equip_slot,i.forge_level
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.character_id=? AND i.equipped=1""",(int(character_id),)).fetchall(); conn.close()
+    out={"atk":0,"defense":0,"hp":0}
+    for r in rows:
+        b=_forge_level_bonus(r["equip_slot"],r.get("forge_level") or 0)
+        out["atk"]+=int(r["atk_bonus"] or 0)+b["atk"]
+        out["defense"]+=int(r["def_bonus"] or 0)+b["defense"]
+        out["hp"]+=int(r["hp_bonus"] or 0)+b["hp"]
+    return out
 
 def effective_character_stats(char):
     b=equipped_bonuses(char["id"])
@@ -4776,6 +4812,8 @@ def item_action_keyboard(row, char):
         if int(row.get("equipped") or 0): buttons.append({"text":"📤 Desequipar","callback_data":f"rpg_unequip:{row['id']}"})
         elif ok: buttons.append({"text":"⚔️ Equipar","callback_data":f"rpg_equip:{row['id']}"})
         else: buttons.append({"text":"🔒 No compatible","callback_data":f"rpg_locked:{row['id']}"})
+    if row.get("equip_slot") and int(row.get("forge_level") or 0)<15:
+        buttons.append({"text":f"🔨 Mejorar +{int(row.get('forge_level') or 0)}","callback_data":f"forge_upgrade:{row['id']}"})
     if int(row.get("heal_percent") or 0)>0: buttons.append({"text":"🧪 Usar","callback_data":f"rpg_use:{row['id']}"})
     keyboard=[]
     if buttons: keyboard.append(buttons[:2]);
@@ -4790,6 +4828,14 @@ def show_inventory_item(chat_id,user_id,inventory_id):
     if int(row['atk_bonus']): bonuses.append(f"⚔️ ATK +{row['atk_bonus']}")
     if int(row['def_bonus']): bonuses.append(f"🛡️ DEF +{row['def_bonus']}")
     if int(row['hp_bonus']): bonuses.append(f"❤️ HP +{row['hp_bonus']}")
+    fl=int(row.get("forge_level") or 0); fb=_forge_level_bonus(row.get("equip_slot"),fl)
+    if row.get('equip_slot'):
+        bonuses.append(f"🔨 Forja +{fl}/15")
+        extra=[]
+        if fb['atk']: extra.append(f"ATK +{fb['atk']}")
+        if fb['defense']: extra.append(f"DEF +{fb['defense']}")
+        if fb['hp']: extra.append(f"HP +{fb['hp']}")
+        if extra: bonuses.append("Mejora: "+", ".join(extra))
     ok,reason=item_compatibility(row,char) if row.get('equip_slot') else (True,'')
     text=f"🔍 {row['name']}{serial}\n{RPG_RARITY_ICON.get(row['rarity'],'⚪')} {row['rarity'].replace('_',' ').title()} · {row['item_type'].title()}\n\n{row['description']}"
     if bonuses: text+="\n\n"+" · ".join(bonuses)
@@ -5656,6 +5702,52 @@ RPG_FORGE_RECIPES = {
     "reliquia_azath":{"name":"Reliquia del Abismo","cost":35000,"materials":{"ojo_azath":1,"nucleo_sombra":3}},
 }
 
+def forge_upgrade_requirements(next_level):
+    lv=max(1,min(15,int(next_level)))
+    # 1-5:1, 6-10:2, 11-15:3. Total 30 Polvos para +15.
+    dust=1 if lv<=5 else (2 if lv<=10 else 3)
+    kw=100*lv
+    return dust,kw
+
+def forge_upgrade_item(user_id, inventory_id, chat_id=None):
+    row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
+    if not row or not char: return False,"No encontré ese equipo."
+    if not row.get("equip_slot"): return False,"Ese objeto no se puede reforzar."
+    level=int(row.get("forge_level") or 0)
+    if level>=15: return False,f"🏆 {row['name']} ya alcanzó +15."
+    nxt=level+1; dust,cost=forge_upgrade_requirements(nxt); world=current_rpg_world()
+    owned=_forge_owned_materials(user_id)
+    if owned.get("polvo_forja",0)<dust: return False,f"🧱 Necesitas {dust} Polvo de Forja para subir a +{nxt}."
+    if get_kiwons(user_id)<cost: return False,f"🪙 Necesitas {cost:,} KW para subir a +{nxt}."
+    ok,balance,error=change_kiwons(user_id,-cost,"rpg_upgrade",chat_id=chat_id,note=f"Mejora {row['item_key']} +{nxt}")
+    if not ok: return False,"No tienes suficientes KW."
+    try:
+        with db_lock:
+            conn=get_db()
+            try:
+                live=conn.execute("SELECT * FROM rpg_inventory WHERE id=? AND user_id=? FOR UPDATE",(int(inventory_id),int(user_id))).fetchone()
+                if not live: raise RuntimeError("item_missing")
+                # Si una pieza común está apilada, separa una antes de mejorarla.
+                target_id=int(inventory_id)
+                if int(live.get("quantity") or 1)>1:
+                    # La fila pulsada se convierte en UNA pieza mejorable; el resto queda apilado aparte.
+                    remainder=int(live.get("quantity") or 1)-1
+                    conn.execute("UPDATE rpg_inventory SET quantity=1 WHERE id=?",(target_id,))
+                    conn.execute("""INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id,forge_level)
+                        VALUES(?,?,?,NULL,?,0,0,?,'separado_forja',?,?,0)""",
+                        (int(user_id),int(char['id']),row['item_key'],remainder,int(time.time()),world,int(user_id)))
+                if not _consume_forge_materials(conn,user_id,world,{"polvo_forja":dust}): raise RuntimeError("dust_changed")
+                conn.execute("UPDATE rpg_inventory SET forge_level=? WHERE id=? AND user_id=?",(nxt,target_id,int(user_id)))
+                conn.commit(); conn.close()
+            except Exception:
+                conn.rollback(); conn.close(); raise
+    except Exception:
+        change_kiwons(user_id,cost,"rpg_upgrade_refund",chat_id=chat_id,note="Reembolso mejora")
+        return False,"⚠️ La mejora no se completó. Tus KW fueron devueltos."
+    fb=_forge_level_bonus(row.get('equip_slot'),nxt)
+    return True,(f"🔨 FORJA +{nxt}\n\n{row['name']} fue reforzado.\n🧱 -{dust} Polvo de Forja · 🪙 -{cost:,} KW\n"
+                 f"⚔️ Bonus de mejora: +{fb['atk']} ATK · 🛡️ +{fb['defense']} DEF · ❤️ +{fb['hp']} HP\n\n🏆 Máximo: +15")
+
 def _forge_owned_materials(user_id):
     world=current_rpg_world()
     with db_lock:
@@ -5681,6 +5773,8 @@ def forge_text(user_id):
     if not char: return "Necesitas un personaje activo para usar la Forja."
     return (f"🔥 FORJA DE KIWRPG\n\n"
             f"Convierte materiales y reliquias en equipo real.\n"
+            f"También puedes reforzar cualquier pieza equipable hasta +15 con Polvo de Forja.\n"
+            f"Los monstruos comunes pueden soltar ese material.\n"
             f"El equipo modifica de verdad ATK, DEF y HP en combate.\n\n"
             f"🪙 Saldo: {get_kiwons(user_id):,} KW\n"
             f"🎽 Usa /equipo para ver lo que llevas puesto.\n\n"
@@ -7790,6 +7884,13 @@ def handle_rpg_callback(query):
         key=data.split(":",1)[1]; ok,msg2=forge_make(uid,key,chat_id)
         txt,kb=forge_recipe_text(uid,key)
         send_message(chat_id,msg2,reply_markup=kb if txt else forge_keyboard(uid)); return True
+    if data.startswith("forge_upgrade:"):
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 El Forjador trabaja en privado.",reply_markup=_private_launch_keyboard("forge")); return True
+        iid=int(data.split(":",1)[1]); ok,msg2=forge_upgrade_item(uid,iid,chat_id)
+        send_message(chat_id,msg2)
+        if ok: show_inventory_item(chat_id,uid,iid)
+        return True
     if data.startswith("forge_locked:"):
         if not _is_private_chat_obj(msg.get("chat")): return True
         txt,kb=forge_recipe_text(uid,data.split(":",1)[1])
@@ -8007,7 +8108,7 @@ def process_command(
         uid=message.get("from",{}).get("id")
         txt=("🎮 COMANDOS KIWRPG\n\n"
              "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💰 /saldo · /kiwons — Kiwons\n"
-             "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge — Forja\n🏪 /tienda · /shop — Tienda\n"
+             "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge · /forjador · /mejorar — Forja y mejoras +15\n🏪 /tienda · /shop — Tienda\n"
              "🐾 /mascota · /mascotas · /pets — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales · /mats — Materiales\n\n"
              "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — Misiones\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
              "🧹 /resetcombate · /reiniciarcombate — Liberar tu combate si se traba\n🏃 /huir · /cancelar_combate — Abandonar PvE\n"
@@ -8249,7 +8350,7 @@ def process_command(
         send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
         return True
 
-    if command in ("/forja", "/forge"):
+    if command in ("/forja", "/forge", "/forjador", "/mejorar"):
         user_id=message.get("from",{}).get("id")
         if chat.get("type")!="private":
             send_message(chat_id,"🔒 La Forja de KiwRPG se usa en privado.",reply_markup=_private_launch_keyboard("forge")); return True

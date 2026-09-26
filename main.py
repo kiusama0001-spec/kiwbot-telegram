@@ -8156,11 +8156,11 @@ RPG_QUICK_MISSIONS = [
     {"key":"emoji_necromancer","type":"emoji","title":"💀 Ritual muy poco confiable","prompt":"El nigromante olvidó el ritual. Ayúdalo mandando exactamente: 💀🕯️🌙✨","answer":"💀🕯️🌙✨","kw":900,"exp":95},
     {"key":"emoji_controller","type":"emoji","title":"🎮 Combo ancestral","prompt":"Una pared parece sospechosamente un mando. Manda exactamente: ⬆️⬆️⬇️⬇️🔥","answer":"⬆️⬆️⬇️⬇️🔥","kw":1000,"exp":105},
     {"key":"emoji_party","type":"emoji","title":"🍻 Fiesta después del boss","prompt":"El gremio exige una celebración reglamentaria. Manda exactamente: ⚔️🍻🎉🐉","answer":"⚔️🍻🎉🐉","kw":850,"exp":90},
-    {"key":"love_message","type":"emoji","title":"💌 Una promesa sin destinatario","prompt":"En una pared alguien dejó escrito: «Que encuentre a quien quiera caminar conmigo». Repite exactamente el sello que dejó debajo: 💍❤️✨","answer":"💍❤️✨","kw":500,"exp":100,"item":"anillo_bodas"},
+    {"key":"love_message","type":"text","title":"💌 Una promesa sin destinatario","prompt":"En una pared alguien dejó escrito: «Que encuentre a quien quiera caminar conmigo». Repite exactamente la frase. Puedes enviarla con o sin las comillas.","answer":"Que encuentre a quien quiera caminar conmigo","kw":500,"exp":100,"item":"anillo_bodas"},
 
     # ⚡ Reflejos.
     {"key":"speed_loot","type":"speed","title":"💎 ¡LOOT!","prompt":"Cayó algo brillante al suelo. Nadie sabe qué es, pero eso jamás ha detenido a un jugador. ¡Sé el primero!","kw":800,"exp":80},
-    {"key":"gatos_perdidos","type":"speed","title":"🐈 Los gatos perdidos","prompt":"Se oye un maullido entre los callejones. Sé el primero en rescatarlo. Cada victoria salva un gato; al rescatar 5 recibirás la Espada del Gato Perdido.","kw":900,"exp":90},
+    {"key":"gatos_perdidos","type":"speed","title":"🐈 Los gatos perdidos","prompt":"Se oye un maullido entre los callejones. Sé el primero en rescatarlo antes de que se esconda otra vez.","kw":900,"exp":90},
     {"key":"speed_fairy","type":"speed","title":"🧚 HEY! LISTEN!","prompt":"Un hada lleva cinco minutos gritándote. Sé el primero en prestarle atención antes de que diga HEY otras cuarenta veces.","kw":850,"exp":85},
     {"key":"speed_cheese","type":"speed","title":"🧀 Queso legendario +99","prompt":"Apareció un queso con aura dorada. Malkor ya está calculando cuánto cobrar. ¡Agárralo primero!","kw":750,"exp":80},
     {"key":"love_carriage","type":"speed","title":"💍 Lo que cayó del carruaje","prompt":"Una diminuta caja cae de un carruaje y se abre al tocar el suelo. Dentro brilla un anillo sin nombres grabados. Quizá está esperando que alguien escriba su propia historia. Sé el primero en recogerlo.","kw":500,"exp":100,"item":"anillo_bodas"},
@@ -8202,10 +8202,16 @@ RPG_QUICK_MISSIONS = [
     {"key":"draw_ring","type":"draw","title":"💍 Dibuja: ANILLO","prompt":"La palabra es ANILLO. Dibuja uno digno de una aventura legendaria. Primera entrega válida gana.","kw":1000,"exp":105},
 ]
 
-def _quick_active(chat_id, now=None):
+def _quick_active(chat_id, now=None, message_thread_id=None):
+    """Misión activa del destino exacto (chat + topic cuando Telegram usa temas)."""
     now=int(now or time.time())
     with db_lock:
-        conn=get_db(); row=conn.execute("SELECT * FROM rpg_quick_missions WHERE chat_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(int(chat_id),now)).fetchone(); conn.close()
+        conn=get_db()
+        if message_thread_id is None:
+            row=conn.execute("SELECT * FROM rpg_quick_missions WHERE chat_id=? AND message_thread_id IS NULL AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(int(chat_id),now)).fetchone()
+        else:
+            row=conn.execute("SELECT * FROM rpg_quick_missions WHERE chat_id=? AND message_thread_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",(int(chat_id),int(message_thread_id),now)).fetchone()
+        conn.close()
     return row
 
 def _quick_keyboard(m):
@@ -8337,11 +8343,29 @@ def quick_mission_callback(user_id,mid,kind,choice):
     if success: return _quick_finish(m,user_id)
     return False,f"{reveal}\nIntento {n}/3. Te quedan {3-n}."
 
+def _quick_normalize_text(value):
+    """Normaliza texto humano sin volver laxas las respuestas de las misiones."""
+    import unicodedata
+    v=unicodedata.normalize('NFKC',str(value or '')).strip()
+    v=' '.join(v.split())
+    quote_pairs=(("«","»"),("“","”"),("\"","\""),("'","'"))
+    # Un punto puede venir fuera de las comillas ("«frase».") o dentro.
+    # Se elimina sólo puntuación final inocua; el contenido de la frase sigue siendo exacto.
+    v=v.rstrip(' .').strip()
+    changed=True
+    while changed and len(v)>=2:
+        changed=False
+        for left,right in quote_pairs:
+            if v.startswith(left) and v.endswith(right):
+                v=v[len(left):len(v)-len(right)].strip().rstrip(' .').strip(); changed=True; break
+    return v.casefold()
+
+
 def handle_quick_mission_text(message,text):
-    """Resuelve misiones que dependen de mensajes: emoji, mención, texto creativo o dibujo."""
+    """Resuelve misiones que dependen de mensajes: emoji, mención o texto."""
     chat_id=(message.get('chat') or {}).get('id'); uid=(message.get('from') or {}).get('id')
     if not chat_id or not uid: return False
-    m=_quick_active(chat_id)
+    m=_quick_active(chat_id,message_thread_id=message.get('message_thread_id'))
     if not m: return False
     typ=str(m['mission_type'] or '')
     raw=str(text or '').strip()
@@ -8354,25 +8378,41 @@ def handle_quick_mission_text(message,text):
         mentions=re.findall(r'(?<!\w)@[A-Za-z0-9_]{4,32}', raw)
         if not mentions: return False
     elif typ=='text':
-        expected=str(m['answer'] or '').strip()
-        if raw.casefold()!=expected.casefold(): return False
+        expected=str(m['answer'] or '')
+        if _quick_normalize_text(raw)!=_quick_normalize_text(expected): return False
     elif typ=='draw':
         # Las misiones de dibujo se entregan únicamente desde el lienzo de KiwBot.
         # Así todos compiten con la misma herramienta y el servidor decide al primer ganador.
         return False
     else:
         return False
-    ok,msg=_quick_finish(dict(m),uid); send_message(chat_id,msg); return True
+    ok,msg=_quick_finish(dict(m),uid)
+    # Responder al mensaje ganador mantiene la confirmación dentro del mismo topic.
+    send_message(chat_id,msg,reply_to_message_id=message.get('message_id'))
+    return True
 
 def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
     now=int(now or time.time()); chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
     with db_lock:
-        conn=get_db(); active=conn.execute("SELECT id FROM rpg_quick_missions WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
+        conn=get_db()
+        # Los topics de Telegram comparten chat_id: una misión de General no debe
+        # bloquear, expirar ni alterar la rotación de la misión de 🔥 Pruebas.
+        if topic is None:
+            active=conn.execute("SELECT id FROM rpg_quick_missions WHERE chat_id=? AND message_thread_id IS NULL AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
+        else:
+            active=conn.execute("SELECT id FROM rpg_quick_missions WHERE chat_id=? AND message_thread_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,int(topic),now)).fetchone()
         if active and not forced:
             conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
-        if forced: conn.execute("UPDATE rpg_quick_missions SET status='expired' WHERE chat_id=? AND status='active'",(chat_id,))
-        # No repetir ninguna de las últimas N-1 misiones: con 40 entradas, recorre las 40 antes de repetir.
-        recent_rows=conn.execute("SELECT mission_key FROM rpg_quick_missions WHERE chat_id=? ORDER BY id DESC LIMIT ?",(chat_id,max(0,len(RPG_QUICK_MISSIONS)-1))).fetchall()
+        if forced:
+            if topic is None:
+                conn.execute("UPDATE rpg_quick_missions SET status='expired' WHERE chat_id=? AND message_thread_id IS NULL AND status='active'",(chat_id,))
+            else:
+                conn.execute("UPDATE rpg_quick_missions SET status='expired' WHERE chat_id=? AND message_thread_id=? AND status='active'",(chat_id,int(topic)))
+        # La memoria anti-repetición también pertenece al topic exacto.
+        if topic is None:
+            recent_rows=conn.execute("SELECT mission_key FROM rpg_quick_missions WHERE chat_id=? AND message_thread_id IS NULL ORDER BY id DESC LIMIT ?",(chat_id,max(0,len(RPG_QUICK_MISSIONS)-1))).fetchall()
+        else:
+            recent_rows=conn.execute("SELECT mission_key FROM rpg_quick_missions WHERE chat_id=? AND message_thread_id=? ORDER BY id DESC LIMIT ?",(chat_id,int(topic),max(0,len(RPG_QUICK_MISSIONS)-1))).fetchall()
         recent_keys={str(r['mission_key']) for r in recent_rows}
         candidates=[m for m in RPG_QUICK_MISSIONS if str(m['key']) not in recent_keys]
         if not candidates: candidates=list(RPG_QUICK_MISSIONS)
@@ -9630,8 +9670,10 @@ def tavern_callback(user_id,chat_id,data):
             mult=min(8.0,1.50+0.50*st); mult=max(2.0,mult); return _tavern_finish(user_id,chat_id,"cards",True,15+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
         old=int(g['card']); new=random.randint(2,12); hi=action=="card_hi"; won=(new>old if hi else new<old) and new!=old
         if not won: return _tavern_finish(user_id,chat_id,"cards",False,5,0,f"Era {old} y salió {new}. La racha terminó.",st)
-        g['card']=7; g['streak']=st+1; _tavern_set(user_id,g); mult=max(2.0,min(8.0,1.50+0.50*g['streak']))
-        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n\nLa siguiente ronda vuelve a carta 7 para que la apuesta siga siendo justa. ¿Sigues o cobras?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"💰 Cobrar","callback_data":"tavern:card_cash"}]]}
+        # La carta obtenida se convierte en la carta actual de la siguiente ronda.
+        # No reiniciar a 7: Carta Mayor debe mantener una secuencia real (7→12→5→...).
+        g['card']=new; g['streak']=st+1; _tavern_set(user_id,g); mult=max(2.0,min(8.0,1.50+0.50*g['streak']))
+        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n🂠 Carta actual: {new}\n\n¿La siguiente será mayor o menor? ¿Sigues o cobras?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"💰 Cobrar","callback_data":"tavern:card_cash"}]]}
 
     if action.startswith("cup_"):
         g=_tavern_get(user_id)
@@ -11063,7 +11105,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         return True
 
     if command in ("/eventorpg", "/misionactual"):
-        m=_quick_active(chat_id)
+        m=_quick_active(chat_id,message_thread_id=message.get('message_thread_id'))
         if not m: send_message(chat_id,"⚡ No hay una Misión Relámpago activa ahora mismo."); return True
         prize=f"🪙 {int(m['reward_kw']):,} KW · ✨ {int(m['reward_exp']):,} EXP"+(" · 💍 Anillo de Bodas" if m['reward_item']=='anillo_bodas' else '')
         send_message(chat_id,f"⚡ MISIÓN RELÁMPAGO ACTIVA\n\n{m['title']}\n{m['prompt']}\n\n🎁 {prize}",reply_markup=_quick_keyboard(dict(m))); return True

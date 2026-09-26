@@ -8,7 +8,6 @@ from urllib.parse import parse_qsl
 import os
 import random
 import re
-import unicodedata
 import psycopg
 from psycopg.rows import dict_row
 try:
@@ -321,13 +320,15 @@ class PgConnection:
         else:
             self._conn.close()
 
-    def __del__(self):
-        # Última red de seguridad para rutas antiguas que salgan sin close().
-        try:
-            self.close()
-        except Exception:
-            pass
 
+# Defensa adicional: si una ruta antigua olvida close(), intenta devolver la conexión.
+# close() es idempotente, así que no duplica putconn.
+def _pgconnection_del(self):
+    try:
+        self.close()
+    except Exception:
+        pass
+PgConnection.__del__ = _pgconnection_del
 
 def get_db():
     if not DATABASE_URL:
@@ -708,12 +709,6 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dungeons_chat_status ON rpg_dungeons(chat_id,status,expires_at)")
-        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_dungeon_rooms (
-            dungeon_id BIGINT NOT NULL, room BIGINT NOT NULL, enemy_key TEXT NOT NULL, enemy_name TEXT NOT NULL,
-            enemy_hp BIGINT NOT NULL, enemy_max_hp BIGINT NOT NULL, enemy_atk BIGINT NOT NULL, enemy_def BIGINT NOT NULL,
-            party_size BIGINT NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
-            PRIMARY KEY(dungeon_id,room)
-        )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_dungeon_runs (
                 dungeon_id BIGINT NOT NULL, user_id BIGINT NOT NULL, room BIGINT NOT NULL DEFAULT 1,
@@ -1308,184 +1303,6 @@ def init_db():
             )
         """)
         cur.execute("ALTER TABLE rpg_pets_owned ADD COLUMN IF NOT EXISTS level BIGINT NOT NULL DEFAULT 1")
-
-        # TABERNA DE MALKOR — casino, arcade, barra y rankings.
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_stats (
-                user_id BIGINT PRIMARY KEY,
-                games BIGINT NOT NULL DEFAULT 0,
-                wagered BIGINT NOT NULL DEFAULT 0,
-                won BIGINT NOT NULL DEFAULT 0,
-                lost BIGINT NOT NULL DEFAULT 0,
-                jackpots BIGINT NOT NULL DEFAULT 0,
-                biggest_win BIGINT NOT NULL DEFAULT 0,
-                memory_best BIGINT NOT NULL DEFAULT 0,
-                cat_best BIGINT NOT NULL DEFAULT 0,
-                cat_eaten BIGINT NOT NULL DEFAULT 0,
-                updated_at BIGINT NOT NULL DEFAULT 0
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_blackjack (
-                user_id BIGINT PRIMARY KEY,
-                wager BIGINT NOT NULL,
-                player_cards TEXT NOT NULL,
-                dealer_cards TEXT NOT NULL,
-                deck_cards TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("""ALTER TABLE tavern_blackjack ADD COLUMN IF NOT EXISTS deck_cards TEXT NOT NULL DEFAULT '[]'""")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_effects (
-                user_id BIGINT PRIMARY KEY,
-                effect_key TEXT NOT NULL,
-                label TEXT NOT NULL,
-                expires_at BIGINT NOT NULL,
-                intoxication BIGINT NOT NULL DEFAULT 0,
-                updated_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_cat_players (
-                user_id BIGINT PRIMARY KEY,
-                display_name TEXT NOT NULL,
-                x DOUBLE PRECISION NOT NULL DEFAULT 50,
-                y DOUBLE PRECISION NOT NULL DEFAULT 50,
-                score BIGINT NOT NULL DEFAULT 0,
-                size DOUBLE PRECISION NOT NULL DEFAULT 1,
-                updated_at BIGINT NOT NULL
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_cat_sessions (
-                user_id BIGINT PRIMARY KEY, x DOUBLE PRECISION NOT NULL DEFAULT 50, y DOUBLE PRECISION NOT NULL DEFAULT 50,
-                score BIGINT NOT NULL DEFAULT 0, size DOUBLE PRECISION NOT NULL DEFAULT 1, foods TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'active', started_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_cat_cosmetics (
-                user_id BIGINT NOT NULL, cosmetic_key TEXT NOT NULL, purchased_at BIGINT NOT NULL,
-                PRIMARY KEY(user_id, cosmetic_key)
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_cat_loadout (
-                user_id BIGINT PRIMARY KEY, skin_key TEXT NOT NULL DEFAULT 'classic', color_key TEXT NOT NULL DEFAULT 'ginger', updated_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_cat_npcs (
-                npc_id BIGINT PRIMARY KEY, display_name TEXT NOT NULL, x DOUBLE PRECISION NOT NULL, y DOUBLE PRECISION NOT NULL,
-                score BIGINT NOT NULL DEFAULT 0, size DOUBLE PRECISION NOT NULL DEFAULT 1, skin_key TEXT NOT NULL DEFAULT 'classic',
-                color_key TEXT NOT NULL DEFAULT 'ginger', personality TEXT NOT NULL DEFAULT 'wander', updated_at BIGINT NOT NULL
-            )
-        """)
-        # Cat.io: dirección autoritativa para colisiones de cabeza tipo Snake.io.
-        # ALTER ... IF NOT EXISTS mantiene compatibilidad con bases ya desplegadas.
-        cur.execute("ALTER TABLE tavern_cat_players ADD COLUMN IF NOT EXISTS dir_x DOUBLE PRECISION NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_cat_players ADD COLUMN IF NOT EXISTS dir_y DOUBLE PRECISION NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_cat_sessions ADD COLUMN IF NOT EXISTS dir_x DOUBLE PRECISION NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_cat_sessions ADD COLUMN IF NOT EXISTS dir_y DOUBLE PRECISION NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_cat_npcs ADD COLUMN IF NOT EXISTS dir_x DOUBLE PRECISION NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_cat_npcs ADD COLUMN IF NOT EXISTS dir_y DOUBLE PRECISION NOT NULL DEFAULT 0")
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_flight_sessions (
-                user_id BIGINT PRIMARY KEY, wager BIGINT NOT NULL, crash_x DOUBLE PRECISION NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active', started_at DOUBLE PRECISION NOT NULL, updated_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_flight_stats (
-                user_id BIGINT PRIMARY KEY, flights BIGINT NOT NULL DEFAULT 0, landed BIGINT NOT NULL DEFAULT 0,
-                best_x DOUBLE PRECISION NOT NULL DEFAULT 1, best_distance BIGINT NOT NULL DEFAULT 0,
-                biggest_prize BIGINT NOT NULL DEFAULT 0, current_streak BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
-                wagered BIGINT NOT NULL DEFAULT 0, won BIGINT NOT NULL DEFAULT 0, lost BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_memory_sessions (
-                user_id BIGINT PRIMARY KEY, sequence TEXT NOT NULL DEFAULT '[]', round_no BIGINT NOT NULL DEFAULT 1,
-                input_pos BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_idempotency (
-                user_id BIGINT NOT NULL, request_id TEXT NOT NULL, endpoint TEXT NOT NULL, response_json TEXT, created_at BIGINT NOT NULL,
-                PRIMARY KEY(user_id, request_id, endpoint)
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tavern_idempotency_created ON tavern_idempotency(created_at)")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_jackpot_hall (
-                id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL, bet BIGINT NOT NULL, payout BIGINT NOT NULL,
-                multiplier DOUBLE PRECISION NOT NULL, created_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tavern_jackpot_hall_payout ON tavern_jackpot_hall(payout DESC,created_at DESC)")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_daily_rewards (
-                user_id BIGINT PRIMARY KEY, last_day BIGINT NOT NULL DEFAULT -1, streak BIGINT NOT NULL DEFAULT 0,
-                total_claims BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_achievement_claims (
-                user_id BIGINT NOT NULL, achievement_key TEXT NOT NULL, claimed_at BIGINT NOT NULL, reward BIGINT NOT NULL,
-                PRIMARY KEY(user_id,achievement_key)
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_shop_inventory (
-                user_id BIGINT NOT NULL, item_key TEXT NOT NULL, quantity BIGINT NOT NULL DEFAULT 0, acquired_at BIGINT NOT NULL,
-                PRIMARY KEY(user_id,item_key)
-            )
-        """)
-        cur.execute("ALTER TABLE tavern_memory_sessions ADD COLUMN IF NOT EXISTS last_input_at DOUBLE PRECISION NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_memory_sessions ADD COLUMN IF NOT EXISTS entry_fee BIGINT NOT NULL DEFAULT 0")
-        # AJEDREZ DE MALKOR — partidas autoritativas y ELO persistente.
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_chess_games (
-                game_id TEXT PRIMARY KEY, white_id BIGINT, black_id BIGINT, mode TEXT NOT NULL, cpu_level TEXT,
-                board TEXT NOT NULL, turn TEXT NOT NULL DEFAULT 'w', status TEXT NOT NULL DEFAULT 'active',
-                winner TEXT, last_move TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tavern_chess_active_white ON tavern_chess_games(white_id,status)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_tavern_chess_active_black ON tavern_chess_games(black_id,status)")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_chess_stats (
-                user_id BIGINT PRIMARY KEY, elo BIGINT NOT NULL DEFAULT 1000, games BIGINT NOT NULL DEFAULT 0,
-                wins BIGINT NOT NULL DEFAULT 0, losses BIGINT NOT NULL DEFAULT 0, draws BIGINT NOT NULL DEFAULT 0,
-                best_elo BIGINT NOT NULL DEFAULT 1000, updated_at BIGINT NOT NULL DEFAULT 0
-            )
-        """)
-        # DIBUJA Y ADIVINA GLOBAL — una partida por chat, sin salas privadas.
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_draw_games (
-                chat_id BIGINT PRIMARY KEY, drawer_id BIGINT, drawer_name TEXT, word TEXT, synonyms TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'idle', round_no BIGINT NOT NULL DEFAULT 0, started_at BIGINT NOT NULL DEFAULT 0,
-                ends_at BIGINT NOT NULL DEFAULT 0, last_drawer_id BIGINT, guesses BIGINT NOT NULL DEFAULT 0,
-                winners TEXT NOT NULL DEFAULT '[]', updated_at BIGINT NOT NULL DEFAULT 0
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tavern_draw_stats (
-                user_id BIGINT PRIMARY KEY, rounds_drawn BIGINT NOT NULL DEFAULT 0, guesses BIGINT NOT NULL DEFAULT 0,
-                first_guesses BIGINT NOT NULL DEFAULT 0, drawer_points BIGINT NOT NULL DEFAULT 0,
-                guess_points BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
-                current_streak BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0
-            )
-        """)
-        cur.execute("ALTER TABLE tavern_draw_games ADD COLUMN IF NOT EXISTS choices TEXT NOT NULL DEFAULT '[]'")
-        cur.execute("ALTER TABLE tavern_draw_games ADD COLUMN IF NOT EXISTS strokes TEXT NOT NULL DEFAULT '[]'")
-        cur.execute("ALTER TABLE tavern_draw_games ADD COLUMN IF NOT EXISTS rerolls BIGINT NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE tavern_draw_games ADD COLUMN IF NOT EXISTS stroke_version BIGINT NOT NULL DEFAULT 0")
 
         conn.commit()
         conn.close()
@@ -3872,23 +3689,6 @@ def change_kiwons(user_id, amount, kind, actor_id=None, other_user_id=None,
             raise
 
 
-def change_kiwons_in_tx(conn, user_id, amount, kind, actor_id=None, other_user_id=None, chat_id=None, note="", allow_negative=False):
-    """Movimiento KW dentro de una transacción YA abierta. No hace commit/close."""
-    user_id=int(user_id); amount=int(amount); now=int(time.time())
-    row=conn.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(user_id,)).fetchone()
-    if row is None:
-        conn.execute("INSERT INTO players (user_id,display_name,kiwons,created_at,updated_at) VALUES (?,?,0,?,?)",(user_id,f"Jugador {user_id}",now,now))
-        balance=0
-    else:
-        balance=int(row["kiwons"])
-    new_balance=balance+amount
-    if not allow_negative and new_balance<0:
-        return False,balance,"Saldo insuficiente."
-    conn.execute("UPDATE players SET kiwons=?,updated_at=? WHERE user_id=?",(new_balance,now,user_id))
-    conn.execute("INSERT INTO kiwon_transactions (user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)",(user_id,amount,str(kind),actor_id,other_user_id,chat_id,str(note or "")[:200],now))
-    return True,new_balance,""
-
-
 def transfer_kiwons(sender_id, receiver_id, amount, chat_id=None):
     sender_id = int(sender_id)
     receiver_id = int(receiver_id)
@@ -4311,20 +4111,7 @@ def character_card(row):
     hpbonus=f" (+{b['hp']} equipo)" if b['hp'] else ""
     level_text = f"{row['level']} — MAX" if int(row["level"]) >= RPG_MAX_LEVEL else str(row["level"])
     exp_text = "MAX" if int(row["level"]) >= RPG_MAX_LEVEL else str(row["exp"])
-    social=[]
-    try:
-        cl=rpg_user_clan(int(row['user_id']))
-        if cl: social.append(f"🏰 Clan {cl['name']}: +{RPG_CLAN_EXP_BONUS}% EXP")
-    except Exception: pass
-    try:
-        mr=_marriage_row(int(row['user_id']),("active",))
-        if mr: social.append(f"💍 Matrimonio: +{RPG_MARRIAGE_EXP_BONUS}% EXP · +{RPG_MARRIAGE_BOSS_BONUS}% Boss en pareja")
-    except Exception: pass
-    moves=""
-    try: moves="\n\n"+rpg_ability_info_text(int(row['user_id']),row['class_name'])
-    except Exception: pass
-    socials=("\n\n✨ BONUS ACTIVOS\n"+"\n".join(social)) if social else "\n\n✨ BONUS ACTIVOS\n— Ninguno social"
-    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {level_text} | EXP: {exp_text}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{extra}{socials}{moves}")
+    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {level_text} | EXP: {exp_text}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{extra}")
 
 
 
@@ -4359,11 +4146,6 @@ def toggle_secret_blades(user_id, activate=True):
         """, (desired, int(time.time()), int(row["id"])))
         conn.commit()
         conn.close()
-        # Doble Espada y Hidden Blade son estados excluyentes: jamás cuatro movimientos.
-        if activate:
-            try:
-                if selected_special_technique(user_id)=="hidden_blade": equip_special_technique(user_id,"")
-            except Exception: logger.exception("No pude desactivar Hidden Blade al activar Doble Espada")
         return True, None
 
 
@@ -4535,7 +4317,6 @@ def exp_needed(level):
 
 
 RPG_CLAN_EXP_BONUS = 20
-RPG_MARRIAGE_EXP_BONUS = 10
 
 def rpg_user_clan(user_id):
     with db_lock:
@@ -4548,15 +4329,8 @@ def grant_rpg_exp(character_id, amount):
     try:
         with db_lock:
             _c=get_db(); _r=_c.execute("SELECT user_id FROM characters WHERE id=?",(int(character_id),)).fetchone(); _c.close()
-        if _r:
-            _uid=int(_r['user_id'])
-            if rpg_user_clan(_uid):
-                amount=max(0,int(round(amount*(1.0+RPG_CLAN_EXP_BONUS/100.0))))
-            try:
-                if _marriage_row(_uid,("active",)):
-                    amount=max(0,int(round(amount*(1.0+RPG_MARRIAGE_EXP_BONUS/100.0))))
-            except Exception:
-                pass
+        if _r and rpg_user_clan(int(_r['user_id'])):
+            amount=max(0,int(round(amount*1.20)))
     except Exception:
         logger.exception("No pude aplicar bonus EXP de clan")
     with db_lock:
@@ -4595,33 +4369,6 @@ HIDDEN_BLADE_ABILITY = {
     "special":True, "cooldown":3
 }
 
-# Técnicas raras intercambiables: se desbloquean por misión rara o Mercader.
-# Solo tres movimientos pueden estar equipados a la vez; una técnica sustituye a otra.
-RPG_RARE_TECHNIQUES = [
- {"key":"moon_fang","emoji":"🌙","name":"Colmillo Lunar","power":1.12,"pen":0.28,"special":True,"cooldown":2},
- {"key":"thunder_step","emoji":"⚡","name":"Paso del Trueno","power":1.08,"pen":0.20,"high_roll_bonus":0.20,"special":True,"cooldown":2},
- {"key":"dragon_breaker","emoji":"🐉","name":"Rompe Dragones","power":1.24,"pen":0.18,"special":True,"cooldown":3},
- {"key":"void_cut","emoji":"🌌","name":"Corte del Vacío","power":1.16,"pen":0.48,"special":True,"cooldown":3},
- {"key":"blood_comet","emoji":"☄️","name":"Cometa Carmesí","power":1.30,"pen":0.12,"ultimate":True,"cooldown":5},
- {"key":"iron_tempest","emoji":"🌪️","name":"Tempestad de Hierro","power":1.18,"pen":0.22,"special":True,"cooldown":3},
- {"key":"phantom_lance","emoji":"👻","name":"Lanza Fantasma","power":1.15,"pen":0.52,"special":True,"cooldown":3},
- {"key":"sunfall","emoji":"☀️","name":"Caída Solar","power":1.28,"pen":0.20,"ultimate":True,"cooldown":5},
- {"key":"wolf_rush","emoji":"🐺","name":"Asalto del Lobo","power":1.10,"pen":0.15,"high_roll_bonus":0.24,"special":True,"cooldown":2},
- {"key":"royal_verdict","emoji":"👑","name":"Veredicto Real","power":1.22,"pen":0.30,"special":True,"cooldown":4},
- {"key":"black_arrow","emoji":"🏹","name":"Flecha Negra","power":1.14,"pen":0.60,"special":True,"cooldown":3},
- {"key":"starfall","emoji":"✨","name":"Lluvia Estelar","power":1.27,"pen":0.26,"ultimate":True,"cooldown":5},
- {"key":"serpent_bite","emoji":"🐍","name":"Mordida de Serpiente","power":1.13,"pen":0.34,"special":True,"cooldown":2},
- {"key":"aegis_strike","emoji":"🛡️","name":"Golpe de Égida","power":1.06,"pen":0.10,"heal_pct":0.06,"special":True,"cooldown":3},
- {"key":"meteor_hammer","emoji":"💫","name":"Martillo Meteoro","power":1.31,"pen":0.16,"ultimate":True,"cooldown":5},
- {"key":"shadow_requiem","emoji":"🌑","name":"Réquiem Sombrío","power":1.21,"pen":0.38,"special":True,"cooldown":4},
- {"key":"heaven_piercer","emoji":"🪽","name":"Perforador Celestial","power":1.25,"pen":0.44,"ultimate":True,"cooldown":5},
- {"key":"crimson_flash","emoji":"🔻","name":"Destello Carmesí","power":1.17,"pen":0.25,"high_roll_bonus":0.18,"special":True,"cooldown":3},
- {"key":"frost_reaper","emoji":"❄️","name":"Segador de Escarcha","power":1.19,"pen":0.32,"special":True,"cooldown":3},
- {"key":"malkor_gambit","emoji":"🎭","name":"Gambito de Malkor","power":1.23,"pen":0.33,"high_roll_bonus":0.12,"ultimate":True,"cooldown":5},
-]
-RPG_TECHNIQUE_BY_KEY={x['key']:x for x in RPG_RARE_TECHNIQUES}
-RPG_TECHNIQUE_MISSION_CHANCE=0.10
-
 def _ensure_special_techniques_table():
     with db_lock:
         conn=get_db()
@@ -4633,25 +4380,6 @@ def _ensure_special_techniques_table():
             PRIMARY KEY(user_id,technique_key)
         )""")
         conn.commit(); conn.close()
-
-def _ensure_technique_loadout_table():
-    with db_lock:
-        c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_technique_loadout(
-            user_id BIGINT PRIMARY KEY, special_key TEXT NOT NULL DEFAULT '', updated_at BIGINT NOT NULL)"""); c.commit(); c.close()
-
-def selected_special_technique(user_id):
-    _ensure_technique_loadout_table()
-    with db_lock:
-        c=get_db(); r=c.execute("SELECT special_key FROM rpg_technique_loadout WHERE user_id=?",(int(user_id),)).fetchone(); c.close()
-    return str(r['special_key'] or '') if r else ''
-
-def equip_special_technique(user_id,key):
-    k=str(key or '')
-    if k and not has_special_technique(user_id,k): return False
-    _ensure_technique_loadout_table()
-    with db_lock:
-        c=get_db(); c.execute("INSERT INTO rpg_technique_loadout(user_id,special_key,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET special_key=EXCLUDED.special_key,updated_at=EXCLUDED.updated_at",(int(user_id),k,int(time.time()))); c.commit(); c.close()
-    return True
 
 def has_special_technique(user_id,key):
     _ensure_special_techniques_table()
@@ -4670,83 +4398,33 @@ def unlock_special_technique(user_id,key,source="mission"):
                             RETURNING technique_key""",
                          (int(user_id),str(key),int(time.time()),str(source))).fetchone()
         conn.commit(); conn.close()
-    if row:
-        try:
-            if not selected_special_technique(user_id): equip_special_technique(user_id,key)
-        except Exception: logger.exception("No pude equipar técnica recién desbloqueada")
     return bool(row)
 
 def _rpg_get_ability_for_user(user_id,class_name,key):
-    k=str(key); selected=selected_special_technique(user_id) if user_id else ''
-    if k=="hidden_blade":
-        try:
-            ch=get_active_character(user_id)
-            if ch and bool(int(ch.get('secret_blades_active') or 0)): return None
-        except Exception: pass
-        return dict(HIDDEN_BLADE_ABILITY) if selected==k and has_special_technique(user_id,k) else None
-    if k in RPG_TECHNIQUE_BY_KEY:
-        return dict(RPG_TECHNIQUE_BY_KEY[k]) if selected==k and has_special_technique(user_id,k) else None
-    base=_rpg_get_ability(class_name,k)
-    if base and base.get('special') and selected:
+    if str(key)=="hidden_blade":
+        if has_special_technique(user_id,"hidden_blade"):
+            return dict(HIDDEN_BLADE_ABILITY)
         return None
-    return base
+    return _rpg_get_ability(class_name,key)
 
 def _append_hidden_blade_button(kb,user_id,prefix,special_cd=0,context_id=None):
-    if not user_id or selected_special_technique(user_id)!="hidden_blade" or not has_special_technique(user_id,"hidden_blade"):
+    if not user_id or not has_special_technique(user_id,"hidden_blade"):
         return kb
     rows=list((kb or {}).get("inline_keyboard") or [])
     text="🗡️ Hidden Blade" if int(special_cd)<=0 else f"⏳ Hidden Blade ({special_cd})"
     if prefix=="rpg_attack": cb="rpg_attack:hidden_blade"
     else: cb=f"{prefix}:{int(context_id)}:hidden_blade"
-    # Hidden Blade sustituye el movimiento especial de la clase: nunca crea un cuarto movimiento.
-    if rows and len(rows[0])>1:
-        rows[0][1]={"text":text,"callback_data":cb}
-    elif rows:
-        rows[0].append({"text":text,"callback_data":cb})
+    # Antes de inventario/defensa cuando sea posible.
+    pos=max(0,len(rows)-1)
+    rows.insert(pos,[{"text":text,"callback_data":cb}])
     return {"inline_keyboard":rows}
 
 def rpg_abilities_for(class_name):
     return RPG_ABILITIES.get(str(class_name or ""), RPG_ABILITIES["Guerrero"])
 
 
-def _ability_damage_info(a):
-    dice=" / ".join(f"d{k}×{v:.2f}" for k,v in RPG_DICE_MULT.items())
-    return f"Poder {float(a.get('power',1)):.2f}×ATK · dado: {dice}"
-
-def rpg_ability_info_text(user_id,class_name):
-    moves=list(rpg_abilities_for(class_name))
-    if user_id:
-        sel=selected_special_technique(user_id)
-        if sel=='hidden_blade' and has_special_technique(user_id,sel): moves[1]=dict(HIDDEN_BLADE_ABILITY)
-        elif sel in RPG_TECHNIQUE_BY_KEY and has_special_technique(user_id,sel): moves[1]=dict(RPG_TECHNIQUE_BY_KEY[sel])
-    lines=["🎯 MOVIMIENTOS EQUIPADOS · 3/3"]
-    for a in moves:
-        lines.append(f"{a['emoji']} {a['name']} — {_ability_damage_info(a)}")
-    return "\n".join(lines)
-
-def rpg_moves_text_keyboard(user_id):
-    char=get_active_character(user_id)
-    if not char: return "No tienes personaje activo.",None
-    base=[dict(x) for x in rpg_abilities_for(char['class_name'])]; sel=selected_special_technique(user_id)
-    lines=["🎯 MOVIMIENTOS", "", "Siempre llevas exactamente 3: básico + especial + definitiva.", "Las técnicas aprendidas reemplazan el espacio ESPECIAL; no crean un cuarto movimiento.", "", rpg_ability_info_text(user_id,char['class_name']), "", "📚 Técnicas aprendidas:"]
-    kb=[]
-    learned=[]
-    with db_lock:
-        c=get_db(); rows=c.execute("SELECT technique_key FROM rpg_special_techniques WHERE user_id=? ORDER BY unlocked_at",(int(user_id),)).fetchall(); c.close()
-    for r in rows:
-        k=str(r['technique_key']); a=HIDDEN_BLADE_ABILITY if k=='hidden_blade' else RPG_TECHNIQUE_BY_KEY.get(k)
-        if not a: continue
-        learned.append(k); mark='✅' if sel==k else '▫️'; lines.append(f"{mark} {a['name']} — {_ability_damage_info(a)}")
-        kb.append([{"text":f"{mark} Equipar {a['name']}","callback_data":f"rpg_move_equip:{k}"}])
-    if sel: kb.append([{"text":f"↩️ Volver a {base[1]['name']}","callback_data":"rpg_move_base"}])
-    if not learned: lines.append("— Aún no aprendiste técnicas raras.")
-    return "\n".join(lines),({"inline_keyboard":kb} if kb else None)
-
 def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None):
-    a = [dict(x) for x in rpg_abilities_for(class_name)]
-    sel=selected_special_technique(user_id) if user_id else ''
-    if sel=='hidden_blade' and has_special_technique(user_id,sel): a[1]=dict(HIDDEN_BLADE_ABILITY)
-    elif sel in RPG_TECHNIQUE_BY_KEY and has_special_technique(user_id,sel): a[1]=dict(RPG_TECHNIQUE_BY_KEY[sel])
+    a = rpg_abilities_for(class_name)
     special_text = f"{a[1]['emoji']} {a[1]['name']}" if int(special_cd) <= 0 else f"⏳ {a[1]['name']} ({special_cd})"
     ult_text = f"{a[2]['emoji']} {a[2]['name']}" if int(ultimate_cd) <= 0 else f"⏳ {a[2]['name']} ({ultimate_cd})"
     kb={"inline_keyboard":[
@@ -4757,7 +4435,7 @@ def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None):
          {"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},
          {"text":"🏃 Huir","callback_data":"rpg_flee"}]
     ]}
-    return kb
+    return _append_hidden_blade_button(kb,user_id,"rpg_attack",special_cd)
 
 
 def _rpg_get_ability(class_name, key):
@@ -4980,23 +4658,8 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 conn.rollback(); conn.close(); return True
             ability=_rpg_get_ability_for_user(user_id,char["class_name"],ability_key)
             eff=effective_character_stats(char)
-            dungeon_id=int(battle.get("dungeon_event_id") or 0)
-            dungeon_room=int(battle.get("dungeon_room") or 0)
-            shared_room=None
-            if dungeon_id>0 and dungeon_room>0:
-                shared_room=_dungeon_room_state(conn,dungeon_id,dungeon_room,int(char.get('level') or 1),True)
-                if not shared_room or shared_room.get('status')!='active' or int(shared_room.get('enemy_hp') or 0)<=0:
-                    conn.rollback(); conn.close()
-                    send_message(chat_id,"🚪 Esa sala ya fue superada por tu expedición. Usa /mazmorra para continuar.")
-                    return True
-                # La fila de sala es la autoridad. Las copias por jugador solo guardan cooldown/estado personal.
-                enemy_hp=int(shared_room['enemy_hp'])
-                enemy_def=int(shared_room['enemy_def'])
-                battle['enemy_name']=shared_room['enemy_name']; battle['enemy_key']=shared_room['enemy_key']
-                battle['enemy_max_hp']=int(shared_room['enemy_max_hp']); battle['enemy_atk']=int(shared_room['enemy_atk']); battle['enemy_def']=enemy_def
-            else:
-                enemy_hp=int(battle["enemy_hp"])
-                enemy_def=int(battle["enemy_def"])
+            enemy_hp=int(battle["enemy_hp"])
+            enemy_def=int(battle["enemy_def"])
             damage=0
             heal=0
             if roll != 1:
@@ -5013,11 +4676,6 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 if ability.get("heal_pct"):
                     heal=max(1,int(round(eff["max_hp"]*float(ability["heal_pct"])*RPG_DICE_MULT[roll])))
             enemy_hp=max(0,enemy_hp-damage)
-            if shared_room is not None:
-                conn.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=?,updated_at=? WHERE dungeon_id=? AND room=?",(enemy_hp,int(time.time()),dungeon_id,dungeon_room))
-                # Refleja la misma barra en todas las copias de combate de esa sala.
-                conn.execute("UPDATE rpg_battles SET enemy_hp=?,enemy_name=?,enemy_key=?,enemy_max_hp=?,enemy_atk=?,enemy_def=?,updated_at=? WHERE dungeon_event_id=? AND dungeon_room=?",
-                             (enemy_hp,shared_room['enemy_name'],shared_room['enemy_key'],int(shared_room['enemy_max_hp']),int(shared_room['enemy_atk']),int(shared_room['enemy_def']),int(time.time()),dungeon_id,dungeon_room))
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
@@ -5077,40 +4735,29 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 except Exception: logger.exception("Error entregando drop de temporada")
                 dungeon_id=int(battle.get("dungeon_event_id") or 0); dungeon_room=int(battle.get("dungeon_room") or 0)
                 if dungeon_id>0:
-                    # Una victoria limpia la sala PARA TODO EL GRUPO, no solo para quien dio el último golpe.
-                    with db_lock:
-                        dc=get_db()
-                        dc.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=0,status='cleared',updated_at=? WHERE dungeon_id=? AND room=?",(int(time.time()),dungeon_id,dungeon_room))
-                        dc.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=?",(dungeon_room,dungeon_id))
-                        members=dc.execute("SELECT user_id FROM rpg_dungeon_party_members WHERE dungeon_id=? ORDER BY joined_at",(dungeon_id,)).fetchall()
-                        if dungeon_room<RPG_DUNGEON_ROOMS:
-                            nr=dungeon_room+1
-                            dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND completed=0",(nr,int(time.time()),dungeon_id))
-                            # Nivel medio del grupo para crear un único rival compartido de la siguiente sala.
-                            lv=dc.execute("SELECT COALESCE(AVG(c.level),1) v FROM rpg_dungeon_party_members m JOIN characters c ON c.user_id=m.user_id AND c.is_active=1 WHERE m.dungeon_id=?",(dungeon_id,)).fetchone()
-                            rr=_dungeon_room_state(dc,dungeon_id,nr,int(float((lv or {}).get('v') or 1)),True)
-                            for m in members:
-                                ch=dc.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1",(int(m['user_id']),)).fetchone()
-                                if ch and int(ch.get('hp') or 0)>0:
-                                    _sync_dungeon_battle_from_room(dc,chat_id,int(m['user_id']),int(ch['id']),rr)
-                                else:
-                                    dc.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=? AND dungeon_event_id=?",(int(chat_id),int(m['user_id']),dungeon_id))
+                    try:
+                        with db_lock:
+                            _dc=get_db(); _dc.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=? AND user_id=?",(dungeon_room,dungeon_id,int(user_id))); _dc.commit(); _dc.close()
+                    except Exception: logger.exception("No pude actualizar progreso cooperativo de mazmorra")
+                    if dungeon_room<RPG_DUNGEON_ROOMS:
+                        nr=dungeon_room+1
+                        with db_lock:
+                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
+                        e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
+                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
+                    else:
+                        with db_lock:
+                            dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
+                            if first: dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id)))
                             dc.commit(); dc.close()
-                            send_message(chat_id,f"🚪 ¡SALA {dungeon_room} SUPERADA EN EQUIPO!\n👥 El daño de toda la expedición contó sobre el mismo enemigo.\n➡️ Todos avanzan a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n⚔️ {rr['enemy_name']}\n❤️ HP compartido: {int(rr['enemy_hp'])}/{int(rr['enemy_max_hp'])}")
-                        else:
-                            dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=?",(int(time.time()),dungeon_id))
-                            dc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,dungeon_id))
-                            dc.execute("DELETE FROM rpg_battles WHERE chat_id=? AND dungeon_event_id=?",(int(chat_id),dungeon_id))
-                            dc.commit(); dc.close()
-                            party=max(1,len(members)); coop=1.0+min(1.00,0.10*(party-1)); kw=int(round(RPG_DUNGEON_FINAL_KW*coop)); xp=int(round(RPG_DUNGEON_FINAL_EXP*coop))
-                            rewarded=[]
-                            for m in members:
-                                muid=int(m['user_id']); mch=get_active_character(muid)
-                                if not mch: continue
-                                change_kiwons(muid,kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada")
-                                grant_rpg_exp(int(mch['id']),xp); chest=roll_dungeon_completion_loot(muid,int(mch['id']),dungeon_id)
-                                rewarded.append(str(mch['name']))
-                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 {party} aventureros llegaron al final juntos.\n🪙 +{kw} KW y ⭐ +{xp} EXP para cada integrante.\n🎁 Cada integrante recibe su propio cofre final.")
+                        if first:
+                            with db_lock:
+                                _pc=get_db(); _pn=_pc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); _pc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=? AND user_id=?",(RPG_DUNGEON_ROOMS,dungeon_id,int(user_id))); _pc.commit(); _pc.close()
+                            _party=max(1,int(_pn['n'] if _pn else 1)); _coop=1.0+min(0.40,0.10*(_party-1)); _kw=int(round(RPG_DUNGEON_FINAL_KW*_coop)); _xp=int(round(RPG_DUNGEON_FINAL_EXP*_coop))
+                            change_kiwons(user_id,_kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada"); grant_rpg_exp(char["id"],_xp)
+                            chest=roll_dungeon_completion_loot(user_id,int(char["id"]),dungeon_id)
+                            chest_txt=(f"\n🎁 Cofre final: {RPG_RARITY_ICON.get(chest['rarity'],'⚪')} {chest['name']}" if chest else "")
+                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 Expedición: {_party} aventureros · bonus de equipo +{int((_coop-1)*100)}%\n🪙 Bono final: +{_kw} KW\n⭐ Bono final: +{_xp} EXP{chest_txt}")
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -5265,148 +4912,6 @@ def creator_launch_keyboard(chat_id):
     if pc_link: rows.append([{"text":"💻 CREAR DESDE PC","url":pc_link}])
     return {"inline_keyboard":rows}
 
-def rpg_welcome_text(display_name="Aventurero"):
-    name=(display_name or "Aventurero").strip()[:40]
-    return f"""⚔️ BIENVENIDO A KIWRPG, {name.upper()}
-
-Mucho antes de que alguien llevara una espada, las tierras de KiwRPG estaban divididas entre reinos, criaturas antiguas y caminos que nadie se atrevía a recorrer. Las mazmorras crecieron bajo las ruinas, los Bosses reclamaron territorios y Malkor convirtió el comercio, el azar y los secretos en un negocio bastante rentable para él.
-
-Con el tiempo aparecieron aventureros capaces de cambiar ese mundo. Algunos formaron clanes; otros juraron luchar juntos, se casaron, criaron mascotas, reunieron equipo y dejaron héroes de eras anteriores. También surgieron técnicas perdidas: movimientos que pueden encontrarse en misiones o comprarse cuando Malkor decide vender sus pergaminos. Entre todas ellas existe una excepción: Hidden Blade, recompensa de una misión especial y cuarto ataque exclusivo de PvE para quien consiga desbloquearla.
-
-Pero el mundo no permanece quieto. Hay encuentros por rareza, Misiones Relámpago, Bosses, mercaderes errantes y mazmorras. Algunas expediciones especiales aparecen sin previo aviso: seis puertas, enemigos más fuertes y la posibilidad de entrar solo o acompañado. Cuantos más aventureros sobrevivan juntos, mayor puede ser la recompensa.
-
-Fuera del campo de batalla está la Taberna de Malkor: casino, Vuelo, Memory, Cat.io, Ajedrez, Dibuja y Adivina, bebidas, tienda, rankings y reliquias de colección. Todo utiliza los mismos Kiwons del RPG. Lo que ganes, gastes, equipes o colecciones forma parte de tu aventura.
-
-Tu historia todavía no existe. Primero necesitas un nombre y una clase. Después, lo que ocurra depende de ti.
-
-🧙 CREA TU PERSONAJE Y COMIENZA LA AVENTURA"""
-
-
-def rpg_manual_sections():
-    return [
-"""📖 MANUAL KIWRPG — 1/6 · PRIMEROS PASOS
-
-KiwRPG es un RPG conectado al grupo. Tu cuenta guarda Kiwons y progreso; tu personaje guarda clase, nivel, estadísticas, equipo y combate.
-
-🧙 /crear_personaje — abre el creador.
-👥 /personajes — lista tus personajes.
-⭐ /usar_personaje Nombre — cambia el personaje activo.
-👤 /personaje o /pj — ficha completa: estadísticas efectivas, equipo, movimientos y bonus activos.
-📋 /perfil — perfil general.
-💰 /saldo o /kiwons — saldo de Kiwons.
-🏆 /topkiwons — clasificación económica.
-⚔️ /rpg o /kiwrpg — resumen rápido del RPG.
-
-Las clases base son Guerrero, Mago, Pícaro, Paladín y Arquero. Cada una comienza con estadísticas distintas. El combate y el equipo modifican las estadísticas efectivas.""",
-"""⚔️ MANUAL KIWRPG — 2/6 · COMBATE Y MOVIMIENTOS
-
-👾 /encuentro o /combatir — inicia PvE cuando está disponible.
-🏃 /huir — abandona un encuentro.
-🧹 /resetcombate — libera un combate atascado.
-👹 /boss y /bosses — Boss activo e información.
-🏰 /mazmorra — consulta/entra a la mazmorra o expedición activa.
-
-En combate eliges acciones mediante botones. KiwBot lanza el dado real de Telegram: 1 falla; 2 ×1.00; 3 ×1.10; 4 ×1.20; 5 ×1.35; 6 ×1.60. El daño mostrado en tus técnicas indica multiplicador de ATK + efecto del dado.
-
-🌀 /movimientos o /tecnicas — inventario de técnicas y configuración. Mantienes Básico + Especial + Definitiva y puedes sustituir técnicas aprendidas para crear tu propio set. Los pergaminos tienen rareza y sirven para todas las clases.
-
-🗡️ Hidden Blade es una recompensa especial: si la desbloqueas aparece como CUARTO ataque únicamente en PvE. No sustituye tus tres movimientos normales. No puede utilizarse simultáneamente con la habilidad incompatible de Espadas del Ángel.
-
-Las técnicas raras pueden aparecer en misiones y en el inventario de Malkor.""",
-"""🎒 MANUAL KIWRPG — 3/6 · EQUIPO, OBJETOS Y PROGRESO
-
-🎒 /inventario o /inv — objetos que posees.
-🛡️ /equipo — equipo, estadísticas totales y bonus.
-🧱 /materiales — materiales reunidos.
-🔨 /forja o /mejorar — mejora equipo hasta los límites del sistema.
-🏪 /tienda o /shop — tienda RPG.
-🐾 /mascotas o /pets — mascotas.
-🎰 /gacha — sistema de mascotas/recompensas disponible.
-📜 /misiones o /tablon — tablón de misiones en privado.
-⚡ /eventorpg o /misionactual — Misión Relámpago activa.
-🐪 Malkor aparece como mercader temporal y puede vender equipo y pergaminos de movimientos.
-
-Las Reliquias de la Taberna son armas endgame de 1,000,000 KW, con solo dos copias globales de cada modelo. Al comprarlas entran en tu inventario RPG, conservan su número de serie y pueden equiparse. No regresan al stock al desequiparlas.""",
-"""🤝 MANUAL KIWRPG — 4/6 · CLANES, PAREJAS Y MULTIJUGADOR
-
-🏰 /clan — panel de clanes.
-➕ /crearclan Nombre — crea un clan.
-🤝 /unirclan ID — entra a uno.
-🚪 /salirclan — abandona tu clan.
-
-Pertenecer a un clan concede el bonus de EXP configurado y se muestra en /personaje.
-
-💍 /casar @usuario — propuesta de matrimonio.
-💞 /pareja — estado de pareja.
-🎒 /inventariopareja — inventarios de ambos.
-🤝 /compartiritem ID — entrega un objeto permitido a tu pareja.
-🥀 /divorcio @usuario — termina el matrimonio.
-El matrimonio activo muestra sus bonus en la ficha y tiene beneficios RPG específicos.
-
-🤺 /duelo — PvP amistoso.
-🏆 /duelopvp — PvP clasificatorio.
-🏳️ /rendirse — abandonar el duelo.
-📊 /pvp — perfil de temporada.
-🥇 /rankingpvp — clasificación.
-
-Las expediciones especiales de mazmorra aparecen aleatoriamente, tienen 6 puertas y rivales reforzados. Puedes entrar solo o acompañado; el grupo aumenta el potencial de recompensa y la expedición escala su amenaza.""",
-"""🍺 MANUAL KIWRPG — 5/6 · TABERNA DE MALKOR
-
-🍺 /taberna — abre la Mini App.
-🎰 /rankingcasino — ranking de la Taberna.
-
-Dentro encontrarás Slots, Ruleta, Blackjack, Dados, Carta Mayor, Copas y Vuelo de Malkor; también Memory, Cat.io, Ajedrez, Dibuja y Adivina, Bar, tienda y Cámara de Reliquias.
-
-Todos usan los mismos KW del RPG. Los resultados y premios monetarios se deciden en servidor; las animaciones solo los representan.
-
-🐈 Cat.io: recoge recursos, crece y compite. Los gatos pequeños todavía pueden derribar a grandes mediante una buena maniobra.
-🧠 Memory: repite secuencias y mejora tu récord.
-♟️ Ajedrez: CPU y modos competitivos disponibles desde la Taberna.
-🎨 /dibuja: el grupo comparte una partida global. Cuando queda libre, el siguiente jugador toma turno; los demás adivinan desde el chat.
-🍺 Bar: bebidas con efectos temporales; el Elixir del Tahúr no altera las probabilidades del casino.
-
-Los Kiwons son moneda virtual del juego: no representan dinero real.""",
-"""🗺️ MANUAL KIWRPG — 6/6 · COMANDOS ÚTILES
-
-💸 /transferir o /pagar — transfiere Kiwons.
-📚 /heroes — héroes de eras anteriores.
-📖 /manual — vuelve a recibir este manual por privado.
-🎭 /clases — información de clases cuando esté disponible.
-📜 /reglas — reglas generales del grupo/bot.
-
-CÓMO EMPEZAR
-1. Usa /crear_personaje.
-2. Mira /personaje para conocer tus estadísticas.
-3. Prueba /encuentro y aprende cómo funciona el dado.
-4. Consulta /misiones, reúne objetos y mejora tu equipo.
-5. Revisa /movimientos para personalizar tus técnicas.
-6. Únete a un clan, juega PvP o participa en expediciones cuando aparezcan.
-7. Usa /taberna cuando quieras entrar a los minijuegos y sistemas de Malkor.
-
-Los comandos administrativos y de prueba no forman parte del manual de jugador. Si una función requiere botones, KiwBot te los mostrará cuando corresponda.
-
-⚔️ No necesitas aprenderlo todo de memoria. Empieza creando tu personaje y el resto del mundo se irá abriendo mientras juegas."""
-    ]
-
-
-def rpg_manual_private_link():
-    username=get_bot_identity().get("username","")
-    return f"https://t.me/{username}?start=manual" if username else None
-
-def rpg_manual_open_keyboard():
-    url=rpg_manual_private_link()
-    return {"inline_keyboard":[[{"text":"📖 ABRIR MANUAL EN PRIVADO","url":url}]]} if url else None
-
-def send_rpg_manual_private(user):
-    uid=int((user or {}).get("id") or 0)
-    if not uid: return False
-    ensure_player(user)
-    for section in rpg_manual_sections():
-        if not send_private_message(uid, section):
-            return False
-    kb=creator_launch_keyboard(uid)
-    return bool(send_private_message(uid,"📖 FIN DEL MANUAL\n\nPuedes volver a usar /manual cuando quieras. Si todavía no tienes personaje, empieza aquí:",reply_markup=kb))
-
 def creator_keyboard(user_id=None):
     rows=[
         [{"text":"⚔️ Guerrero","callback_data":"rpg_class:guerrero"},{"text":"🔮 Mago","callback_data":"rpg_class:mago"}],
@@ -5474,18 +4979,6 @@ def equipped_bonuses(character_id):
         out["hp"]+=int(r["hp_bonus"] or 0)+b["hp"]
     return out
 
-def _active_tavern_effect(user_id):
-    try:
-        with db_lock:
-            c=get_db(); row=c.execute("SELECT effect_key FROM tavern_effects WHERE user_id=? AND expires_at>?",(int(user_id),int(time.time()))).fetchone(); c.close()
-        return str(row['effect_key']) if row else ''
-    except Exception:
-        return ''
-
-def _tavern_pve_reward_multiplier(user_id):
-    key=_active_tavern_effect(user_id)
-    return 1.08 if key=='destiny' else (1.05 if key=='pve' else 1.0)
-
 def effective_character_stats(char):
     b=equipped_bonuses(char["id"])
     # Habilidad exclusiva de The Cleaner: las Espadas del Ángel son un estado,
@@ -5499,12 +4992,8 @@ def effective_character_stats(char):
     except Exception:
         secret_atk=0
     total_bonus={"atk":b["atk"]+secret_atk,"defense":b["defense"],"hp":b["hp"]}
-    tavern_effect=_active_tavern_effect(char.get("user_id"))
-    raw_atk=int(char["atk"])+total_bonus["atk"]; raw_def=int(char["defense"])+total_bonus["defense"]
-    if tavern_effect=='atk': raw_atk=max(raw_atk,int(round(raw_atk*1.08)))
-    if tavern_effect=='def': raw_def=max(raw_def,int(round(raw_def*1.08)))
-    return {"atk":raw_atk,
-            "defense":raw_def,
+    return {"atk":int(char["atk"])+total_bonus["atk"],
+            "defense":int(char["defense"])+total_bonus["defense"],
             "max_hp":int(char["max_hp"])+total_bonus["hp"],
             "bonus":total_bonus,
             "secret_blades_atk":secret_atk}
@@ -5532,7 +5021,6 @@ def item_action_keyboard(row, char):
     if row.get("equip_slot") and int(row.get("forge_level") or 0)<15:
         buttons.append({"text":f"🔨 Mejorar +{int(row.get('forge_level') or 0)}","callback_data":f"forge_upgrade:{row['id']}"})
     if int(row.get("heal_percent") or 0)>0: buttons.append({"text":"🧪 Usar","callback_data":f"rpg_use:{row['id']}"})
-    if str(row.get("item_type") or '')=='tecnica': buttons.append({"text":"📜 Aprender movimiento","callback_data":f"rpg_use:{row['id']}"})
     if int(row.get("tradeable") or 0) and not int(row.get("equipped") or 0) and not int(row.get("locked") or 0):
         buttons.append({"text":"💰 Vender","callback_data":f"rpg_sell_offer:{row['id']}"})
         buttons.append({"text":"🔄 Intercambiar","callback_data":f"rpg_trade_help:{row['id']}"})
@@ -5679,19 +5167,6 @@ def unequip_inventory_item(chat_id,user_id,inventory_id):
 def use_inventory_item(chat_id,user_id,inventory_id):
     row=inventory_item_row(user_id,inventory_id); char=get_active_character(user_id)
     if not row or not char: return send_message(chat_id,"No encontré ese objeto.")
-    tech=_technique_from_item(row.get('item_key')) if str(row.get('item_type') or '')=='tecnica' else None
-    if tech:
-        if has_special_technique(user_id,tech['key']): return send_message(chat_id,f"📜 Ya conoces {tech['name']}.")
-        with db_lock:
-            conn=get_db()
-            try:
-                conn.execute("INSERT INTO rpg_special_techniques(user_id,technique_key,unlocked_at,source) VALUES(?,?,?,?) ON CONFLICT(user_id,technique_key) DO NOTHING",(int(user_id),tech['key'],int(time.time()),'pergamino'))
-                if int(row['quantity'])>1: conn.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),))
-                else: conn.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),))
-                conn.commit(); conn.close()
-            except Exception: conn.rollback(); conn.close(); raise
-        equip_special_technique(user_id,tech['key'])
-        return send_message(chat_id,f"✨ Aprendiste y equipaste {tech['name']}.\n{_ability_damage_info(tech)}\n\nSustituyó tu movimiento especial anterior. Sigues teniendo exactamente 3 movimientos.")
     heal=int(row.get('heal_percent') or 0)
     if heal<=0: return send_message(chat_id,"Ese objeto no se puede usar de esa forma.")
 
@@ -5753,21 +5228,9 @@ def equipment_text(user_id):
         conn=get_db(); rows=conn.execute("""SELECT i.id,x.name,x.equip_slot,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.character_id=? AND i.equipped=1 ORDER BY x.equip_slot""",(int(char['id']),)).fetchall(); conn.close()
     slots={"arma":"⚔️ Arma","casco":"🪖 Casco","armadura":"🛡️ Armadura","guantes":"🧤 Guantes","botas":"👢 Botas","accesorio":"💍 Accesorio"}; by={r['equip_slot']:r for r in rows}
     eff=effective_character_stats(char); b=eff['bonus']
-    social=[]
-    try:
-        cl=rpg_user_clan(user_id)
-        if cl: social.append(f"🏰 Clan {cl['name']}: +{RPG_CLAN_EXP_BONUS}% EXP")
-    except Exception: pass
-    try:
-        mr=_marriage_row(user_id,("active",))
-        if mr: social.append(f"💍 Matrimonio: +{RPG_MARRIAGE_EXP_BONUS}% EXP · +{RPG_MARRIAGE_BOSS_BONUS}% bonus de pareja en Boss")
-    except Exception: pass
     lines=[f"🎽 EQUIPO — {char['name']}",""]
     for k,label in slots.items(): lines.append(f"{label}: {by[k]['name'] if k in by else '—'}")
     lines += ["",f"📊 BONOS: ⚔️ +{b['atk']} · 🛡️ +{b['defense']} · ❤️ +{b['hp']}",f"TOTAL: ⚔️ {eff['atk']} · 🛡️ {eff['defense']} · ❤️ {eff['max_hp']}"]
-    if social: lines += ["","✨ BONUS ACTIVOS",*social]
-    try: lines += ["",rpg_ability_info_text(user_id,char['class_name'])]
-    except Exception: pass
     return "\n".join(lines)
 
 # =========================================================
@@ -8050,7 +7513,7 @@ def event_boss_attack(chat_id,user_id):
         c.commit(); c.close()
     extra=""
     if first_daily:
-        change_kiwons(user_id,int(round(RPG_EVENT_DAILY_KW*_tavern_pve_reward_multiplier(user_id))),'event_daily',chat_id=chat_id,note=cfg['key'])
+        change_kiwons(user_id,RPG_EVENT_DAILY_KW,'event_daily',chat_id=chat_id,note=cfg['key'])
         try: grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"evento:{cfg['key']}:diario")
         except Exception: pass
         extra=f"\n🎁 Participación diaria: +{RPG_EVENT_DAILY_KW} KW · +8 fichas · material de forja."
@@ -8193,14 +7656,8 @@ def clan_members_text(clan_id):
     return out
 
 RPG_DUNGEON_INTERVAL = 60 * 60
-
-def _next_dungeon_delay():
-    """Siguiente expedición especial: ventana aleatoria de 45–90 minutos.
-    Mantiene los eventos separados sin martillar el loop automático.
-    """
-    return random.randint(45 * 60, 90 * 60)
 RPG_DUNGEON_TTL = 20 * 60
-RPG_DUNGEON_ROOMS = 6
+RPG_DUNGEON_ROOMS = 3
 RPG_DUNGEON_FINAL_KW = 1500
 RPG_DUNGEON_FINAL_EXP = 300
 RPG_DUNGEON_LOOT_POOLS = {'comun': ['v8_espada_del_bastion', 'v8_vara_de_bruma', 'v8_dagas_de_medianoche', 'v8_maza_del_alba', 'v8_arco_de_fresno', 'v8_hoja_cleaner_i', 'v8_casco_1', 'v8_casco_2', 'v8_casco_3', 'v8_armadura_1', 'v8_armadura_2', 'v8_armadura_3', 'v8_armadura_4', 'v8_guantes_1', 'v8_guantes_2', 'v8_botas_1', 'v8_botas_2', 'v8_accesorio_1', 'v8_accesorio_2', 'v8_material_1', 'v8_material_2'], 'poco_comun': ['v8_hacha_del_caminante', 'v8_mandoble_de_bronce', 'v8_baculo_astral', 'v8_cetro_de_ambar', 'v8_estilete_del_cuervo', 'v8_kukri_sombrio', 'v8_espada_juramentada', 'v8_martillo_de_guardia', 'v8_arco_del_vendaval', 'v8_arco_de_luna', 'v8_katana_del_barrido', 'v8_filo_de_combate', 'v8_casco_4', 'v8_casco_5', 'v8_casco_6', 'v8_casco_7', 'v8_casco_8', 'v8_casco_9', 'v8_armadura_5', 'v8_armadura_6', 'v8_armadura_7', 'v8_armadura_8', 'v8_armadura_9', 'v8_armadura_10', 'v8_armadura_11', 'v8_armadura_12', 'v8_guantes_3', 'v8_guantes_4', 'v8_guantes_5', 'v8_guantes_6', 'v8_botas_3', 'v8_botas_4', 'v8_botas_5', 'v8_botas_6', 'v8_accesorio_3', 'v8_accesorio_4', 'v8_accesorio_5', 'v8_accesorio_6', 'v8_material_3'], 'raro': ['v8_hoja_del_centinela', 'v8_orbe_del_eclipse_menor', 'v8_gemelas_de_mercurio', 'v8_hoja_del_templo', 'v8_ballesta_ligera', 'v8_espada_del_ultimo_round', 'v8_casco_10', 'v8_casco_11', 'v8_casco_12', 'v8_armadura_13', 'v8_armadura_14', 'v8_armadura_15', 'v8_armadura_16', 'v8_guantes_7', 'v8_guantes_8', 'v8_botas_7', 'v8_botas_8', 'v8_accesorio_7', 'v8_accesorio_8', 'v8_material_4'], 'ultra_raro': ['v8_filo_del_leon', 'v8_vara_de_runas', 'v8_hoja_silenciosa', 'v8_maza_solar', 'v8_arco_del_halcon', 'v8_hoja_best_bout', 'v8_casco_13', 'v8_casco_14', 'v8_casco_15', 'v8_armadura_17', 'v8_armadura_18', 'v8_armadura_19', 'v8_armadura_20', 'v8_guantes_9', 'v8_guantes_10', 'v8_botas_9', 'v8_botas_10', 'v8_accesorio_9', 'v8_accesorio_10', 'v8_material_5']}
@@ -8211,23 +7668,6 @@ def roll_dungeon_completion_loot(user_id, character_id, dungeon_id):
     rarity = 'comun' if x < 0.38 else ('poco_comun' if x < 0.78 else ('raro' if x < 0.97 else 'ultra_raro'))
     pool=RPG_DUNGEON_LOOT_POOLS[rarity]
     return grant_rpg_item(user_id,character_id,random.choice(pool),f"mazmorra:{int(dungeon_id)}:cofre")
-
-def _ensure_technique_scroll_items(conn=None):
-    own=conn is None
-    c=conn or get_db()
-    try:
-        for t in RPG_RARE_TECHNIQUES:
-            key='tech_'+t['key']
-            c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,heal_percent,max_global_copies,image_file_id,animation_file_id,tradeable,equip_slot,allowed_classes,min_level)
-                       VALUES(?,?, 'raro','tecnica',?,0,0,0,NULL,NULL,'','',1,'','',1) ON CONFLICT(item_key) DO NOTHING""",
-                      (key,'Pergamino: '+t['name'],f"Desbloquea el movimiento {t['name']}. Después debes usar el pergamino; solo llevas 3 movimientos en combate."))
-        if own: c.commit()
-    finally:
-        if own: c.close()
-
-def _technique_from_item(item_key):
-    k=str(item_key or '')
-    return RPG_TECHNIQUE_BY_KEY.get(k[5:]) if k.startswith('tech_') else None
 
 RPG_MERCHANT_INTERVAL = 2 * 60 * 60
 RPG_MERCHANT_TTL = 20 * 60
@@ -8278,7 +7718,7 @@ def merchant_private_text_keyboard(merchant_id, user_id=None):
         if int(o.get('hp_bonus') or 0): stats.append(f"❤️ +{int(o['hp_bonus'])}")
         compatible=True; reason=''
         if char:
-            compatible,reason=(True,'Técnica aprendible') if str(d.get('item_type') or '')=='tecnica' else item_compatibility(d,char)
+            compatible,reason=item_compatibility(d,char)
         lines += [f"{icon} {rare} {o['name']} — {int(o['price']):,} KW — {'❌ AGOTADO' if sold else '1/1'}",f"   🎭 {allowed} · 📈 Nv. {req}"+(f" · {' '.join(stats)}" if stats else '')]
         if char and not compatible: lines.append(f"   🔒 No compatible contigo: {reason}")
         if sold: btn={"text":f"❌ AGOTADO · {o['name']}","callback_data":"merchant_sold"}
@@ -8297,7 +7737,7 @@ def merchant_confirm_text(user_id, offer_id):
     text=f"🐪 MALKOR — CONFIRMAR COMPRA\n\n{icon} {rare} {o['name']}\n{o.get('description') or ''}\n\n🎭 Clases: {allowed}\n📈 Nivel requerido: {req}\n{stats}\n\n💰 Precio: {int(o['price']):,} KW\n🪙 Tu saldo: {get_kiwons(user_id):,} KW"
     if int(o['sold_by'] or 0)>0: return text+"\n\n❌ AGOTADO",None
     if char:
-        ok,reason=(True,'Técnica aprendible') if str(d.get('item_type') or '')=='tecnica' else item_compatibility(d,char)
+        ok,reason=item_compatibility(d,char)
         if not ok: return text+f"\n\n🔒 No compatible contigo: {reason}",None
     return text,{"inline_keyboard":[[{"text":f"✅ Comprar · {int(o['price']):,} KW","callback_data":f"merchant_buy:{int(o['id'])}"},{"text":"❌ Cancelar","callback_data":f"merchant_back:{int(o['merchant_id'])}"}]]}
 
@@ -8309,8 +7749,7 @@ def spawn_merchant(chatrow, now=None, forced=False):
         if old and not forced:
             conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=?,updated_at=? WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
         if forced: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE chat_id=? AND status='active'",(chat_id,))
-        _ensure_technique_scroll_items(conn)
-        pool=conn.execute("SELECT item_key,name,rarity,equip_slot,min_level,item_type FROM rpg_items WHERE ((equip_slot IS NOT NULL AND equip_slot<>'') OR item_type='tecnica') AND rarity IN ('comun','poco_comun','raro','ultra_raro')").fetchall()
+        pool=conn.execute("SELECT item_key,name,rarity,equip_slot,min_level FROM rpg_items WHERE equip_slot IS NOT NULL AND equip_slot<>'' AND rarity IN ('comun','poco_comun','raro','ultra_raro')").fetchall()
         if len(pool)<6: conn.rollback(); conn.close(); return False
         by={r:[] for r in ('comun','poco_comun','raro','ultra_raro')}
         for x in pool: by.get(x['rarity'],[]).append(dict(x))
@@ -8342,7 +7781,7 @@ def merchant_buy(user_id, offer_id, chat_id=None):
     with db_lock:
         _c=get_db(); _check=_c.execute("SELECT i.* FROM rpg_merchant_offers o JOIN rpg_items i ON i.item_key=o.item_key WHERE o.id=?",(int(offer_id),)).fetchone(); _c.close()
     if not _check: return False,"Esa oferta ya no existe."
-    _ok,_reason=(True,'Técnica aprendible') if str(_check.get('item_type') or '')=='tecnica' else item_compatibility(dict(_check),char)
+    _ok,_reason=item_compatibility(dict(_check),char)
     if not _ok: return False,f"🔒 No puedes comprar esa pieza: {_reason}. Malkor no acepta devoluciones por mirar mal la etiqueta."
     with db_lock:
         conn=get_db()
@@ -8649,18 +8088,6 @@ def _quick_reward(m,user_id):
                 with db_lock:
                     conn=get_db(); conn.execute("UPDATE rpg_cat_rescues SET sword_claimed=1,updated_at=? WHERE user_id=?",(int(time.time()),uid)); conn.commit(); conn.close()
                 item_msg+=f"\n\n🐱⚔️ CINCO VIDAS DEVUELTAS A CASA\nLas cinco huellas de la empuñadura comienzan a brillar.\nHas recibido: {got['name']}"
-    if char and random.SystemRandom().random()<RPG_TECHNIQUE_MISSION_CHANCE:
-        try:
-            with db_lock:
-                _tc=get_db(); _ensure_technique_scroll_items(_tc); _tc.commit(); _tc.close()
-            locked=[]
-            with db_lock:
-                _lc=get_db(); locked=[str(x['technique_key']) for x in _lc.execute("SELECT technique_key FROM rpg_special_techniques WHERE user_id=?",(uid,)).fetchall()]; _lc.close()
-            avail=[t for t in RPG_RARE_TECHNIQUES if t['key'] not in locked]
-            if avail:
-                t=random.SystemRandom().choice(avail); got=grant_rpg_item(uid,int(char['id']),'tech_'+t['key'],f"mision_rara:{int(m['id'])}")
-                if got: item_msg+=f"\n🌟 DROP RARO 10%: {got['name']} — úsalo para aprender {t['name']}."
-        except Exception: logger.exception("No pude entregar técnica rara de misión")
     return f"🪙 +{kw:,} KW"+(f" · ✨ +{exp:,} EXP" if char and exp else '')+item_msg
 
 def _quick_finish(m,user_id):
@@ -8813,7 +8240,7 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
                           next_dungeon_at=CASE WHEN rpg_auto_chats.next_dungeon_at<=0 THEN EXCLUDED.next_dungeon_at ELSE rpg_auto_chats.next_dungeon_at END,
                           updated_at=EXCLUDED.updated_at""",
                      (int(chat_id),int(message_thread_id) if message_thread_id is not None else None,
-                      now+RPG_AUTO_ENCOUNTER_INTERVAL,now+_next_dungeon_delay(),now))
+                      now+RPG_AUTO_ENCOUNTER_INTERVAL,now+RPG_DUNGEON_INTERVAL,now))
         conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=CASE WHEN next_merchant_at<=0 THEN ? ELSE next_merchant_at END WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,int(chat_id)))
         conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=CASE WHEN next_minigame_at<=0 THEN ? ELSE next_minigame_at END WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,int(chat_id)))
         conn.commit(); conn.close()
@@ -8915,85 +8342,29 @@ def _active_dungeon(chat_id, now=None):
     return row
 
 def _spawn_dungeon(chatrow, now=None):
-    now=int(now or time.time()); chat_id=int(chatrow["chat_id"]); topic=chatrow.get("message_thread_id"); d=random.SystemRandom().choice(RPG_DUNGEONS)
+    now=int(now or time.time()); chat_id=int(chatrow["chat_id"]); topic=chatrow.get("message_thread_id"); d=random.choice(RPG_DUNGEONS)
     with db_lock:
         conn=get_db()
         active=conn.execute("SELECT id FROM rpg_dungeons WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
         if active:
-            conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,updated_at=? WHERE chat_id=?",(now+_next_dungeon_delay(),now,chat_id)); conn.commit(); conn.close(); return False
+            conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
         pending=conn.execute("SELECT message_id FROM rpg_auto_encounters WHERE chat_id=? AND status='pending'",(chat_id,)).fetchall()
         old_ids=[int(x.get("message_id") or 0) for x in pending if int(x.get("message_id") or 0)>0]
         conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE chat_id=? AND status='pending'",(chat_id,))
         row=conn.execute("INSERT INTO rpg_dungeons(chat_id,message_thread_id,dungeon_key,dungeon_name,status,message_id,spawned_at,expires_at) VALUES(?,?,?,?,'active',0,?,?) RETURNING id",(chat_id,int(topic) if topic is not None else None,d["key"],d["name"],now,now+RPG_DUNGEON_TTL)).fetchone()
-        did=int(row["id"]); conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,next_spawn_at=?,updated_at=? WHERE chat_id=?",(now+_next_dungeon_delay(),now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id)); conn.commit(); conn.close()
+        did=int(row["id"]); conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,next_spawn_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id)); conn.commit(); conn.close()
     for mid in old_ids:
         try: delete_message(chat_id,mid)
         except Exception: pass
     old=get_current_message_thread_id()
     try:
         set_current_message_thread_id(topic)
-        sent=send_message(chat_id,f"🏰 EXPEDICIÓN ALEATORIA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n☠️ Sus enemigos son más fuertes que los encuentros normales.\n👤 Puedes entrar solo o 👥 acompañado. Más aventureros = más EXP/KW final, pero también enemigos más fuertes.\n\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la expedición","callback_data":f"rpg_dungeon_enter:{did}"}]]})
+        sent=send_message(chat_id,f"🏰 MAZMORRA ALEATORIA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\nCada aventurero puede hacer su propia expedición.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{did}"}]]})
     finally: set_current_message_thread_id(old)
     mid=int((((sent or {}).get("result") or {}).get("message_id") or 0)) if isinstance(sent,dict) else 0
     with db_lock:
         conn=get_db(); conn.execute("UPDATE rpg_dungeons SET message_id=?,status=? WHERE id=?",(mid,'active' if mid else 'send_failed',did)); conn.commit(); conn.close()
     return bool(mid)
-
-def _dungeon_room_state(conn, dungeon_id, room, level_hint=1, create=True):
-    """Estado ÚNICO del enemigo de una sala cooperativa.
-    Todos los aventureros de la expedición atacan esta misma fila/HP.
-    Debe llamarse dentro de una transacción protegida por db_lock.
-    """
-    dungeon_id=int(dungeon_id); room=int(room); now=int(time.time())
-    row=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,room)).fetchone()
-    party_row=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone()
-    party=max(1,int((party_row or {}).get('n') or 1))
-    if row:
-        # Si alguien se une tarde, la sala sigue siendo compartida y escala una sola vez
-        # por nuevo integrante; conserva el porcentaje de daño que el grupo ya causó.
-        old_party=max(1,int(row.get('party_size') or 1))
-        if row.get('status')=='active' and party>old_party:
-            old_max=max(1,int(row['enemy_max_hp'])); old_hp=max(0,int(row['enemy_hp']))
-            ratio=old_hp/old_max
-            hp_factor=(1.0+0.55*(party-1))/(1.0+0.55*(old_party-1))
-            atk_factor=(1.0+0.08*(party-1))/(1.0+0.08*(old_party-1))
-            new_max=max(old_max,int(round(old_max*hp_factor)))
-            new_hp=max(0,min(new_max,int(round(new_max*ratio))))
-            new_atk=max(1,int(round(int(row['enemy_atk'])*atk_factor)))
-            conn.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=?,enemy_max_hp=?,enemy_atk=?,party_size=?,updated_at=? WHERE dungeon_id=? AND room=?",
-                         (new_hp,new_max,new_atk,party,now,dungeon_id,room))
-            conn.execute("UPDATE rpg_battles SET enemy_hp=?,enemy_max_hp=?,enemy_atk=?,updated_at=? WHERE dungeon_event_id=? AND dungeon_room=?",
-                         (new_hp,new_max,new_atk,now,dungeon_id,room))
-            row=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,room)).fetchone()
-        return row
-    if not create:
-        return None
-    base=random.SystemRandom().choice(RPG_ENEMIES)
-    # Mazmorra > encuentro normal. Más jugadores = más vida y algo más de ataque.
-    depth=1.22 + 0.055*max(0,room-1)
-    party_hp=1.0 + 0.55*max(0,party-1)
-    party_atk=1.0 + 0.08*max(0,party-1)
-    scale=max(0,int(level_hint)-1)
-    hp=max(1,int(round((base['hp']+scale*10)*depth*party_hp)))
-    atk=max(1,int(round((base['atk']+scale*2)*depth*party_atk)))
-    defense=max(0,int(round((base['def']+scale)*depth)))
-    name=f"{base['name']} · Sala {room}"
-    conn.execute("""INSERT INTO rpg_dungeon_rooms
-        (dungeon_id,room,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,party_size,status,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,'active',?,?) ON CONFLICT(dungeon_id,room) DO NOTHING""",
-        (dungeon_id,room,base['key'],name,hp,hp,atk,defense,party,now,now))
-    return conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,room)).fetchone()
-
-def _sync_dungeon_battle_from_room(conn, chat_id, user_id, character_id, roomrow):
-    now=int(time.time())
-    conn.execute("""INSERT INTO rpg_battles
-        (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id,dungeon_event_id,dungeon_room)
-        VALUES(?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'','normal',0,0,?,?)
-        ON CONFLICT(chat_id,user_id) DO UPDATE SET character_id=excluded.character_id,enemy_key=excluded.enemy_key,
-        enemy_name=excluded.enemy_name,enemy_hp=excluded.enemy_hp,enemy_max_hp=excluded.enemy_max_hp,
-        enemy_atk=excluded.enemy_atk,enemy_def=excluded.enemy_def,state='choosing_action',updated_at=excluded.updated_at,
-        dungeon_event_id=excluded.dungeon_event_id,dungeon_room=excluded.dungeon_room""",
-        (int(chat_id),int(user_id),int(character_id),roomrow['enemy_key'],roomrow['enemy_name'],int(roomrow['enemy_hp']),int(roomrow['enemy_max_hp']),int(roomrow['enemy_atk']),int(roomrow['enemy_def']),now,now,int(roomrow['dungeon_id']),int(roomrow['room'])))
 
 def enter_dungeon(chat_id,user_id,dungeon_id):
     now=int(time.time())
@@ -9020,18 +8391,9 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
         if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
         if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
         conn.execute("INSERT INTO rpg_dungeon_party_members(dungeon_id,user_id,joined_at,room_cleared,completed) VALUES(?,?,?,0,0) ON CONFLICT(dungeon_id,user_id) DO NOTHING",(int(dungeon_id),int(user_id),now))
-        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone()
-        char=conn.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1 FOR UPDATE",(int(user_id),)).fetchone()
-        if not char:
-            conn.rollback(); conn.close(); return False,"Necesitas un personaje activo. Usa /crear_personaje."
-        rr=_dungeon_room_state(conn,dungeon_id,room,int(char.get('level') or 1),True)
-        _sync_dungeon_battle_from_room(conn,chat_id,user_id,int(char['id']),rr)
-        conn.commit(); conn.close()
-    eff=effective_character_stats(char)
-    msg=(f"⚔️ {rr['enemy_name']}\n❤️ ENEMIGO COMPARTIDO: {int(rr['enemy_hp'])}/{int(rr['enemy_max_hp'])} HP\n"
-         f"❤️ {char['name']}: {int(char['hp'])}/{eff['max_hp']} HP\n\n"
-         "Todos los miembros de la expedición golpean a ESTE MISMO enemigo. El daño de cualquiera reduce la misma barra de vida.")
-    return True,f"🏰 {name}\n👥 Expedición cooperativa: {int(party['n'])} aventureros\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}"
+        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone(); conn.commit(); conn.close()
+    enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=enemy["key"],dungeon_event_id=dungeon_id,dungeon_room=room)
+    return (True,f"🏰 {name}\n👥 Expedición cooperativa: {int(party['n'])} aventureros\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
 
 def spawn_will_epic_event(chatrow, now=None):
     chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
@@ -9563,26 +8925,6 @@ def help_revive_player(helper_id,target_id):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
-    if data=="draw_global_take":
-        # El lienzo del ARTISTA siempre se entrega por privado. Nunca publicamos
-        # el WebApp del artista en el grupo. Si Telegram todavía no permite DM,
-        # liberamos el turno y damos un deep-link para iniciar el privado.
-        ok,msg2=_draw_claim(chat_id,user)
-        if not ok:
-            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True})
-            return True
-        url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}"
-        dm=send_private_message(int(uid),"🎨 Tu turno de Dibuja y Adivina.\n\nElige una palabra y dibuja desde aquí. La palabra nunca se publicará en el grupo.",reply_markup={"inline_keyboard":[[{"text":"🎨 ABRIR MI LIENZO","web_app":{"url":url}}]]})
-        dm_ok=bool(dm and dm.get("ok"))
-        if not dm_ok:
-            _draw_release_claim(chat_id,int(uid))
-            username=get_bot_identity().get("username","")
-            deep=f"https://t.me/{username}?start=drawglobal_{int(chat_id)}" if username else None
-            kb={"inline_keyboard":[[{"text":"🎨 ABRIR KIWBot EN PRIVADO","url":deep}]]} if deep else None
-            send_message(chat_id,f"{user.get('first_name') or 'Artista'}, Telegram todavía no me deja enviarte el lienzo por privado. Abre primero mi chat privado y vuelve a tomar el turno.",reply_markup=kb)
-            return True
-        send_message(chat_id,f"🎨 {user.get('first_name') or 'El artista'} tomó el turno y está eligiendo su palabra en privado. ¡Prepárense para adivinar!")
-        return True
     if data.startswith("qm:"):
         try:
             _,mid,kind,choice=data.split(":",3)
@@ -9838,16 +9180,6 @@ def handle_rpg_callback(query):
         ok,msg2=pvp_surrender(int(data.split(":",1)[1]),uid)
         if not ok: send_message(chat_id,msg2)
         return True
-    if data.startswith("rpg_move_equip:"):
-        key=data.split(":",1)[1]
-        if not has_special_technique(user_id,key): send_message(chat_id,"🔒 Aún no conoces ese movimiento."); return True
-        if key=="hidden_blade":
-            ch=get_active_character(user_id)
-            if ch and bool(int(ch.get('secret_blades_active') or 0)):
-                send_message(chat_id,"🗡️ Hidden Blade y Doble Espada son excluyentes. Guarda primero las Espadas del Ángel."); return True
-        equip_special_technique(user_id,key); txt,kb=rpg_moves_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
-    if data=="rpg_move_base":
-        equip_special_technique(user_id,""); txt,kb=rpg_moves_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
     if data.startswith("rpg_attack:"):
         result=resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
         _delete_old_combat_card(chat_id,msg)
@@ -10363,93 +9695,6 @@ def send_photo_bytes(chat_id, raw, caption="", message_thread_id=None, content_t
     return data
 
 
-# =========================================================
-# DIBUJA Y ADIVINA GLOBAL — un lienzo por chat
-# =========================================================
-_DRAW_WORDS=[('dragón',['dragon']),('castillo',[]),('gato',['michi']),('espada',[]),('pirata',[]),('fantasma',[]),('volcán',['volcan']),('cohete',[]),('tiburón',['tiburon']),('corona',[]),('robot',[]),('pizza',[]),('dinosaurio',[]),('bruja',['hechicera']),('barco',[]),('avión',['avion']),('caballero',[]),('sirena',[]),('murciélago',['murcielago']),('helado',[]),('pulpo',[]),('montaña',['montana']),('tesoro',[]),('unicornio',[]),('zombie',['zombi']),('cactus',[]),('martillo',[]),('pingüino',['pinguino']),('paraguas',[]),('tortuga',[]),('calavera',[]),('astronauta',[])]
-_DRAW_ROUND_SECONDS=90
-_DRAW_MAX_STROKES=2200
-_DRAW_LOCK=threading.RLock()
-
-def _draw_norm(v):
-    import unicodedata
-    v=unicodedata.normalize('NFKD',str(v or '').lower())
-    return re.sub(r'[^a-z0-9]+','', ''.join(ch for ch in v if not unicodedata.combining(ch)))
-
-def _draw_choices(exclude=None):
-    pool=[x for x in _DRAW_WORDS if x[0] not in set(exclude or [])]
-    return random.SystemRandom().sample(pool,3)
-
-def _draw_offer_turn(chat_id,reason=''):
-    chat_id=int(chat_id); now=int(time.time())
-    with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
-        if row and row['status']=='drawing' and int(row['ends_at'] or 0)>now:
-            left=int(row['ends_at'])-now; c.rollback(); c.close(); send_message(chat_id,f'Ya hay un dibujo en curso. Quedan {left}s.'); return False
-        if row and row['status']=='choosing' and now-int(row['updated_at'] or 0)<120:
-            c.rollback(); c.close(); send_message(chat_id,'El artista actual todavía está eligiendo palabra.'); return False
-        last=int((row or {}).get('drawer_id') or (row or {}).get('last_drawer_id') or 0)
-        c.execute("INSERT INTO tavern_draw_games(chat_id,status,last_drawer_id,updated_at) VALUES(?,'idle',?,?) ON CONFLICT(chat_id) DO UPDATE SET status='idle',last_drawer_id=?,drawer_id=NULL,drawer_name=NULL,word='',synonyms='[]',choices='[]',strokes='[]',rerolls=0,stroke_version=0,started_at=0,ends_at=0,guesses=0,winners='[]',updated_at=?",(chat_id,last,now,last,now)); c.commit(); c.close()
-    send_message(chat_id,'Dibuja y Adivina: el lienzo está libre. El primero en tomarlo será el artista.',reply_markup={'inline_keyboard':[[{'text':'Tomar turno','callback_data':'draw_global_take'}]]}); return True
-
-def _draw_release_claim(chat_id,user_id):
-    """Libera únicamente un turno aún en elección que pertenece al usuario."""
-    now=int(time.time())
-    with _DRAW_LOCK,db_lock:
-        c=get_db()
-        try:
-            row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
-            if row and row['status']=='choosing' and int(row['drawer_id'] or 0)==int(user_id):
-                c.execute("UPDATE tavern_draw_games SET status='idle',drawer_id=NULL,drawer_name=NULL,choices='[]',rerolls=0,updated_at=? WHERE chat_id=?",(now,int(chat_id)))
-                c.commit()
-                return True
-            c.rollback()
-            return False
-        finally:
-            c.close()
-
-def _draw_claim(chat_id,user):
-    uid=int(user.get('id') or 0); name=(user.get('first_name') or user.get('username') or 'Artista')[:80]; now=int(time.time())
-    with _DRAW_LOCK,db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
-        if row and row['status'] in ('choosing','drawing'): c.rollback(); c.close(); return False,'Ese turno ya fue tomado.'
-        if row and int(row['last_drawer_id'] or 0)==uid: c.rollback(); c.close(); return False,'Deja que otra persona dibuje esta ronda.'
-        payload=[{'word':w,'synonyms':syn} for w,syn in _draw_choices()]
-        c.execute("INSERT INTO tavern_draw_games(chat_id,drawer_id,drawer_name,status,round_no,choices,strokes,rerolls,stroke_version,updated_at) VALUES(?,?,?,'choosing',1,?,'[]',0,0,?) ON CONFLICT(chat_id) DO UPDATE SET drawer_id=excluded.drawer_id,drawer_name=excluded.drawer_name,status='choosing',round_no=tavern_draw_games.round_no+1,choices=excluded.choices,strokes='[]',rerolls=0,stroke_version=0,updated_at=excluded.updated_at",(int(chat_id),uid,name,json.dumps(payload,ensure_ascii=False),now)); c.commit(); c.close()
-    return True,'Turno tomado.'
-
-def _draw_finish(chat_id,reason='time'):
-    chat_id=int(chat_id); now=int(time.time())
-    with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
-        if not row or row['status']!='drawing': c.rollback(); c.close(); return False
-        word=row['word']; drawer=int(row['drawer_id']); guesses=int(row['guesses'] or 0); reward=min(600,guesses*100)
-        if reward: change_kiwons_in_tx(c,drawer,reward,'draw_drawer_reward',note=f'Dibuja global chat {chat_id}')
-        c.execute("INSERT INTO tavern_draw_stats(user_id,rounds_drawn,drawer_points,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET rounds_drawn=tavern_draw_stats.rounds_drawn+1,drawer_points=tavern_draw_stats.drawer_points+excluded.drawer_points,updated_at=excluded.updated_at",(drawer,1,reward,now))
-        c.execute("UPDATE tavern_draw_games SET status='finished',last_drawer_id=drawer,updated_at=? WHERE chat_id=?",(now,chat_id)); c.commit(); c.close()
-    send_message(chat_id,f'Tiempo. La palabra era: {word}. Aciertos: {guesses}.'); _draw_offer_turn(chat_id,'siguiente'); return True
-
-def _draw_check_guess(message,text):
-    chat=message.get('chat') or {}; chat_id=chat.get('id'); user=message.get('from') or {}; uid=int(user.get('id') or 0)
-    if not chat_id or chat.get('type') not in ('group','supergroup') or not text or text.startswith('/'): return False
-    now=int(time.time())
-    with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
-        if not row or row['status']!='drawing': c.rollback(); c.close(); return False
-        if int(row['ends_at'] or 0)<=now: c.rollback(); c.close(); _draw_finish(chat_id); return False
-        if int(row['drawer_id'])==uid: c.rollback(); c.close(); return False
-        answers=[row['word']]+list(json.loads(row['synonyms'] or '[]'))
-        if _draw_norm(text) not in {_draw_norm(a) for a in answers}: c.rollback(); c.close(); return False
-        winners=[int(x) for x in json.loads(row['winners'] or '[]')]
-        if uid in winners: c.rollback(); c.close(); return True
-        rank=len(winners)+1; reward=max(80,350-(rank-1)*55); winners.append(uid)
-        ok,bal,err=change_kiwons_in_tx(c,uid,reward,'draw_guess_reward',note=f'Acierto #{rank} chat {chat_id}')
-        if not ok: c.rollback(); c.close(); return True
-        c.execute('UPDATE tavern_draw_games SET winners=?,guesses=guesses+1,updated_at=? WHERE chat_id=?',(json.dumps(winners),now,int(chat_id)))
-        c.execute("INSERT INTO tavern_draw_stats(user_id,guesses,first_guesses,guess_points,current_streak,best_streak,updated_at) VALUES(?,?,?,?,1,1,?) ON CONFLICT(user_id) DO UPDATE SET guesses=tavern_draw_stats.guesses+1,first_guesses=tavern_draw_stats.first_guesses+excluded.first_guesses,guess_points=tavern_draw_stats.guess_points+excluded.guess_points,current_streak=tavern_draw_stats.current_streak+1,best_streak=GREATEST(tavern_draw_stats.best_streak,tavern_draw_stats.current_streak+1),updated_at=excluded.updated_at",(uid,1,1 if rank==1 else 0,reward,now)); c.commit(); c.close()
-    send_message(chat_id,f"{user.get('first_name') or 'Alguien'} lo adivinó. +{reward} KW"+(' · primer acierto' if rank==1 else '')); return True
-
-
 def process_command(
     message,
     text
@@ -10474,13 +9719,6 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
-
-    if command in ("/dibuja","/dibujar","/pinta"):
-        if chat.get("type") not in ("group","supergroup"):
-            send_message(chat_id,"Dibuja y Adivina es global: úsalo dentro del grupo.")
-            return True
-        _draw_offer_turn(chat_id,"Dibuja y Adivina global")
-        return True
 
     if command == "/testimagenia":
         if not is_owner(user_id):
@@ -10569,13 +9807,6 @@ def process_command(
     # -----------------------------------------------------
     if command == "/start":
         parts=str(text or "").strip().split(maxsplit=1)
-        if len(parts)>1 and parts[1].lower()=="manual":
-            if chat.get("type")!="private":
-                send_message(chat_id,"📖 Abre el manual directamente en mi chat privado.",reply_markup=rpg_manual_open_keyboard())
-                return True
-            if not send_rpg_manual_private(message.get("from",{})):
-                send_message(chat_id,"❌ No pude cargar el manual ahora mismo. Intenta /manual otra vez en unos segundos.")
-            return True
         if len(parts)>1 and parts[1].startswith("rpgcreate_create_"):
             raw=parts[1][len("rpgcreate_"):]
             origin_chat_id=None
@@ -10589,30 +9820,6 @@ def process_command(
                 return True
             ensure_player(user)
             send_character_creator(chat_id,user.get("id"),origin_chat_id=origin_chat_id or chat_id)
-            return True
-        if len(parts)>1 and parts[1].startswith("drawglobal_"):
-            if chat.get("type")!="private":
-                return True
-            try: origin_chat_id=int(parts[1].split("_",1)[1])
-            except Exception: origin_chat_id=0
-            if not origin_chat_id:
-                send_message(chat_id,"🎨 El enlace del turno no es válido.")
-                return True
-            user=message.get("from",{})
-            ok,msg2=_draw_claim(origin_chat_id,user)
-            if not ok:
-                # Si el usuario ya posee un turno en elección, puede reabrirlo.
-                with db_lock:
-                    c=get_db()
-                    try:
-                        row=c.execute('SELECT status,drawer_id FROM tavern_draw_games WHERE chat_id=?',(origin_chat_id,)).fetchone()
-                    finally:
-                        c.close()
-                if not row or row['status'] not in ('choosing','drawing') or int(row['drawer_id'] or 0)!=int(user.get('id') or 0):
-                    send_message(chat_id,"🎨 "+msg2)
-                    return True
-            url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={origin_chat_id}"
-            send_message(chat_id,"🎨 Tu lienzo privado está listo. La palabra y las herramientas del artista solo aparecen aquí.",reply_markup={"inline_keyboard":[[{"text":"🎨 ABRIR MI LIENZO","web_app":{"url":url}}]]})
             return True
         if len(parts)>1 and parts[1].startswith("draw_"):
             if chat.get("type")!="private": return True
@@ -10643,29 +9850,6 @@ def process_command(
             else:
                 send_message(chat_id,mission_board_text(user.get("id")),reply_markup=mission_board_keyboard(user.get("id")))
             return True
-
-    # -----------------------------------------------------
-    # KIWRPG WELCOME + PRIVATE MANUAL
-    # -----------------------------------------------------
-    if command in ("/bienvenida", "/historia", "/bienvenidarpg"):
-        user=message.get("from",{})
-        ensure_player(user)
-        name=user.get("first_name") or user.get("username") or "Aventurero"
-        send_message(chat_id,rpg_welcome_text(name),reply_markup=creator_launch_keyboard(chat_id))
-        return True
-
-    if command in ("/manual", "/manualrpg"):
-        user=message.get("from",{})
-        if chat.get("type")=="private":
-            if not send_rpg_manual_private(user):
-                send_message(chat_id,"❌ No pude cargar el manual ahora mismo. Intenta otra vez en unos segundos.")
-            return True
-        ok=send_rpg_manual_private(user)
-        if ok:
-            send_message(chat_id,"📖 Te mandé el Manual completo de KiwRPG por privado.")
-        else:
-            send_message(chat_id,"📖 Telegram todavía no me permite iniciar tu privado. Pulsa el botón; al abrir/iniciar KiwBot, el manual se enviará automáticamente.",reply_markup=rpg_manual_open_keyboard())
-        return True
 
     # -----------------------------------------------------
     # PING
@@ -10870,20 +10054,20 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command in ("/comandos", "/ayudarpg"):
         uid=message.get("from",{}).get("id")
         txt=("🎮 COMANDOS KIWRPG\n\n"
-             "🧙 /rpg — Abrir KiwRPG\n👤 /personaje — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo — Kiwons\n"
-             "🎒 /inventario — Inventario\n🛡️ /equipo — Equipo\n🔨 /forja — Forja y mejoras +15\n🏪 /tienda — Tienda\n"
-             "🐾 /mascotas — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales — Materiales\n🌀 /movimientos — Técnicas y configuración\n\n"
-             "⚔️ COMBATE\n📜 /misiones — 10 misiones simultáneas\n⚡ /eventorpg — Misión Relámpago activa\n👾 /encuentro — PvE\n🏰 /mazmorra — Mazmorra activa\n"
-             "🧹 /resetcombate — Liberar tu combate si se traba\n🏃 /huir — Abandonar PvE\n"
-             "👹 /boss — Boss activo\n📚 /bosses — Lista de Bosses\n⚡ /omega — Kenny Omega\n🥇 /rankingomega — Ranking Omega\n"
-             "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse — Rendirse\n📊 /pvp — Perfil PvP\n🥇 /rankingpvp — Ranking PvP\n\n"
-             "💸 /transferir — Transferir Kiwons\n🗡️ /espadas — Espadas secretas (si están disponibles)\n")
+             "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo · /kiwons — Kiwons\n"
+             "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge · /forjador · /mejorar — Forja y mejoras +15\n🏪 /tienda · /shop — Tienda\n"
+             "🐾 /mascota · /mascotas · /pets — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales · /mats — Materiales\n\n"
+             "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — 10 misiones simultáneas\n⚡ /eventorpg · /misionactual — Misión Relámpago activa\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
+             "🧹 /resetcombate · /reiniciarcombate — Liberar tu combate si se traba\n🏃 /huir · /cancelar_combate — Abandonar PvE\n"
+             "👹 /boss — Boss activo\n📚 /bosses — Lista de Bosses\n⚡ /omega · /kennyomega — Kenny Omega\n🥇 /rankingomega — Ranking Omega\n"
+             "🤝 /duelo — Duelo amistoso\n🏆 /duelopvp — PvP clasificatorio\n🏳️ /rendirse · /rendicion — Rendirse\n📊 /pvp · /perfilpvp — Perfil PvP\n🥇 /rankingpvp · /toppvp — Ranking PvP\n\n"
+             "💸 /transferir · /pagar — Transferir Kiwons\n🗡️ /espadas — Espadas secretas (si están disponibles)\n")
         if is_owner(uid):
-            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/testmision [clave] — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testusuario @usuario — Verificar a quién resuelve el @ antes de una boda\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
-                    "/invocarboss — Invocar Boss\n/quitarboss — Quitar Boss\n/invocaromega — Invocar Omega\n"
-                    "/modotest — Modo test Omega\n/resetomega — Reset Omega\n/omega1hp — Omega a 1 HP\n"
-                    "/darr — Dar recursos RPG\n/darcolmillos — Dar colmillos\n/darkiwons — Dar Kiwons\n"
-                    "/quitarkiwons — Quitar Kiwons\n/darpocion — Dar poción\n/reiniciarrpg — Reinicio RPG administrativo\n/rpgnotificaciones — Dejar avisos automáticos SOLO en este chat\n/apagarrpg — Apagar avisos automáticos aquí\n")
+            txt += ("\n👑 COMANDOS DE KIU / PRUEBA\n/testmazmorra — Forzar mazmorra de prueba\n/misionrapida · /testmision [clave] · /minijuego — Forzar minijuego; con clave pruebas uno específico\n/misionesaleatorias — Ver las 40 misiones y sus claves\n/testwill — Probar Hidden Blade\n/testwillmision — Preparar misión de Will en 19/20\n/resetwill — Reset Will\n/testanillo — Dar Anillo de Bodas\n/testusuario @usuario — Verificar a quién resuelve el @ antes de una boda\n/testboda @usuario — Probar propuesta completa\n/testdivorcio — Terminar matrimonio de prueba\n"
+                    "/invocarboss · /spawnboss — Invocar Boss\n/quitarboss · /eliminarboss — Quitar Boss\n/invocaromega · /spawnomega — Invocar Omega\n"
+                    "/modotest · /modetest — Modo test Omega\n/resetomega — Reset Omega\n/omega1hp — Omega a 1 HP\n"
+                    "/darr — Dar recursos RPG\n/darrcolmillos · /darcolmillos — Dar colmillos\n/darkiwons · /darskiwons · /addkiwons — Dar Kiwons\n"
+                    "/quitarkiwons · /removekiwons — Quitar Kiwons\n/darpocion · /dar_pocion — Dar poción\n/reiniciarrpg · /reset_rpg — Reinicio RPG administrativo\n/rpgnotificaciones · /rpgaqui — Dejar avisos automáticos SOLO en este chat\n/apagarrpg · /rpgsilencio — Apagar avisos automáticos aquí\n")
         send_message(chat_id,txt.strip())
         return True
 
@@ -10892,7 +10076,18 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not is_owner(uid): send_message(chat_id,"Solo Kiu puede cambiar el chat de notificaciones RPG."); return True
         if chat.get("type") not in ("group","supergroup"): send_message(chat_id,"Usa este comando dentro del grupo donde quieres los avisos RPG."); return True
         set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
-        send_message(chat_id,"📍 Este es ahora el ÚNICO chat con encuentros, mazmorras, Malkor y Misiones Relámpago automáticas de KiwRPG. Los chats anteriores quedaron silenciados."); return True
+        # Reinicia los relojes al activar el destino: evita fechas antiguas/corruptas heredadas.
+        _now=int(time.time())
+        with db_lock:
+            _c=get_db()
+            _c.execute("""UPDATE rpg_auto_chats SET enabled=1,next_spawn_at=?,next_minigame_at=?,
+                        next_dungeon_at=CASE WHEN next_dungeon_at<=? THEN ? ELSE next_dungeon_at END,
+                        next_merchant_at=CASE WHEN next_merchant_at<=? THEN ? ELSE next_merchant_at END,updated_at=?
+                        WHERE chat_id=?""",
+                       (_now+RPG_AUTO_ENCOUNTER_INTERVAL,_now+RPG_QUICK_MISSION_INTERVAL,
+                        _now,_now+RPG_DUNGEON_INTERVAL,_now,_now+RPG_MERCHANT_INTERVAL,_now,int(chat_id)))
+            _c.commit(); _c.close()
+        send_message(chat_id,"📍 Destino RPG activado. 👾 Monstruos: cada 3 min · ⚡ Misiones Relámpago: cada 30 min · 🏰 Mazmorras: aprox. cada hora · 🐪 Malkor: aprox. cada 2 h."); return True
 
     if command in ("/apagarrpg", "/rpgsilencio"):
         uid=message.get("from",{}).get("id")
@@ -10900,6 +10095,32 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_auto_chats SET enabled=0 WHERE chat_id=?",(int(chat_id),)); conn.commit(); conn.close()
         send_message(chat_id,"🔕 Encuentros y mazmorras automáticas desactivados en este chat."); return True
+
+    if command == "/estadoeventos":
+        uid=message.get("from",{}).get("id")
+        if not is_owner(uid): send_message(chat_id,"Solo Kiu puede consultar el motor automático."); return True
+        with db_lock:
+            _c=get_db(); _r=_c.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); _c.close()
+        if not _r: send_message(chat_id,"⚠️ Este chat todavía no está registrado. Usa /rpgnotificaciones."); return True
+        _now=int(time.time())
+        def _faltan(v):
+            sec=max(0,int(v or 0)-_now); return f"{sec//60}m {sec%60}s"
+        send_message(chat_id,("🫀 ESTADO DEL MUNDO RPG\n\n"
+            f"Motor: {'ACTIVO' if int(_r.get('enabled') or 0) else 'APAGADO'}\n"
+            f"👾 Próximo monstruo: {_faltan(_r.get('next_spawn_at'))}\n"
+            f"⚡ Próxima misión: {_faltan(_r.get('next_minigame_at'))}\n"
+            f"🏰 Próxima mazmorra: {_faltan(_r.get('next_dungeon_at'))}\n"
+            f"🐪 Próximo Malkor: {_faltan(_r.get('next_merchant_at'))}")); return True
+
+    if command == "/testspawn":
+        uid=message.get("from",{}).get("id")
+        if not is_owner(uid): send_message(chat_id,"Solo Kiu puede forzar un spawn."); return True
+        if chat.get("type") not in ("group","supergroup"): send_message(chat_id,"Úsalo en el grupo RPG."); return True
+        set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        with db_lock:
+            _c=get_db(); _r=_c.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); _c.close()
+        _ok=_auto_spawn_one(dict(_r),int(time.time())) if _r else False
+        send_message(chat_id,"🧪 Spawn forzado: " + ("OK" if _ok else "NO PUBLICADO (puede haber mazmorra o monstruo pendiente).")); return True
 
     if command in ("/mercader", "/malkor"):
         uid=message.get("from",{}).get("id")
@@ -11325,9 +10546,6 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,materials_text(user_id))
         return True
 
-    if command in ("/movimientos", "/moves", "/tecnicas"):
-        txt,kb=rpg_moves_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
-
     if command in ("/equipo", "/equipamiento"):
         user_id=message.get("from",{}).get("id")
         send_message(chat_id,equipment_text(user_id))
@@ -11468,30 +10686,6 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             f"{rpg_text}"
         )
         return True
-
-    if command in ("/taberna", "/tavern", "/casino"):
-        user = message.get("from", {})
-        ensure_player(user)
-        url=f"{PUBLIC_BASE_URL}/rpg/tavern"
-        send_message(chat_id,
-            "🍺 TABERNA DE MALKOR\n\n"
-            "Casino, arcade, Cat.io, Memoria, barra, tienda y rankings conectados a tus Kiwons.\n\n"
-            "🎰 Los juegos de casino usan KW reales del RPG.\n"
-            "🐈 Cat.io comparte sala con otros jugadores y habitantes de la arena.\n"
-            "🧠 Memoria premia tu récord.\n"
-            "🍺 Las copas pueden darte efectos inesperados.\n\n"
-            "Juega con cabeza: Malkor lleva la cuenta de absolutamente todo. 😹",
-            reply_markup={"inline_keyboard":[[{"text":"🍺 ENTRAR A LA TABERNA","web_app":{"url":url}}]]})
-        return True
-
-    if command in ("/rankingcasino", "/rankingtaberna"):
-        with db_lock:
-            conn=get_db(); winners=conn.execute("""SELECT s.*,p.display_name FROM tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id ORDER BY (s.won-s.lost) DESC LIMIT 5""").fetchall(); losers=conn.execute("""SELECT s.*,p.display_name FROM tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id ORDER BY s.lost DESC LIMIT 5""").fetchall(); conn.close()
-        lines=["🎰 RANKING DE LA TABERNA","","🏆 REYES DEL CASINO"]
-        lines += [f"{i}. {r.get('display_name') or 'Jugador'} — {int(r['won'])-int(r['lost']):+,} KW" for i,r in enumerate(winners,1)] or ["Todavía no hay víctimas... digo, jugadores."]
-        lines += ["","💀 PATROCINADORES DE MALKOR"]
-        lines += [f"{i}. {r.get('display_name') or 'Jugador'} — {int(r['lost']):,} KW perdidos" for i,r in enumerate(losers,1)] or ["Malkor aún paga sus propias velas."]
-        send_message(chat_id,"\n".join(lines)); return True
 
     if command in ("/crear_personaje", "/crearpersonaje"):
         user = message.get("from", {})
@@ -12630,11 +11824,6 @@ def process_update(
         if handle_quick_mission_text(message, text):
             return
 
-        # Dibuja y Adivina global escucha las respuestas normales del grupo.
-        # Solo consume el mensaje cuando realmente fue un acierto.
-        if _draw_check_guess(message, text):
-            return
-
         # Un dado solo afecta al RPG cuando existe un encuentro pendiente
         # para ESTE jugador en ESTE chat. Un número escrito jamás sustituye al dado.
         if message.get("dice") and handle_rpg_dice(message):
@@ -13058,7 +12247,7 @@ def rpg_draw_page():
         conn=get_db(); row=conn.execute("SELECT id,title,prompt,status,expires_at,mission_type FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
     if not row or row['mission_type']!='draw': return "Misión de dibujo no encontrada.",404
     title=str(row['title']); prompt=str(row['prompt'])
-    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.bar .sw{width:38px;height:38px;padding:0;border-radius:50%;background:var(--c);border:3px solid #ffffff55;box-shadow:0 2px 8px #0008}.bar .sw.on{outline:3px solid #f2c76e;outline-offset:2px}.picker{width:40px;height:40px;border-radius:50%;overflow:hidden;position:relative;border:2px solid #ffffff55;background:conic-gradient(red,#ff0,#0f0,#0ff,#00f,#f0f,red);display:grid;place-items:center}.picker input{position:absolute;inset:0;opacity:0;width:100%;height:100%}.picker span{font-weight:1000;text-shadow:0 1px 4px #000}.brush{display:flex;align-items:center;gap:7px;background:#222833;border-radius:12px;padding:7px 10px;font-weight:800}.brush input{width:100px}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🏁 <b>El primero que ENTREGUE un dibujo válido gana.</b> Abrir el lienzo no reserva la misión.</p><div class="bar" id="palette"><button class="sw" style="--c:#111111" onclick="setColor('#111111',this)" aria-label="Negro"></button><button class="sw" style="--c:#ffffff" onclick="setColor('#ffffff',this)" aria-label="Blanco"></button><button class="sw" style="--c:#e53935" onclick="setColor('#e53935',this)" aria-label="Rojo"></button><button class="sw" style="--c:#ff7a00" onclick="setColor('#ff7a00',this)" aria-label="Naranja"></button><button class="sw" style="--c:#ffd43b" onclick="setColor('#ffd43b',this)" aria-label="Amarillo"></button><button class="sw" style="--c:#43a047" onclick="setColor('#43a047',this)" aria-label="Verde"></button><button class="sw" style="--c:#00b8a9" onclick="setColor('#00b8a9',this)" aria-label="Turquesa"></button><button class="sw" style="--c:#1e88e5" onclick="setColor('#1e88e5',this)" aria-label="Azul"></button><button class="sw" style="--c:#673ab7" onclick="setColor('#673ab7',this)" aria-label="Violeta"></button><button class="sw" style="--c:#e84393" onclick="setColor('#e84393',this)" aria-label="Rosa"></button><button class="sw" style="--c:#795548" onclick="setColor('#795548',this)" aria-label="Café"></button><label class="picker" title="Color personalizado"><input id="customColor" type="color" value="#111111" oninput="setColor(this.value)"><span>+</span></label><label class="brush">Pincel <input id="brushSize" type="range" min="2" max="36" value="8"></label><button onclick="eraser()">Goma</button><button onclick="undo()">Deshacer</button><button onclick="clearCanvas()">Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Entregar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v,el=null){color=v;x.globalCompositeOperation='source-over';document.querySelectorAll('.sw').forEach(b=>b.classList.remove('on'));if(el)el.classList.add('on');const cc=document.getElementById('customColor');if(cc&&/^#[0-9a-f]{6}$/i.test(v))cc.value=v}function eraser(){color='#ffffff';x.globalCompositeOperation='source-over';document.querySelectorAll('.sw').forEach(b=>b.classList.remove('on'))}document.getElementById('brushSize').addEventListener('input',e=>x.lineWidth=Number(e.target.value));document.querySelector('.sw')?.classList.add('on');function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
+    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🏁 <b>El primero que ENTREGUE un dibujo válido gana.</b> Abrir el lienzo no reserva la misión.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Entregar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
     return html.replace('__MID__',str(mid)).replace('__TITLE__',json.dumps(title)).replace('__PROMPT__',json.dumps(prompt))
 
 @app.route("/rpg/api/draw-submit", methods=["POST"])
@@ -13120,1091 +12309,6 @@ def rpg_api_create():
         if not sent:
             send_message(chat_id,caption)
     return jsonify({"ok":True,"message":f"✨ {name} ha sido creado como {label}."})
-
-# =========================================================
-# TABERNA DE MALKOR — WEB APP
-# =========================================================
-
-TAVERN_MIN_BET=100
-TAVERN_MAX_BET=10000
-TAVERN_MAX_PAYOUT=500000
-
-_tavern_seen_users={}
-_tavern_seen_lock=threading.RLock()
-
-def _tavern_auth(body=None):
-    body=body or {}
-    auth=validate_telegram_init_data(body.get("init_data", ""))
-    if not auth:
-        return None
-    # Las Mini Apps de tiempo real (Cat.io/Vuelo/Ajedrez) consultan varias veces por minuto.
-    # ensure_player() toca PostgreSQL, así que no repetimos ese UPSERT en cada frame de red.
-    # La autenticación HMAC sí se valida SIEMPRE; solo se cachea el mantenimiento del perfil.
-    user=auth.get("user") or {}; uid=int(user.get("id") or 0); now=time.monotonic()
-    should_ensure=True
-    if uid:
-        with _tavern_seen_lock:
-            last=_tavern_seen_users.get(uid,0.0)
-            if now-last < 300.0:
-                should_ensure=False
-            else:
-                _tavern_seen_users[uid]=now
-            if len(_tavern_seen_users)>4096:
-                cutoff=now-900.0
-                for k,v in list(_tavern_seen_users.items()):
-                    if v<cutoff: _tavern_seen_users.pop(k,None)
-    if should_ensure:
-        try: ensure_player(user)
-        except Exception:
-            if uid:
-                with _tavern_seen_lock: _tavern_seen_users.pop(uid,None)
-            raise
-    return auth
-
-def _tavern_stats_touch(uid, wager=0, won=0, lost=0, jackpot=0, biggest=0):
-    now=int(time.time())
-    with db_lock:
-        c=get_db(); c.execute("""INSERT INTO tavern_stats(user_id,games,wagered,won,lost,jackpots,biggest_win,updated_at)
-        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET games=tavern_stats.games+1,wagered=tavern_stats.wagered+excluded.wagered,won=tavern_stats.won+excluded.won,lost=tavern_stats.lost+excluded.lost,jackpots=tavern_stats.jackpots+excluded.jackpots,biggest_win=GREATEST(tavern_stats.biggest_win,excluded.biggest_win),updated_at=excluded.updated_at""",
-        (int(uid),1,int(wager),int(won),int(lost),int(jackpot),int(biggest),now)); c.commit(); c.close()
-
-def _tavern_bet(uid, amount, kind):
-    try:
-        amount=int(amount)
-    except (TypeError, ValueError):
-        return False,0,get_kiwons(uid),'Apuesta inválida.'
-    if amount < TAVERN_MIN_BET or amount > TAVERN_MAX_BET:
-        return False,amount,get_kiwons(uid),f'La apuesta debe estar entre {TAVERN_MIN_BET:,} y {TAVERN_MAX_BET:,} KW.'
-    ok,balance,err=change_kiwons(uid,-amount,"tavern_"+kind,note=f"Taberna de Malkor: {kind}")
-    return ok,amount,balance,err
-
-def _cards_new_deck():
-    ranks=['2','3','4','5','6','7','8','9','10','J','Q','K','A']; suits=['♠','♥','♦','♣']
-    d=[r+s for s in suits for r in ranks]; random.SystemRandom().shuffle(d); return d
-
-def _cards_value(cards):
-    vals=[]
-    for c in cards:
-        r=c[:-1]; vals.append(11 if r=='A' else 10 if r in ('J','Q','K') else int(r))
-    total=sum(vals); aces=sum(1 for c in cards if c[:-1]=='A')
-    while total>21 and aces: total-=10; aces-=1
-    return total
-
-def _tavern_announce_jackpot(uid, bet, payout, mult):
-    """Anuncia jackpots confirmados por servidor en el destino RPG activo."""
-    try:
-        with db_lock:
-            c=get_db()
-            p=c.execute("SELECT display_name FROM players WHERE user_id=?",(int(uid),)).fetchone()
-            c.execute("INSERT INTO tavern_jackpot_hall(user_id,bet,payout,multiplier,created_at) VALUES(?,?,?,?,?)",(int(uid),int(bet),int(payout),float(mult),int(time.time())))
-            main_chat=str(os.getenv('TAVERN_MAIN_CHAT_ID','')).strip(); dest=None
-            if main_chat:
-                try: dest={'chat_id':int(main_chat),'message_thread_id':None}
-                except Exception: dest=None
-            if not dest: dest=c.execute("SELECT chat_id,message_thread_id FROM rpg_auto_chats WHERE enabled=1 ORDER BY updated_at DESC LIMIT 1").fetchone()
-            c.commit(); c.close()
-        if not dest:
-            return
-        name=(p.get("display_name") if p else None) or f"Jugador {uid}"
-        text=("🚨🎰 ¡¡¡JACKPOT EN LA TABERNA!!! 🎰🚨\n\n"
-              f"👑 {name} ACABA DE ROMPER LA BANCA\n\n"
-              f"💰 Premio: {int(payout):,} KW\n🎲 Apuesta: {int(bet):,} KW\n"
-              f"🔥 Multiplicador: ×{int(mult)}\n\n"
-              "🍺 Malkor contempla sus pérdidas en absoluto silencio.")
-        old=get_current_message_thread_id()
-        try:
-            set_current_message_thread_id(dest.get("message_thread_id"))
-            send_message(int(dest["chat_id"]),text)
-        finally:
-            set_current_message_thread_id(old)
-    except Exception:
-        logging.exception("No se pudo anunciar jackpot de Taberna")
-
-def _tavern_rankings():
-    with db_lock:
-        c=get_db()
-        win=c.execute("""SELECT p.display_name,s.won,s.lost,(s.won-s.lost) net,s.biggest_win,s.jackpots FROM tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id ORDER BY net DESC LIMIT 10""").fetchall()
-        lose=c.execute("""SELECT p.display_name,s.lost FROM tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id ORDER BY s.lost DESC LIMIT 10""").fetchall()
-        mem=c.execute("""SELECT p.display_name,s.memory_best FROM tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id WHERE s.memory_best>0 ORDER BY s.memory_best DESC LIMIT 10""").fetchall()
-        cat=c.execute("""SELECT p.display_name,s.cat_best,s.cat_eaten FROM tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id WHERE s.cat_best>0 ORDER BY s.cat_best DESC LIMIT 10""").fetchall()
-        flight=c.execute("""SELECT p.display_name,f.best_x,f.best_distance,f.biggest_prize,f.best_streak FROM tavern_flight_stats f LEFT JOIN players p ON p.user_id=f.user_id ORDER BY f.best_x DESC,f.biggest_prize DESC LIMIT 10""").fetchall()
-        hall=c.execute("""SELECT p.display_name,h.bet,h.payout,h.multiplier,h.created_at FROM tavern_jackpot_hall h LEFT JOIN players p ON p.user_id=h.user_id ORDER BY h.payout DESC,h.created_at DESC LIMIT 10""").fetchall()
-        chess=c.execute("""SELECT p.display_name,s.elo,s.wins,s.losses,s.draws,s.best_elo FROM tavern_chess_stats s LEFT JOIN players p ON p.user_id=s.user_id ORDER BY s.elo DESC,s.wins DESC LIMIT 10""").fetchall()
-        draw=c.execute("""SELECT p.display_name,s.rounds_drawn,s.guesses,s.first_guesses,s.drawer_points,s.guess_points,s.best_streak FROM tavern_draw_stats s LEFT JOIN players p ON p.user_id=s.user_id ORDER BY (s.drawer_points+s.guess_points) DESC,s.guesses DESC LIMIT 10""").fetchall()
-        c.close()
-    return {k:[dict(x) for x in v] for k,v in {'winners':win,'losers':lose,'memory':mem,'cat':cat,'flight':flight,'jackpots':hall,'chess':chess,'draw':draw}.items()}
-
-def _tavern_request_id(body):
-    rid=str((body or {}).get('request_id','')).strip()
-    return rid[:80] if re.fullmatch(r'[A-Za-z0-9._:-]{8,80}',rid or '') else ''
-
-def _tavern_replay_get(c,uid,endpoint,rid):
-    if not rid:return None
-    row=c.execute("SELECT response_json FROM tavern_idempotency WHERE user_id=? AND request_id=? AND endpoint=?",(int(uid),rid,endpoint)).fetchone()
-    if row and row.get('response_json'):
-        try:return json.loads(row['response_json'])
-        except Exception:return None
-    return None
-
-def _tavern_replay_claim(c,uid,endpoint,rid):
-    if not rid:return True
-    cur=c.execute("""INSERT INTO tavern_idempotency(user_id,request_id,endpoint,response_json,created_at) VALUES(?,?,?,?,?)
-                   ON CONFLICT(user_id,request_id,endpoint) DO NOTHING""",(int(uid),rid,endpoint,None,int(time.time())))
-    return int(getattr(cur,'rowcount',0) or 0)==1
-
-def _tavern_replay_store(c,uid,endpoint,rid,payload):
-    if rid:c.execute("UPDATE tavern_idempotency SET response_json=? WHERE user_id=? AND request_id=? AND endpoint=?",(json.dumps(payload,separators=(',',':'),ensure_ascii=False),int(uid),rid,endpoint))
-
-def _tavern_balance_in_tx(c,uid):
-    row=c.execute('SELECT kiwons FROM players WHERE user_id=?',(int(uid),)).fetchone()
-    return int(row['kiwons'] or 0) if row else 0
-
-TAVERN_ACHIEVEMENTS = {
-    'first_game': ('Primera ronda', 'Juega una ronda de casino.', 250),
-    'casino_25': ('Habitual de Malkor', 'Completa 25 rondas de casino.', 700),
-    'memory_8': ('Mente de acero', 'Alcanza ronda 8 en Memoria.', 900),
-    'cat_1000': ('Nueve vidas', 'Alcanza 1,000 puntos en Cat.io.', 1000),
-    'flight_5': ('Piloto temerario', 'Aterriza a x5.00 o más.', 1200),
-    'chess_win': ('Jaque a Malkor', 'Gana una partida de ajedrez.', 1000),
-    'draw_guess': ('Ojo de artista', 'Adivina un dibujo.', 500),
-    'jackpot': ('La banca lloró', 'Consigue un jackpot.', 2500),
-}
-
-def _tavern_achievement_progress(c,uid):
-    st=c.execute('SELECT * FROM tavern_stats WHERE user_id=?',(uid,)).fetchone() or {}
-    fl=c.execute('SELECT * FROM tavern_flight_stats WHERE user_id=?',(uid,)).fetchone() or {}
-    ch=c.execute('SELECT * FROM tavern_chess_stats WHERE user_id=?',(uid,)).fetchone() or {}
-    dr=c.execute('SELECT * FROM tavern_draw_stats WHERE user_id=?',(uid,)).fetchone() or {}
-    claimed={r['achievement_key'] for r in c.execute('SELECT achievement_key FROM tavern_achievement_claims WHERE user_id=?',(uid,)).fetchall()}
-    games=int(st.get('games',0) or 0)
-    checks={'first_game':games>=1,'casino_25':games>=25,'memory_8':int(st.get('memory_best',0) or 0)>=8,
-            'cat_1000':int(st.get('cat_best',0) or 0)>=1000,'flight_5':float(fl.get('best_x',1) or 1)>=5,
-            'chess_win':int(ch.get('wins',0) or 0)>=1,'draw_guess':int(dr.get('guesses',0) or 0)>=1,
-            'jackpot':int(st.get('jackpots',0) or 0)>=1}
-    return [{'key':k,'name':v[0],'description':v[1],'reward':v[2],'unlocked':bool(checks[k]),'claimed':k in claimed} for k,v in TAVERN_ACHIEVEMENTS.items()]
-
-@app.route('/rpg/api/tavern/rewards',methods=['POST'])
-def tavern_rewards():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
-    uid=int(a['user']['id']); action=str(b.get('action','state')); now=int(time.time()); day=now//86400
-    with db_lock:
-        c=get_db()
-        try:
-            if action=='daily':
-                rid=_tavern_request_id(b)
-                if not rid:return jsonify(ok=False,message='Solicitud inválida.'),400
-                old=_tavern_replay_get(c,uid,'rewards:daily',rid)
-                if old:c.rollback();c.close();return jsonify(old)
-                if not _tavern_replay_claim(c,uid,'rewards:daily',rid):c.rollback();c.close();return jsonify(ok=False,message='Solicitud en proceso.'),409
-                row=c.execute('SELECT * FROM tavern_daily_rewards WHERE user_id=? FOR UPDATE',(uid,)).fetchone()
-                if row and int(row['last_day'])==day:
-                    br=c.execute('SELECT kiwons FROM players WHERE user_id=?',(uid,)).fetchone(); payload={'ok':False,'message':'La recompensa de hoy ya fue reclamada.','balance':int(br['kiwons'] or 0) if br else 0}
-                else:
-                    streak=(int(row['streak'])+1) if row and int(row['last_day'])==day-1 else 1
-                    reward=min(1200,250+100*(streak-1))
-                    ok,bal,err=change_kiwons_in_tx(c,uid,reward,'tavern_daily',note=f'Racha diaria {streak}')
-                    if not ok:raise RuntimeError(err or 'daily reward')
-                    c.execute("""INSERT INTO tavern_daily_rewards(user_id,last_day,streak,total_claims,updated_at) VALUES(?,?,?,1,?)
-                               ON CONFLICT(user_id) DO UPDATE SET last_day=excluded.last_day,streak=excluded.streak,total_claims=tavern_daily_rewards.total_claims+1,updated_at=excluded.updated_at""",(uid,day,streak,now))
-                    payload={'ok':True,'reward':reward,'streak':streak,'balance':bal}
-                _tavern_replay_store(c,uid,'rewards:daily',rid,payload);c.commit();c.close();return jsonify(payload)
-            if action=='claim':
-                key=str(b.get('key','')); rid=_tavern_request_id(b)
-                if key not in TAVERN_ACHIEVEMENTS or not rid:return jsonify(ok=False,message='Logro inválido.'),400
-                old=_tavern_replay_get(c,uid,'achievement:'+key,rid)
-                if old:c.rollback();c.close();return jsonify(old)
-                if not _tavern_replay_claim(c,uid,'achievement:'+key,rid):c.rollback();c.close();return jsonify(ok=False,message='Solicitud en proceso.'),409
-                ach={x['key']:x for x in _tavern_achievement_progress(c,uid)}[key]
-                if ach['claimed']:payload={'ok':False,'message':'Ese logro ya fue cobrado.'}
-                elif not ach['unlocked']:payload={'ok':False,'message':'Ese logro todavía está bloqueado.'}
-                else:
-                    reward=int(TAVERN_ACHIEVEMENTS[key][2]);ok,bal,err=change_kiwons_in_tx(c,uid,reward,'tavern_achievement',note=TAVERN_ACHIEVEMENTS[key][0])
-                    if not ok:raise RuntimeError(err or 'achievement reward')
-                    c.execute('INSERT INTO tavern_achievement_claims(user_id,achievement_key,claimed_at,reward) VALUES(?,?,?,?)',(uid,key,now,reward))
-                    payload={'ok':True,'reward':reward,'balance':bal}
-                _tavern_replay_store(c,uid,'achievement:'+key,rid,payload);c.commit();c.close();return jsonify(payload)
-            row=c.execute('SELECT * FROM tavern_daily_rewards WHERE user_id=?',(uid,)).fetchone(); achievements=_tavern_achievement_progress(c,uid);c.close()
-            return jsonify(ok=True,daily={'available':not row or int(row['last_day'])!=day,'streak':int(row['streak'] or 0) if row else 0},achievements=achievements)
-        except Exception as e:
-            try:c.rollback();c.close()
-            except Exception:pass
-            logging.exception('tavern rewards')
-            return jsonify(ok=False,message='Malkor perdió la llave del cofre.'),500
-
-TAVERN_SHOP = {
-    'title_highroller': ('Título: Gran Tahúr','title',6500,False),
-    'title_nightcat': ('Título: Gato Nocturno','title',7000,False),
-    'frame_gold': ('Marco Dorado','frame',9000,False),
-    'frame_obsidian': ('Marco Obsidiana','frame',12000,False),
-    'emote_malkor': ('Emote de Malkor','emote',3500,False),
-    'pet_raven': ('Cuervo de la Taberna','pet',18000,False),
-    'chest_bronze': ('Cofre de Bronce','chest',1800,True),
-    'chest_silver': ('Cofre de Plata','chest',4500,True),
-}
-
-# Reliquias de Malkor: exactamente dos ejemplares globales de cada arma.
-# Se integran con el inventario/equipamiento normal del RPG; no son cosméticos.
-TAVERN_RELICS = {
-    'relic_excalibur': {'name':'Excalibur','class':'Guerrero','atk':48,'def':6,'hp':20,'description':'La espada del rey. Reliquia de fuerza brutal y presencia legendaria.'},
-    'relic_merlin': {'name':'Báculo de Merlín','class':'Mago','atk':55,'def':3,'hp':15,'description':'Un báculo asociado al hechicero de las leyendas artúricas. Poder ofensivo excepcional.'},
-    'relic_kusanagi': {'name':'Kusanagi','class':'Pícaro','atk':51,'def':4,'hp':10,'description':'La espada legendaria de las antiguas historias japonesas. Rápida, precisa y letal.'},
-    'relic_durandal': {'name':'Durandal','class':'Paladín','atk':42,'def':14,'hp':35,'description':'La espada legendaria de Roldán. Golpe poderoso con una defensa digna de un paladín.'},
-    'relic_gandiva': {'name':'Gandiva','class':'Arquero','atk':52,'def':5,'hp':15,'description':'El arco legendario de Arjuna. Una reliquia creada para dominar el combate a distancia.'},
-    'relic_masamune': {'name':'Masamune','class':'The Cleaner','atk':58,'def':8,'hp':25,'description':'Hoja legendaria reservada para The Cleaner. Precisión y daño en su máxima expresión.'},
-}
-TAVERN_RELIC_PRICE=1_000_000
-TAVERN_RELIC_STOCK=2
-
-def _ensure_tavern_relic_items(c):
-    now=int(time.time())
-    for key,r in TAVERN_RELICS.items():
-        c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
-                     VALUES(?,?,?,?,?,?,?,?,?,0,?,'arma',?,1)
-                     ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,
-                     description=excluded.description,atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,
-                     max_global_copies=excluded.max_global_copies,tradeable=0,equip_slot='arma',allowed_classes=excluded.allowed_classes""",
-                  (key,r['name'],'reliquia','arma',r['description'],r['atk'],r['def'],r['hp'],TAVERN_RELIC_STOCK,now,r['class']))
-
-def _tavern_shop_state(c,uid):
-    _ensure_tavern_relic_items(c)
-    owned={r['item_key']:int(r['quantity']) for r in c.execute('SELECT item_key,quantity FROM tavern_shop_inventory WHERE user_id=?',(uid,)).fetchall()}
-    items=[{'key':k,'name':v[0],'kind':v[1],'price':v[2],'repeatable':v[3],'quantity':owned.get(k,0)} for k,v in TAVERN_SHOP.items()]
-    wr=c.execute('SELECT world_id FROM rpg_world_state WHERE singleton=1').fetchone(); world=int(wr['world_id'] if wr else 1)
-    char=c.execute('SELECT class_name FROM characters WHERE user_id=? AND is_active=1 ORDER BY id LIMIT 1',(int(uid),)).fetchone()
-    player_class=str(char['class_name']) if char else ''
-    for key,r in TAVERN_RELICS.items():
-        sold=int(c.execute('SELECT COUNT(*) AS n FROM rpg_inventory WHERE item_key=?',(key,)).fetchone()['n'] or 0)
-        mine=int(c.execute('SELECT COUNT(*) AS n FROM rpg_inventory WHERE user_id=? AND item_key=?',(int(uid),key)).fetchone()['n'] or 0)
-        items.append({'key':key,'name':r['name'],'kind':'relic','price':TAVERN_RELIC_PRICE,'repeatable':False,'quantity':mine,
-                      'class_name':r['class'],'atk':r['atk'],'defense':r['def'],'hp':r['hp'],'stock':max(0,TAVERN_RELIC_STOCK-sold),
-                      'global_stock':TAVERN_RELIC_STOCK,'compatible':player_class.lower()==r['class'].lower()})
-    return items
-
-@app.route('/rpg/api/tavern/shop',methods=['POST'])
-def tavern_shop():
-    b=request.get_json(silent=True) or {};a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
-    uid=int(a['user']['id']);action=str(b.get('action','state'));now=int(time.time())
-    with db_lock:
-        c=get_db()
-        try:
-            if action=='state':
-                items=_tavern_shop_state(c,uid);c.close();return jsonify(ok=True,items=items)
-            key=str(b.get('key',''));rid=_tavern_request_id(b)
-            if key not in TAVERN_SHOP and key not in TAVERN_RELICS or not rid:return jsonify(ok=False,message='Artículo inválido.'),400
-            endpoint='shop:'+action+':'+key;old=_tavern_replay_get(c,uid,endpoint,rid)
-            if old:c.rollback();c.close();return jsonify(old)
-            if not _tavern_replay_claim(c,uid,endpoint,rid):c.rollback();c.close();return jsonify(ok=False,message='Solicitud en proceso.'),409
-            if key in TAVERN_RELICS:
-                r=TAVERN_RELICS[key]; name=r['name']; kind='relic'; price=TAVERN_RELIC_PRICE; repeatable=False
-            else:
-                name,kind,price,repeatable=TAVERN_SHOP[key]
-            row=c.execute('SELECT quantity FROM tavern_shop_inventory WHERE user_id=? AND item_key=? FOR UPDATE',(uid,key)).fetchone();qty=int(row['quantity'] or 0) if row else 0
-            if action=='buy' and kind=='relic':
-                _ensure_tavern_relic_items(c)
-                # Bloquear la fila maestra serializa las dos únicas ventas globales incluso con varios workers.
-                c.execute('SELECT item_key FROM rpg_items WHERE item_key=? FOR UPDATE',(key,)).fetchone()
-                wr=c.execute('SELECT world_id FROM rpg_world_state WHERE singleton=1 FOR UPDATE').fetchone(); world=int(wr['world_id'] if wr else 1)
-                char=c.execute('SELECT id,class_name FROM characters WHERE user_id=? AND is_active=1 ORDER BY id LIMIT 1 FOR UPDATE',(uid,)).fetchone()
-                sold=int(c.execute('SELECT COUNT(*) AS n FROM rpg_inventory WHERE item_key=?',(key,)).fetchone()['n'] or 0)
-                mine=c.execute('SELECT id FROM rpg_inventory WHERE user_id=? AND item_key=? LIMIT 1',(uid,key)).fetchone()
-                if not char: payload={'ok':False,'message':'Necesitas un personaje activo para reclamar una reliquia.'}
-                elif str(char['class_name']).lower()!=str(r['class']).lower(): payload={'ok':False,'message':f"{name} solo acepta a la clase {r['class']}."}
-                elif mine: payload={'ok':False,'message':'Ya posees esta reliquia.'}
-                elif sold>=TAVERN_RELIC_STOCK: payload={'ok':False,'message':'AGOTADA. Las dos reliquias globales ya tienen dueño.'}
-                else:
-                    ok,bal,err=change_kiwons_in_tx(c,uid,-TAVERN_RELIC_PRICE,'tavern_relic',note=f'{name} #{sold+1}/2')
-                    if not ok: payload={'ok':False,'message':err or 'Necesitas 1,000,000 KW.','balance':bal}
-                    else:
-                        serial=sold+1
-                        c.execute("""INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id)
-                                     VALUES(?,?,?,?,1,0,1,?,'Taberna de Malkor',?,?)""",(uid,int(char['id']),key,serial,now,world,uid))
-                        payload={'ok':True,'message':f'{name} #{serial}/2 es tuya. Reliquia vinculada a {r["class"]}.','balance':bal,'serial':serial,'stock':TAVERN_RELIC_STOCK-serial}
-            elif action=='buy':
-                if qty and not repeatable:payload={'ok':False,'message':'Ya tienes ese artículo.'}
-                else:
-                    ok,bal,err=change_kiwons_in_tx(c,uid,-int(price),'tavern_shop',note=name)
-                    if not ok:payload={'ok':False,'message':err or 'Kiwons insuficientes.','balance':bal}
-                    else:
-                        c.execute("""INSERT INTO tavern_shop_inventory(user_id,item_key,quantity,acquired_at) VALUES(?,?,1,?)
-                                   ON CONFLICT(user_id,item_key) DO UPDATE SET quantity=tavern_shop_inventory.quantity+1,acquired_at=excluded.acquired_at""",(uid,key,now))
-                        payload={'ok':True,'message':name+' adquirido.','balance':bal}
-            elif action=='open' and kind=='chest':
-                if qty<=0:payload={'ok':False,'message':'No tienes ese cofre.'}
-                else:
-                    rng=random.SystemRandom(); reward=rng.randint(300,1100) if key=='chest_bronze' else rng.randint(900,3000)
-                    c.execute('UPDATE tavern_shop_inventory SET quantity=quantity-1 WHERE user_id=? AND item_key=?',(uid,key))
-                    ok,bal,err=change_kiwons_in_tx(c,uid,reward,'tavern_chest_reward',note=name)
-                    if not ok:raise RuntimeError(err or 'chest reward')
-                    payload={'ok':True,'message':f'El cofre contenía {reward:,} KW.','reward':reward,'balance':bal}
-            else:payload={'ok':False,'message':'Acción no válida.'}
-            _tavern_replay_store(c,uid,endpoint,rid,payload);c.commit();c.close();return jsonify(payload)
-        except Exception:
-            try:c.rollback();c.close()
-            except Exception:pass
-            logging.exception('tavern shop');return jsonify(ok=False,message='La tienda está cerrada por inventario.'),500
-
-@app.route('/rpg/api/tavern/state',methods=['POST'])
-def tavern_state():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='Abre la Taberna desde KiwBot.'),403
-    uid=int(a['user']['id'])
-    with db_lock:
-        c=get_db(); st=c.execute('SELECT * FROM tavern_stats WHERE user_id=?',(uid,)).fetchone(); eff=c.execute('SELECT * FROM tavern_effects WHERE user_id=? AND expires_at>?',(uid,int(time.time()))).fetchone(); c.close()
-    return jsonify(ok=True,balance=get_kiwons(uid),stats=dict(st) if st else {},effect=dict(eff) if eff else None,rankings=_tavern_rankings())
-
-@app.route('/rpg/api/tavern/play',methods=['POST'])
-def tavern_play():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
-    uid=int(a['user']['id']); game=str(b.get('game','')); choice=str(b.get('choice',''))
-    try: bet=int(b.get('bet',0))
-    except (TypeError,ValueError): bet=0
-    if game not in ('slots','roulette','shell','dice','highcard'): return jsonify(ok=False,message='Juego no válido.'),400
-    if bet<TAVERN_MIN_BET or bet>TAVERN_MAX_BET: return jsonify(ok=False,message=f'La apuesta debe estar entre {TAVERN_MIN_BET:,} y {TAVERN_MAX_BET:,} KW.',balance=get_kiwons(uid)),400
-    if game=='roulette' and choice not in ('red','black','green'): return jsonify(ok=False,message='Apuesta de ruleta no válida.'),400
-    if game=='shell' and choice not in ('1','2','3'): return jsonify(ok=False,message='Copa no válida.'),400
-    if game=='dice' and choice not in ('1','2','3','4','5','6'): return jsonify(ok=False,message='Número de dado no válido.'),400
-    rid=_tavern_request_id(b)
-    if not rid:return jsonify(ok=False,message='Falta identificador seguro de la jugada.'),400
-
-    # El resultado nace en servidor. Débito + premio + estadísticas se liquidan en UNA transacción.
-    rng=random.SystemRandom(); payout=0; detail=''; jackpot=0; win_mult=0
-    if game=='slots':
-        symbols=['cat','fish','mug','gem','crown','paw']; weights=[32,25,20,12,7,4]; reels=rng.choices(symbols,weights=weights,k=3)
-        if len(set(reels))==1:
-            mult={'cat':6,'fish':8,'mug':10,'gem':15,'crown':25,'paw':50}[reels[0]]; win_mult=mult; payout=min(TAVERN_MAX_PAYOUT,bet*mult); jackpot=1 if mult>=50 else 0
-        elif len(set(reels))==2: payout=bet
-        detail=' '.join(reels)
-    elif game=='roulette':
-        n=rng.randrange(37); red={1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}; color='green' if n==0 else ('red' if n in red else 'black')
-        if choice in ('red','black') and choice==color:payout=bet*2
-        elif choice=='green' and n==0:payout=bet*36
-        detail=f'{n} · '+({'red':'Rojo','black':'Negro','green':'Cero'}[color])
-    elif game=='shell':
-        ball=str(rng.randrange(1,4)); payout=int(bet*2.85) if choice==ball else 0; detail=f'La bolita estaba en la copa {ball}.'
-    elif game=='dice':
-        d=rng.randint(1,6); payout=int(bet*5.70) if d==int(choice) else 0; detail=f'Salió {d}.'
-    else:
-        deck=_cards_new_deck(); pc=deck.pop(); dc=deck.pop(); pv=_cards_value([pc]); dv=_cards_value([dc]); payout=int(bet*1.92) if pv>dv else bet if pv==dv else 0; detail=f'Tú: {pc} · Malkor: {dc}'
-
-    profit=max(0,payout-bet); loss=bet if payout==0 else 0; now=int(time.time())
-    with db_lock:
-        c=get_db()
-        try:
-            replay=_tavern_replay_get(c,uid,'play',rid)
-            if replay:
-                c.close(); return jsonify(replay)
-            if rid and not _tavern_replay_claim(c,uid,'play',rid):
-                c.rollback(); c.close(); return jsonify(ok=False,message='Esta jugada ya se está procesando.'),409
-            ok,balance,err=change_kiwons_in_tx(c,uid,-bet,'tavern_'+game,note=f'Taberna de Malkor: {game}')
-            if not ok:
-                c.rollback(); c.close(); return jsonify(ok=False,message=err,balance=balance),400
-            if payout:
-                ok2,balance,err2=change_kiwons_in_tx(c,uid,payout,'tavern_prize',note=f'Premio {game}')
-                if not ok2: raise RuntimeError(err2 or 'No se pudo liquidar el premio')
-            c.execute("""INSERT INTO tavern_stats(user_id,games,wagered,won,lost,jackpots,biggest_win,updated_at)
-                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET games=tavern_stats.games+1,wagered=tavern_stats.wagered+excluded.wagered,won=tavern_stats.won+excluded.won,lost=tavern_stats.lost+excluded.lost,jackpots=tavern_stats.jackpots+excluded.jackpots,biggest_win=GREATEST(tavern_stats.biggest_win,excluded.biggest_win),updated_at=excluded.updated_at""",
-                (uid,1,bet,profit,loss,jackpot,profit,now))
-            payload={'ok':True,'balance':balance,'payout':payout,'profit':payout-bet,'detail':detail,'jackpot':bool(jackpot)}
-            _tavern_replay_store(c,uid,'play',rid,payload)
-            c.commit(); c.close()
-        except Exception:
-            try: c.rollback(); c.close()
-            except Exception: pass
-            logging.exception('Fallo al liquidar ronda de Taberna')
-            return jsonify(ok=False,message='La ronda no pudo liquidarse. No se aplicó un resultado parcial.'),500
-    if jackpot and payout: _tavern_announce_jackpot(uid,bet,payout,win_mult)
-    return jsonify(payload)
-
-@app.route('/rpg/api/tavern/blackjack',methods=['POST'])
-def tavern_blackjack():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
-    uid=int(a['user']['id']); action=str(b.get('action','start')).lower(); now=int(time.time()); rid=_tavern_request_id(b)
-    if action not in ('start','hit','stand','double'):
-        return jsonify(ok=False,message='Acción de Blackjack no válida.'),400
-    if not rid:
-        return jsonify(ok=False,message='Falta identificador seguro de la jugada.'),400
-    with db_lock:
-        c=get_db()
-        try:
-            replay=_tavern_replay_get(c,uid,'blackjack',rid)
-            if replay is not None:
-                c.close(); return jsonify(replay)
-            if not _tavern_replay_claim(c,uid,'blackjack',rid):
-                replay=_tavern_replay_get(c,uid,'blackjack',rid)
-                c.close()
-                if replay is not None:return jsonify(replay)
-                return jsonify(ok=False,message='La jugada ya se está procesando.'),409
-
-            if action=='start':
-                active=c.execute("SELECT user_id FROM tavern_blackjack WHERE user_id=? AND status='active' FOR UPDATE",(uid,)).fetchone()
-                if active:
-                    payload={'ok':False,'message':'Ya tienes una mano activa. Termínala antes de apostar otra vez.','balance':_tavern_balance_in_tx(c,uid)}
-                    _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload),409
-                try: bet=int(b.get('bet',0))
-                except (TypeError,ValueError): bet=0
-                if bet<TAVERN_MIN_BET or bet>TAVERN_MAX_BET:
-                    payload={'ok':False,'message':f'La apuesta debe estar entre {TAVERN_MIN_BET:,} y {TAVERN_MAX_BET:,} KW.','balance':_tavern_balance_in_tx(c,uid)}
-                    _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload),400
-                ok,bal,err=change_kiwons_in_tx(c,uid,-bet,'tavern_blackjack_bet',note='Blackjack')
-                if not ok:
-                    payload={'ok':False,'message':err,'balance':bal}; _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload),400
-                d=_cards_new_deck(); p=[d.pop(),d.pop()]; dealer=[d.pop(),d.pop()]
-                c.execute("""INSERT INTO tavern_blackjack(user_id,wager,player_cards,dealer_cards,deck_cards,status,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET wager=excluded.wager,player_cards=excluded.player_cards,dealer_cards=excluded.dealer_cards,deck_cards=excluded.deck_cards,status='active',created_at=excluded.created_at""",(uid,bet,json.dumps(p),json.dumps(dealer),json.dumps(d),'active',now))
-            row=c.execute("SELECT * FROM tavern_blackjack WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
-            if not row or row['status']!='active':
-                payload={'ok':False,'message':'Inicia una mano nueva.'}; _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload),409
-            p=json.loads(row['player_cards']); dealer=json.loads(row['dealer_cards']); deck=json.loads(row.get('deck_cards') or '[]'); bet=int(row['wager'])
-            if action=='double':
-                if len(p)!=2:
-                    payload={'ok':False,'message':'Solo puedes doblar con las dos cartas iniciales.'}; _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload),409
-                ok2,bal2,err2=change_kiwons_in_tx(c,uid,-bet,'tavern_blackjack_double',note='Blackjack doblar')
-                if not ok2:
-                    payload={'ok':False,'message':err2,'balance':bal2}; _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload),400
-                bet*=2; p.append(deck.pop() if deck else _cards_new_deck()[0]); c.execute('UPDATE tavern_blackjack SET wager=? WHERE user_id=?',(bet,uid))
-            elif action=='hit':
-                p.append(deck.pop() if deck else _cards_new_deck()[0])
-            pv=_cards_value(p); finished=False; payout=0; result=''
-            if pv>21: finished=True; result='Te pasaste. Malkor gana.'
-            elif action in ('stand','double') or (action=='start' and pv==21):
-                finished=True
-                while _cards_value(dealer)<17: dealer.append(deck.pop() if deck else _cards_new_deck()[0])
-                dv=_cards_value(dealer); player_natural=(pv==21 and len(p)==2); dealer_natural=(_cards_value(dealer)==21 and len(dealer)==2)
-                if player_natural and dealer_natural: payout=bet; result='Empate: ambos tienen Blackjack.'
-                elif player_natural: payout=int(bet*2.5); result='BLACKJACK.'
-                elif dealer_natural: result='Blackjack de la casa.'
-                elif dv>21 or pv>dv:payout=bet*2; result='Ganaste la mano.'
-                elif pv==dv:payout=bet; result='Empate.'
-                else:result='Malkor gana.'
-            if finished:
-                c.execute("UPDATE tavern_blackjack SET status='done',player_cards=?,dealer_cards=?,deck_cards=? WHERE user_id=?",(json.dumps(p),json.dumps(dealer),json.dumps(deck),uid))
-                if payout:
-                    okp,balance,errp=change_kiwons_in_tx(c,uid,payout,'tavern_blackjack_prize',note='Blackjack')
-                    if not okp: raise RuntimeError(errp or 'No se pudo liquidar el premio.')
-                profit=max(0,payout-bet); loss=bet if payout==0 else 0
-                c.execute("""INSERT INTO tavern_stats(user_id,games,wagered,won,lost,jackpots,biggest_win,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET games=tavern_stats.games+1,wagered=tavern_stats.wagered+excluded.wagered,won=tavern_stats.won+excluded.won,lost=tavern_stats.lost+excluded.lost,biggest_win=GREATEST(tavern_stats.biggest_win,excluded.biggest_win),updated_at=excluded.updated_at""",(uid,1,bet,profit,loss,0,profit,now))
-            else:
-                c.execute("UPDATE tavern_blackjack SET player_cards=?,deck_cards=? WHERE user_id=?",(json.dumps(p),json.dumps(deck),uid))
-            payload={'ok':True,'player':p,'dealer':dealer if finished else [dealer[0],'BACK'],'player_value':pv,'dealer_value':_cards_value(dealer) if finished else None,'finished':finished,'payout':payout,'result':result,'balance':_tavern_balance_in_tx(c,uid)}
-            _tavern_replay_store(c,uid,'blackjack',rid,payload); c.commit(); c.close(); return jsonify(payload)
-        except Exception:
-            try:c.rollback(); c.close()
-            except Exception:pass
-            logging.exception('Fallo al liquidar Blackjack de Taberna')
-            return jsonify(ok=False,message='La mano no pudo liquidarse. No se aplicó un resultado parcial.'),500
-
-@app.route('/rpg/api/tavern/drink',methods=['POST'])
-def tavern_drink():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
-    uid=int(a['user']['id']); drink=str(b.get('drink','beer')); rid=_tavern_request_id(b)
-    if not rid:return jsonify(ok=False,message='Petición sin identificador seguro.'),400
-    menu={
-        'beer':('Cerveza de Malkor',500,'def','Piel de barril · +8% DEF',1800),
-        'wine':('Vino Élfico',1200,'exp','Inspiración élfica · +10% EXP',1800),
-        'whisky':('Whisky Berserker',1800,'atk','Furia berserker · +8% ATK',1500),
-        'gambler':('Elixir del Tahúr',2200,'pve','Fortuna del tahúr · +5% recompensas PvE',1200),
-        'abyss':('Absenta del Abismo',3000,'tipsy','Visión del Abismo · efecto caótico cosmético',900),
-        'destiny':('Copa del Destino',4200,'destiny','Destino marcado · bonificación PvE especial',900),
-    }
-    if drink not in menu:return jsonify(ok=False,message='Copa no válida.'),400
-    name,cost,key,label,dur=menu[drink]; now=int(time.time())
-    with db_lock:
-        c=get_db()
-        try:
-            replay=_tavern_replay_get(c,uid,'drink',rid)
-            if replay is not None:c.close(); return jsonify(replay)
-            if not _tavern_replay_claim(c,uid,'drink',rid):c.rollback(); c.close(); return jsonify(ok=False,message='Esa copa ya se está sirviendo.'),409
-            old=c.execute('SELECT * FROM tavern_effects WHERE user_id=? FOR UPDATE',(uid,)).fetchone()
-            intox=int(old['intoxication']) if old and now-int(old['updated_at'])<3600 else 0
-            if intox>=4:
-                payload={'ok':False,'message':'Malkor te quita el vaso: «Ya estás intentando apostar contra una silla.»'}; _tavern_replay_store(c,uid,'drink',rid,payload); c.commit(); c.close(); return jsonify(payload),429
-            ok,bal,err=change_kiwons_in_tx(c,uid,-cost,'tavern_drink',note=name)
-            if not ok:c.rollback(); c.close(); return jsonify(ok=False,message=err,balance=bal),400
-            exp=now+dur
-            c.execute("""INSERT INTO tavern_effects(user_id,effect_key,label,expires_at,intoxication,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET effect_key=excluded.effect_key,label=excluded.label,expires_at=excluded.expires_at,intoxication=excluded.intoxication,updated_at=excluded.updated_at""",(uid,key,label,exp,intox+1,now))
-            payload={'ok':True,'balance':bal,'drink':name,'effect':label,'duration':dur,'intoxication':intox+1}; _tavern_replay_store(c,uid,'drink',rid,payload); c.commit(); c.close(); return jsonify(payload)
-        except Exception:
-            try:c.rollback(); c.close()
-            except Exception:pass
-            logging.exception('Fallo sirviendo bebida de Taberna'); return jsonify(ok=False,message='La bebida no pudo servirse; no se aplicó un cobro parcial.'),500
-
-@app.route('/rpg/api/tavern/memory',methods=['POST'])
-def tavern_memory():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
-    uid=int(a['user']['id']); action=str(b.get('action','start')); now=time.time(); rng=random.SystemRandom(); rid=_tavern_request_id(b)
-    if not rid:return jsonify(ok=False,message='Petición sin identificador seguro.'),400
-    endpoint='memory:'+action
-    with db_lock:
-        c=get_db()
-        try:
-            replay=_tavern_replay_get(c,uid,endpoint,rid)
-            if replay is not None:c.close(); return jsonify(replay)
-            if not _tavern_replay_claim(c,uid,endpoint,rid):c.rollback(); c.close(); return jsonify(ok=False,message='La jugada ya se está procesando.'),409
-            if action=='start':
-                fee=150; old=c.execute("SELECT * FROM tavern_memory_sessions WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
-                if old and old['status']=='active' and now-float(old['updated_at'])<300:
-                    payload={'ok':False,'message':'Ya tienes una secuencia activa.'}; _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(payload),409
-                ok,bal,err=change_kiwons_in_tx(c,uid,-fee,'tavern_memory_entry',note='Entrada Memory')
-                if not ok:c.rollback(); c.close(); return jsonify(ok=False,message=err,balance=bal),400
-                seq=[rng.randrange(4)]
-                c.execute("""INSERT INTO tavern_memory_sessions(user_id,sequence,round_no,input_pos,status,created_at,updated_at,last_input_at,entry_fee) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET sequence=excluded.sequence,round_no=1,input_pos=0,status='active',created_at=excluded.created_at,updated_at=excluded.updated_at,last_input_at=0,entry_fee=excluded.entry_fee""",(uid,json.dumps(seq),1,0,'active',int(now),int(now),0,fee))
-                payload={'ok':True,'sequence':seq,'round':1,'entry_fee':fee,'balance':bal}; _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(payload)
-            if action!='input':c.rollback(); c.close(); return jsonify(ok=False,message='Acción inválida.'),400
-            row=c.execute("SELECT * FROM tavern_memory_sessions WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
-            if not row or row['status']!='active' or now-float(row['updated_at'])>300:
-                if row:c.execute("UPDATE tavern_memory_sessions SET status='expired' WHERE user_id=?",(uid,))
-                payload={'ok':False,'message':'La partida expiró. Inicia otra.'}; _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(payload),409
-            last=float(row.get('last_input_at') or 0)
-            if last and now-last<0.075:
-                c.rollback(); c.close(); return jsonify(ok=False,message='Entrada demasiado rápida.'),429
-            seq=json.loads(row['sequence']); pos=int(row['input_pos']); rnd=int(row['round_no'])
-            try:pad=int(b.get('pad',-1))
-            except Exception:pad=-1
-            if pad not in (0,1,2,3):c.rollback(); c.close(); return jsonify(ok=False,message='Panel inválido.'),400
-            if pos<0 or pos>=len(seq):c.rollback(); c.close(); return jsonify(ok=False,message='Estado de secuencia inválido.'),409
-            if pad!=int(seq[pos]):
-                score=max(0,rnd-1); c.execute("UPDATE tavern_memory_sessions SET status='lost',updated_at=?,last_input_at=? WHERE user_id=?",(int(now),now,uid)); st=c.execute("SELECT memory_best FROM tavern_stats WHERE user_id=?",(uid,)).fetchone(); old=int(st['memory_best']) if st else 0
-                gain=max(0,score-old); reward=min(1500,gain*55)
-                if score>old:c.execute("""INSERT INTO tavern_stats(user_id,memory_best,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET memory_best=GREATEST(tavern_stats.memory_best,excluded.memory_best),updated_at=excluded.updated_at""",(uid,score,int(now)))
-                bal=None
-                if reward:
-                    okr,bal,er=change_kiwons_in_tx(c,uid,reward,'tavern_memory_reward',note=f'Memory mejora +{gain} / récord {score}')
-                    if not okr:raise RuntimeError(er or 'No se pudo liquidar Memory.')
-                payload={'ok':True,'lost':True,'score':score,'new_record':score>old,'reward':reward,'balance':bal}; _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(payload)
-            pos+=1
-            if pos>=len(seq):
-                seq.append(rng.randrange(4)); rnd+=1; c.execute("UPDATE tavern_memory_sessions SET sequence=?,round_no=?,input_pos=0,updated_at=?,last_input_at=? WHERE user_id=?",(json.dumps(seq),rnd,int(now),now,uid)); payload={'ok':True,'round_complete':True,'sequence':seq,'round':rnd}
-            else:
-                c.execute("UPDATE tavern_memory_sessions SET input_pos=?,updated_at=?,last_input_at=? WHERE user_id=?",(pos,int(now),now,uid)); payload={'ok':True,'accepted':True,'position':pos,'round':rnd}
-            _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(payload)
-        except Exception:
-            try:c.rollback(); c.close()
-            except Exception:pass
-            logging.exception('Fallo en Memory de Taberna'); return jsonify(ok=False,message='Memory no pudo procesar la jugada; no se aplicó un resultado parcial.'),500
-
-@app.route('/rpg/api/tavern/arcade',methods=['POST'])
-def tavern_arcade():
-    # Endpoint legado cerrado: Memory y Cat.io liquidan exclusivamente sus sesiones autoritativas.
-    return jsonify(ok=False,message='Este endpoint ya no acepta puntuaciones del cliente.'),410
-
-def _flight_multiplier(elapsed):
-    # Curva suave y predecible: el servidor es la única fuente de verdad.
-    return max(1.0, min(50.0, round(math.exp(max(0.0, float(elapsed))*0.115), 2)))
-
-def _flight_crash_x(rng):
-    # Aproximadamente 95% de retorno para cualquier cash-out fijo, con tope x50.
-    if rng.random() < 0.05:
-        return 1.0
-    u=max(1e-12, rng.random())
-    return min(50.0, max(1.01, round(1.0/u, 2)))
-
-@app.route('/rpg/api/tavern/flight',methods=['POST'])
-def tavern_flight():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='Sesión inválida.'),403
-    uid=int(a['user']['id']); action=str(b.get('action','state')).lower(); now=time.time(); rng=random.SystemRandom(); rid=_tavern_request_id(b)
-    endpoint='flight:'+action
-    if action in ('start','cashout') and not rid:return jsonify(ok=False,message='Falta identificador seguro de la operación.'),400
-    if action=='start':
-        try: bet=int(b.get('bet',0))
-        except Exception:return jsonify(ok=False,message='Apuesta inválida.'),400
-        if bet<TAVERN_MIN_BET or bet>TAVERN_MAX_BET:return jsonify(ok=False,message=f'Apuesta entre {TAVERN_MIN_BET:,} y {TAVERN_MAX_BET:,} KW.'),400
-        with db_lock:
-            c=get_db()
-            try:
-                replay=_tavern_replay_get(c,uid,endpoint,rid)
-                if replay is not None: c.close(); return jsonify(**replay)
-                if rid and not _tavern_replay_claim(c,uid,endpoint,rid):
-                    c.rollback(); c.close(); return jsonify(ok=False,message='Petición ya en proceso.'),409
-                active=c.execute("SELECT 1 FROM tavern_flight_sessions WHERE user_id=? AND status='active' FOR UPDATE",(uid,)).fetchone()
-                if active: c.rollback(); c.close(); return jsonify(ok=False,message='Ya tienes un vuelo activo.'),409
-                ok,bal,err=change_kiwons_in_tx(c,uid,-bet,'tavern_flight_bet',note='Vuelo de Malkor')
-                if not ok: c.rollback(); c.close(); return jsonify(ok=False,message=err,balance=bal),400
-                crash=_flight_crash_x(rng)
-                c.execute("""INSERT INTO tavern_flight_sessions(user_id,wager,crash_x,status,started_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET wager=excluded.wager,crash_x=excluded.crash_x,status='active',started_at=excluded.started_at,updated_at=excluded.updated_at""",(uid,bet,crash,'active',now,int(now)))
-                c.execute("""INSERT INTO tavern_flight_stats(user_id,flights,wagered,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET flights=tavern_flight_stats.flights+1,wagered=tavern_flight_stats.wagered+excluded.wagered,updated_at=excluded.updated_at""",(uid,1,bet,int(now)))
-                payload=dict(ok=True,started=True,balance=bal,server_time=now); _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(**payload)
-            except Exception:
-                try:c.rollback();c.close()
-                except Exception:pass
-                raise
-    with db_lock:
-        c=get_db()
-        if action=='cashout':
-            replay=_tavern_replay_get(c,uid,endpoint,rid)
-            if replay is not None: c.close(); return jsonify(**replay)
-            if rid and not _tavern_replay_claim(c,uid,endpoint,rid): c.rollback(); c.close(); return jsonify(ok=False,message='Petición ya en proceso.'),409
-        flight_sql = "SELECT * FROM tavern_flight_sessions WHERE user_id=? AND status='active'"
-        if action == 'cashout':
-            flight_sql += " FOR UPDATE"
-        row=c.execute(flight_sql,(uid,)).fetchone()
-        if not row:c.rollback(); c.close(); return jsonify(ok=False,message='No hay vuelo activo.'),409
-        elapsed=max(0.0,now-float(row['started_at'])); mult=_flight_multiplier(elapsed); crash=float(row['crash_x']); bet=int(row['wager'])
-        crashed=mult>=crash or elapsed>35
-        if action=='cashout' and not crashed:
-            payout=min(TAVERN_MAX_PAYOUT,int(bet*mult)); profit=payout-bet; dist=int(elapsed*78*mult); c.execute("UPDATE tavern_flight_sessions SET status='landed',updated_at=? WHERE user_id=?",(int(now),uid))
-            c.execute("""INSERT INTO tavern_flight_stats(user_id,landed,best_x,best_distance,biggest_prize,current_streak,best_streak,won,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET landed=tavern_flight_stats.landed+1,best_x=GREATEST(tavern_flight_stats.best_x,excluded.best_x),best_distance=GREATEST(tavern_flight_stats.best_distance,excluded.best_distance),biggest_prize=GREATEST(tavern_flight_stats.biggest_prize,excluded.biggest_prize),current_streak=tavern_flight_stats.current_streak+1,best_streak=GREATEST(tavern_flight_stats.best_streak,tavern_flight_stats.current_streak+1),won=tavern_flight_stats.won+excluded.won,updated_at=excluded.updated_at""",(uid,1,mult,dist,payout,1,1,max(0,profit),int(now)))
-            okp,balance,er=change_kiwons_in_tx(c,uid,payout,'tavern_flight_prize',note=f'Vuelo x{mult:.2f}')
-            if not okp: c.rollback(); c.close(); return jsonify(ok=False,message=er or 'No se pudo liquidar el vuelo.'),500
-            payload=dict(ok=True,landed=True,multiplier=mult,distance=dist,payout=payout,profit=profit,balance=balance); _tavern_replay_store(c,uid,endpoint,rid,payload); c.commit(); c.close(); return jsonify(**payload)
-        if crashed:
-            c.execute("UPDATE tavern_flight_sessions SET status='crashed',updated_at=? WHERE user_id=?",(int(now),uid)); c.execute("UPDATE tavern_flight_stats SET current_streak=0,lost=lost+?,updated_at=? WHERE user_id=?",(bet,int(now),uid))
-            payload=dict(ok=True,crashed=True,multiplier=crash,distance=int(elapsed*78*max(1,crash)),profit=-bet,balance=_tavern_balance_in_tx(c,uid))
-            if action=='cashout': _tavern_replay_store(c,uid,endpoint,rid,payload)
-            c.commit(); c.close(); return jsonify(**payload)
-        c.rollback(); c.close()
-    return jsonify(ok=True,active=True,multiplier=mult,distance=int(elapsed*78*mult),altitude=int(120+elapsed*36*mult),server_time=now)
-
-CAT_SKINS = {
-    'classic': {'name':'Clásico','price':0},
-    'tuxedo': {'name':'Tuxedo','price':3500},
-    'tabby': {'name':'Atigrado','price':4500},
-    'siamese': {'name':'Siamés','price':6500},
-    'calico': {'name':'Calicó','price':8500},
-    'knight': {'name':'Caballero','price':14000},
-    'pirate': {'name':'Pirata','price':16000},
-    'ninja': {'name':'Ninja','price':19000},
-    'mage': {'name':'Mago','price':22000},
-    'royal': {'name':'Real','price':30000},
-}
-CAT_COLORS = {
-    'ginger': {'name':'Ámbar','price':0,'hex':'#c97b3d'},
-    'coal': {'name':'Carbón','price':1800,'hex':'#30343b'},
-    'snow': {'name':'Nieve','price':2200,'hex':'#e7e3d8'},
-    'cream': {'name':'Crema','price':2600,'hex':'#cdb78d'},
-    'smoke': {'name':'Humo','price':3200,'hex':'#777d86'},
-    'cocoa': {'name':'Cacao','price':3600,'hex':'#6e4633'},
-    'blue': {'name':'Azul ruso','price':5200,'hex':'#647487'},
-}
-
-def _cat_foods(rng, n=32):
-    return [{'id':i,'x':round(rng.uniform(4,96),2),'y':round(rng.uniform(6,94),2),'v':25} for i in range(n)]
-
-CAT_NPC_NAMES = ('Bigotes','Michi','Pelusa','Churro','Salem','Milo','Nube','Calcetín','Manchas','Oreo','Félix','Loki')
-CAT_NPC_PERSONALITIES = ('wander','hunter','shy','greedy')
-
-def _cat_seed_npcs(c, now, rng, target=10):
-    rows=c.execute('SELECT npc_id FROM tavern_cat_npcs').fetchall()
-    have={int(r['npc_id']) for r in rows}
-    for i,name in enumerate(CAT_NPC_NAMES[:target],1):
-        nid=-i
-        if nid in have: continue
-        score=rng.randrange(0,1300); size=max(1,min(6,1+score/1000.0))
-        skin=('classic','tuxedo','tabby','siamese','calico')[i%5]; color=('ginger','coal','snow','cream','smoke','cocoa','blue')[i%7]
-        c.execute('INSERT INTO tavern_cat_npcs(npc_id,display_name,x,y,score,size,skin_key,color_key,personality,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                  (nid,name,rng.uniform(7,93),rng.uniform(8,92),score,size,skin,color,CAT_NPC_PERSONALITIES[i%4],now))
-
-def _cat_move_npcs(c, now, rng, player_x, player_y, player_size):
-    _cat_seed_npcs(c,now,rng)
-    rows=c.execute('SELECT * FROM tavern_cat_npcs FOR UPDATE').fetchall(); out=[]
-    for r in rows:
-        x=float(r['x']); y=float(r['y']); size=float(r['size']); personality=str(r['personality'])
-        dx=rng.uniform(-1,1); dy=rng.uniform(-1,1)
-        px=player_x-x; py=player_y-y; d=(px*px+py*py)**.5 or 1
-        if personality=='hunter' and size>player_size*1.12: dx,dy=px/d,py/d
-        elif personality=='shy' and player_size>size*.95: dx,dy=-px/d,-py/d
-        elif personality=='greedy': dx+=rng.uniform(-.4,.4); dy+=rng.uniform(-.4,.4)
-        m=(dx*dx+dy*dy)**.5 or 1; sp=.55/(max(1,size)**.25)
-        x=max(2,min(98,x+dx/m*sp)); y=max(3,min(97,y+dy/m*sp))
-        c.execute('UPDATE tavern_cat_npcs SET x=?,y=?,dir_x=?,dir_y=?,updated_at=? WHERE npc_id=?',(x,y,dx/m,dy/m,now,int(r['npc_id'])))
-        dct=dict(r); dct.update(x=x,y=y,dir_x=dx/m,dir_y=dy/m,is_npc=True); out.append(dct)
-    return out
-
-def _cat_try_cosmetic_drop(c, uid, rng, now):
-    # Muy raro y sin KW: premio cosmético directo, máximo uno por evento de comida.
-    if rng.random() >= .003: return None
-    owned={r['cosmetic_key'] for r in c.execute('SELECT cosmetic_key FROM tavern_cat_cosmetics WHERE user_id=?',(uid,)).fetchall()}
-    pool=[k for k in list(CAT_COLORS)+list(CAT_SKINS) if k not in owned and k not in ('classic','ginger')]
-    if not pool: return None
-    key=rng.choice(pool)
-    c.execute('INSERT INTO tavern_cat_cosmetics(user_id,cosmetic_key,purchased_at) VALUES(?,?,?) ON CONFLICT(user_id,cosmetic_key) DO NOTHING',(uid,key,now))
-    return {'key':key,'name':(CAT_SKINS.get(key) or CAT_COLORS.get(key))['name']}
-
-def _cat_catalog(uid, c):
-    owned={r['cosmetic_key'] for r in c.execute('SELECT cosmetic_key FROM tavern_cat_cosmetics WHERE user_id=?',(uid,)).fetchall()}
-    owned.update(('classic','ginger'))
-    load=c.execute('SELECT skin_key,color_key FROM tavern_cat_loadout WHERE user_id=?',(uid,)).fetchone()
-    skin=(load['skin_key'] if load else 'classic'); color=(load['color_key'] if load else 'ginger')
-    return {'skins':[dict(key=k,owned=k in owned,**v) for k,v in CAT_SKINS.items()], 'colors':[dict(key=k,owned=k in owned,**v) for k,v in CAT_COLORS.items()], 'equipped':{'skin':skin,'color':color}}
-
-@app.route('/rpg/api/tavern/cat',methods=['POST'])
-def tavern_cat_state():
-    b=request.get_json(silent=True) or {}; a=_tavern_auth(b)
-    if not a:return jsonify(ok=False,message='Sesión inválida.'),403
-    uid=int(a['user']['id']); u=a['user']; now=int(time.time()); action=str(b.get('action','tick')).lower(); rng=random.SystemRandom()
-    name=('@'+u.get('username')) if u.get('username') else (u.get('first_name') or 'Michi')
-    if action in ('catalog','buy','equip'):
-        with db_lock:
-            c=get_db()
-            if action=='buy':
-                key=str(b.get('key','')); item=CAT_SKINS.get(key) or CAT_COLORS.get(key)
-                if not item: c.close(); return jsonify(ok=False,message='Cosmético inválido.'),400
-                own=c.execute('SELECT 1 FROM tavern_cat_cosmetics WHERE user_id=? AND cosmetic_key=? FOR UPDATE',(uid,key)).fetchone()
-                if own:
-                    c.rollback(); cat=_cat_catalog(uid,c); c.close(); return jsonify(ok=True,catalog=cat,balance=get_kiwons(uid),already_owned=True)
-                price=int(item['price'])
-                if price>0:
-                    ok,newbal,err=change_kiwons_in_tx(c,uid,-price,'cat_cosmetic_buy',note=f'Cat.io cosmético {key}')
-                    if not ok:
-                        c.rollback(); c.close(); return jsonify(ok=False,message=err or 'No tienes suficientes KW.'),400
-                c.execute('INSERT INTO tavern_cat_cosmetics(user_id,cosmetic_key,purchased_at) VALUES(?,?,?)',(uid,key,now)); c.commit()
-            elif action=='equip':
-                skin=str(b.get('skin','classic')); color=str(b.get('color','ginger'))
-                if skin not in CAT_SKINS or color not in CAT_COLORS: c.close(); return jsonify(ok=False,message='Selección inválida.'),400
-                owned={r['cosmetic_key'] for r in c.execute('SELECT cosmetic_key FROM tavern_cat_cosmetics WHERE user_id=?',(uid,)).fetchall()}; owned.update(('classic','ginger'))
-                if skin not in owned or color not in owned: c.close(); return jsonify(ok=False,message='Ese cosmético no es tuyo.'),403
-                c.execute("""INSERT INTO tavern_cat_loadout(user_id,skin_key,color_key,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET skin_key=excluded.skin_key,color_key=excluded.color_key,updated_at=excluded.updated_at""",(uid,skin,color,now)); c.commit()
-            cat=_cat_catalog(uid,c); c.close()
-        return jsonify(ok=True,catalog=cat,balance=get_kiwons(uid))
-    if action=='join':
-        foods=_cat_foods(rng); x=rng.uniform(12,88); y=rng.uniform(14,86)
-        with db_lock:
-            c=get_db(); c.execute("""INSERT INTO tavern_cat_sessions(user_id,x,y,score,size,foods,status,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET x=excluded.x,y=excluded.y,score=0,size=1,foods=excluded.foods,status='active',started_at=excluded.started_at,updated_at=excluded.updated_at""",(uid,x,y,0,1,json.dumps(foods),'active',now,now)); c.execute("""INSERT INTO tavern_cat_players(user_id,display_name,x,y,score,size,dir_x,dir_y,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET display_name=excluded.display_name,x=excluded.x,y=excluded.y,score=0,size=1,dir_x=0,dir_y=0,updated_at=excluded.updated_at""",(uid,name,x,y,0,1,0,0,now)); c.commit(); cat=_cat_catalog(uid,c); c.close()
-        return jsonify(ok=True,x=x,y=y,score=0,size=1,foods=foods,catalog=cat)
-    if action=='finish':
-        with db_lock:
-            c=get_db(); ses=c.execute("SELECT score FROM tavern_cat_sessions WHERE user_id=? AND status='active' FOR UPDATE",(uid,)).fetchone()
-            if not ses: c.close(); return jsonify(ok=False,message='No hay partida activa.'),409
-            score=int(ses['score']); c.execute("UPDATE tavern_cat_sessions SET status='finished',updated_at=? WHERE user_id=?",(now,uid)); st=c.execute('SELECT cat_best FROM tavern_stats WHERE user_id=?',(uid,)).fetchone(); old=int(st['cat_best']) if st else 0; new=score>old; reward=min(2500,score//20) if new else 0
-            if new: c.execute("""INSERT INTO tavern_stats(user_id,cat_best,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET cat_best=GREATEST(tavern_stats.cat_best,excluded.cat_best),updated_at=excluded.updated_at""",(uid,score,now))
-            balance=_tavern_balance_in_tx(c,uid)
-            if reward:
-                okp,balance,err=change_kiwons_in_tx(c,uid,reward,'tavern_cat_reward',note=f'Cat.io récord {score}')
-                if not okp: c.rollback(); c.close(); return jsonify(ok=False,message=err or 'No se pudo liquidar Cat.io.'),500
-            c.commit(); c.close()
-        return jsonify(ok=True,score=score,new_record=new,reward=reward,balance=balance)
-    # tick: el cliente SOLO manda dirección. Posición, comida, colisiones y puntos son del servidor.
-    try: dx=float(b.get('dx',0)); dy=float(b.get('dy',0))
-    except Exception: return jsonify(ok=False,message='Control inválido.'),400
-    mag=(dx*dx+dy*dy)**0.5
-    if mag>1 and mag>0: dx/=mag; dy/=mag
-    with db_lock:
-        c=get_db(); ses=c.execute("SELECT * FROM tavern_cat_sessions WHERE user_id=? AND status='active' FOR UPDATE",(uid,)).fetchone()
-        if not ses: c.close(); return jsonify(ok=False,message='Entra a la arena primero.',need_join=True),409
-        prev_t=int(ses['updated_at']); dt=max(.08,min(1.0,now-prev_t if now>prev_t else .12)); x=float(ses['x']); y=float(ses['y']); score=int(ses['score']); size=float(ses['size']); speed=8.5/(max(1,size)**.35)
-        x=max(2,min(98,x+dx*speed*dt)); y=max(3,min(97,y+dy*speed*dt)); foods=json.loads(ses['foods'] or '[]'); eaten=0; cosmetic_drop=None
-        for f in foods:
-            if ((float(f['x'])-x)**2+(float(f['y'])-y)**2)**.5 < 2.3+size*.32:
-                score+=int(f.get('v',25)); eaten+=1; f['x']=round(rng.uniform(4,96),2); f['y']=round(rng.uniform(6,94),2)
-                if cosmetic_drop is None: cosmetic_drop=_cat_try_cosmetic_drop(c,uid,rng,now)
-        # Colisiones PvP autoritativas tipo Snake.io:
-        # 1) el grande puede devorar al pequeño al alcanzarlo;
-        # 2) el pequeño puede derribar a uno grande si impacta SU cabeza mientras el grande avanza
-        #    hacia él. La geometría/direcciones las valida el servidor, no el cliente.
-        victims=[]; headshot_victims=[]; player_dead=False; death_reason=''
-        nearby=c.execute("SELECT user_id,x,y,score,size,dir_x,dir_y FROM tavern_cat_players WHERE user_id<>? AND updated_at>=? FOR UPDATE",(uid,now-3)).fetchall()
-        for o in nearby:
-            oid=int(o['user_id']); ox=float(o['x']); oy=float(o['y']); osize=float(o['size']); dist=((ox-x)**2+(oy-y)**2)**.5
-            if dist > 2.15+max(size,osize)*.36: continue
-            odx=float(o.get('dir_x',0) or 0); ody=float(o.get('dir_y',0) or 0); om=(odx*odx+ody*ody)**.5
-            pm=(dx*dx+dy*dy)**.5
-            # Vector desde el rival hacia el jugador. Si coincide con la dirección del rival,
-            # su cabeza viene hacia nosotros: el pequeño puede hacer el contraataque.
-            rvx=(x-ox)/(dist or 1); rvy=(y-oy)/(dist or 1)
-            opponent_head_into_me = om>.35 and (odx/om*rvx + ody/om*rvy) > .72
-            my_head_into_opponent = pm>.72 and (dx*((ox-x)/(dist or 1)) + dy*((oy-y)/(dist or 1))) > .78
-            if size < osize*.90 and opponent_head_into_me:
-                gain=min(1100,160+int(o['score'])*18//100); score+=gain; victims.append(oid); headshot_victims.append(oid)
-                c.execute("UPDATE tavern_cat_sessions SET status='headshot',updated_at=? WHERE user_id=? AND status='active'",(now,oid))
-                c.execute("DELETE FROM tavern_cat_players WHERE user_id=?",(oid,))
-            elif size>=osize*1.18:
-                gain=min(900,120+int(o['score'])*15//100); score+=gain; victims.append(oid)
-                c.execute("UPDATE tavern_cat_sessions SET status='eaten',updated_at=? WHERE user_id=? AND status='active'",(now,oid))
-                c.execute("DELETE FROM tavern_cat_players WHERE user_id=?",(oid,))
-            elif osize>=size*1.18 and my_head_into_opponent:
-                # Entrar de cabeza contra un gato claramente mayor es peligroso: gana el grande.
-                player_dead=True; death_reason='eaten'; break
-        if player_dead:
-            c.execute("UPDATE tavern_cat_sessions SET status='eaten',updated_at=? WHERE user_id=?",(now,uid))
-            c.execute("DELETE FROM tavern_cat_players WHERE user_id=?",(uid,))
-            c.commit(); c.close()
-            return jsonify(ok=True,dead=True,death_reason=death_reason,score=score,need_join=True,players=[])
-        npcs=_cat_move_npcs(c,now,rng,x,y,size); npc_victims=[]; npc_headshots=[]
-        for n in npcs:
-            ns=float(n['size']); nx=float(n['x']); ny=float(n['y']); dist=((nx-x)**2+(ny-y)**2)**.5
-            if dist > 2.15+max(size,ns)*.36: continue
-            ndx=float(n.get('dir_x',0) or 0); ndy=float(n.get('dir_y',0) or 0); nm=(ndx*ndx+ndy*ndy)**.5
-            rvx=(x-nx)/(dist or 1); rvy=(y-ny)/(dist or 1)
-            npc_head_into_me = nm>.35 and (ndx/nm*rvx + ndy/nm*rvy) > .72
-            my_head_into_npc = mag>.72 and (dx*((nx-x)/(dist or 1)) + dy*((ny-y)/(dist or 1))) > .78
-            defeated=False
-            if size < ns*.90 and npc_head_into_me:
-                gain=min(850,120+int(n['score'])*15//100); score+=gain; defeated=True; npc_headshots.append(int(n['npc_id']))
-            elif size>=ns*1.18:
-                gain=min(700,90+int(n['score'])*12//100); score+=gain; defeated=True
-            elif ns>=size*1.18 and my_head_into_npc:
-                c.execute("UPDATE tavern_cat_sessions SET status='eaten',updated_at=? WHERE user_id=?",(now,uid))
-                c.execute("DELETE FROM tavern_cat_players WHERE user_id=?",(uid,))
-                c.commit(); c.close()
-                return jsonify(ok=True,dead=True,death_reason='npc',score=score,need_join=True,players=[])
-            if defeated:
-                npc_victims.append(int(n['npc_id']))
-                # Renace lejos, con tamaño moderado; evita farmear el mismo NPC en el mismo punto.
-                nscore=rng.randrange(0,700); nsize=max(1,1+nscore/1000.0)
-                c.execute('UPDATE tavern_cat_npcs SET x=?,y=?,score=?,size=?,dir_x=0,dir_y=0,updated_at=? WHERE npc_id=?',(rng.uniform(8,92),rng.uniform(8,92),nscore,nsize,now,int(n['npc_id'])))
-        if victims:
-            c.execute("""INSERT INTO tavern_stats(user_id,cat_eaten,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET cat_eaten=tavern_stats.cat_eaten+excluded.cat_eaten,updated_at=excluded.updated_at""",(uid,len(victims),now))
-        size=max(1,min(6,1+score/1000.0)); c.execute("UPDATE tavern_cat_sessions SET x=?,y=?,score=?,size=?,foods=?,dir_x=?,dir_y=?,updated_at=? WHERE user_id=?",(x,y,score,size,json.dumps(foods),dx,dy,now,uid)); c.execute("""INSERT INTO tavern_cat_players(user_id,display_name,x,y,score,size,dir_x,dir_y,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET display_name=excluded.display_name,x=excluded.x,y=excluded.y,score=excluded.score,size=excluded.size,dir_x=excluded.dir_x,dir_y=excluded.dir_y,updated_at=excluded.updated_at""",(uid,name,x,y,score,size,dx,dy,now)); c.execute('DELETE FROM tavern_cat_players WHERE updated_at<?',(now-15,)); rows=c.execute("""SELECT p.user_id,p.display_name,p.x,p.y,p.score,p.size,COALESCE(l.skin_key,'classic') skin_key,COALESCE(l.color_key,'ginger') color_key FROM tavern_cat_players p LEFT JOIN tavern_cat_loadout l ON l.user_id=p.user_id ORDER BY p.score DESC LIMIT 20""").fetchall(); load=c.execute("SELECT COALESCE(skin_key,'classic') skin_key,COALESCE(color_key,'ginger') color_key FROM tavern_cat_loadout WHERE user_id=?",(uid,)).fetchone(); npc_rows=c.execute('SELECT npc_id AS user_id,display_name,x,y,score,size,skin_key,color_key FROM tavern_cat_npcs ORDER BY score DESC LIMIT 12').fetchall(); c.commit(); c.close()
-    actors=[dict(r) for r in rows]+[dict(r, is_npc=True) for r in npc_rows]
-    actors.sort(key=lambda q:int(q.get('score',0)),reverse=True)
-    return jsonify(ok=True,x=x,y=y,score=score,size=size,foods=foods,eaten=eaten,devoured=len(victims)+len(npc_victims),headshots=len(headshot_victims)+len(npc_headshots),cosmetic_drop=cosmetic_drop,players=actors[:24],skin=(load['skin_key'] if load else 'classic'),color=(load['color_key'] if load else 'ginger'))
-
-
-# AJEDREZ DE MALKOR: motor servidor (movimientos legales, jaque, mate, enroque y promoción).
-_CV={'p':100,'n':320,'b':330,'r':500,'q':900,'k':20000}
-def _ci(x,y):return y*8+x
-def _cxy(i):return i%8,i//8
-def _cside(p):return 'w' if p and p.isupper() else ('b' if p else None)
-def _cnew():
- st={'b':list('rnbqkbnrpppppppp')+['']*32+list('PPPPPPPPRNBQKBNR'),'castle':'KQkq','ep':None,'half':0,'hist':[]}
- st['hist']=[_ckey(st,'w')];return st
-def _ckey(st,turn):return ''.join(p or '.' for p in st['b'])+'|'+turn+'|'+st.get('castle','')+'|'+str(st.get('ep'))
-def _ctrack(st,turn):
- h=list(st.get('hist') or []);h.append(_ckey(st,turn));st['hist']=h[-180:];return h.count(h[-1])>=3
-def _cattack(st,sq,side):
- b=st['b'];x,y=_cxy(sq); pawn='P' if side=='w' else 'p'; py=y+(1 if side=='w' else -1)
- if 0<=py<8:
-  for xx in (x-1,x+1):
-   if 0<=xx<8 and b[_ci(xx,py)]==pawn:return True
- knight='N' if side=='w' else 'n'
- for dx,dy in ((1,2),(2,1),(-1,2),(-2,1),(1,-2),(2,-1),(-1,-2),(-2,-1)):
-  xx,yy=x+dx,y+dy
-  if 0<=xx<8 and 0<=yy<8 and b[_ci(xx,yy)]==knight:return True
- for dirs,kinds in ((((1,0),(-1,0),(0,1),(0,-1)),'rq'),(((1,1),(1,-1),(-1,1),(-1,-1)),'bq')):
-  for dx,dy in dirs:
-   xx,yy=x+dx,y+dy
-   while 0<=xx<8 and 0<=yy<8:
-    p=b[_ci(xx,yy)]
-    if p:
-     if _cside(p)==side and p.lower() in kinds:return True
-     break
-    xx+=dx;yy+=dy
- king='K' if side=='w' else 'k'
- return any(0<=x+dx<8 and 0<=y+dy<8 and b[_ci(x+dx,y+dy)]==king for dx in (-1,0,1) for dy in (-1,0,1) if dx or dy)
-def _ccheck(st,side):
- try:k=st['b'].index('K' if side=='w' else 'k')
- except ValueError:return True
- return _cattack(st,k,'b' if side=='w' else 'w')
-def _cpseudo(st,side):
- b=st['b'];out=[]
- for i,p in enumerate(b):
-  if not p or _cside(p)!=side:continue
-  x,y=_cxy(i);t=p.lower()
-  if t=='p':
-   dy=-1 if side=='w' else 1; start=6 if side=='w' else 1; last=0 if side=='w' else 7; yy=y+dy
-   if 0<=yy<8 and not b[_ci(x,yy)]:
-    j=_ci(x,yy); out.extend((i,j,q) for q in 'qrbn') if yy==last else out.append((i,j,None))
-    if y==start and not b[_ci(x,y+2*dy)]:out.append((i,_ci(x,y+2*dy),None))
-   for xx in (x-1,x+1):
-    if 0<=xx<8 and 0<=yy<8:
-     j=_ci(xx,yy)
-     if (b[j] and _cside(b[j])!=side) or st.get('ep')==j:out.extend((i,j,q) for q in 'qrbn') if yy==last else out.append((i,j,None))
-  elif t=='n':
-   for dx,dy in ((1,2),(2,1),(-1,2),(-2,1),(1,-2),(2,-1),(-1,-2),(-2,-1)):
-    xx,yy=x+dx,y+dy
-    if 0<=xx<8 and 0<=yy<8 and (not b[_ci(xx,yy)] or _cside(b[_ci(xx,yy)])!=side):out.append((i,_ci(xx,yy),None))
-  elif t in 'brq':
-   ds=[]
-   if t in 'rq':ds += [(1,0),(-1,0),(0,1),(0,-1)]
-   if t in 'bq':ds += [(1,1),(1,-1),(-1,1),(-1,-1)]
-   for dx,dy in ds:
-    xx,yy=x+dx,y+dy
-    while 0<=xx<8 and 0<=yy<8:
-     j=_ci(xx,yy)
-     if not b[j]:out.append((i,j,None))
-     else:
-      if _cside(b[j])!=side:out.append((i,j,None))
-      break
-     xx+=dx;yy+=dy
-  else:
-   for dx in (-1,0,1):
-    for dy in (-1,0,1):
-     if dx or dy:
-      xx,yy=x+dx,y+dy
-      if 0<=xx<8 and 0<=yy<8 and (not b[_ci(xx,yy)] or _cside(b[_ci(xx,yy)])!=side):out.append((i,_ci(xx,yy),None))
-   r=st.get('castle',''); enemy='b' if side=='w' else 'w'
-   if side=='w' and i==60 and not _ccheck(st,side):
-    if 'K' in r and not b[61] and not b[62] and not _cattack(st,61,enemy) and not _cattack(st,62,enemy):out.append((60,62,None))
-    if 'Q' in r and not b[59] and not b[58] and not b[57] and not _cattack(st,59,enemy) and not _cattack(st,58,enemy):out.append((60,58,None))
-   if side=='b' and i==4 and not _ccheck(st,side):
-    if 'k' in r and not b[5] and not b[6] and not _cattack(st,5,enemy) and not _cattack(st,6,enemy):out.append((4,6,None))
-    if 'q' in r and not b[3] and not b[2] and not b[1] and not _cattack(st,3,enemy) and not _cattack(st,2,enemy):out.append((4,2,None))
- return out
-def _capply(st,m):
- a,z,pr=m;ns={'b':st['b'][:],'castle':st.get('castle',''),'ep':None,'half':int(st.get('half',0)),'hist':list(st.get('hist') or [])};b=ns['b'];p=b[a];cap=b[z];ax,ay=_cxy(a);zx,zy=_cxy(z);ns['half']=0 if p.lower()=='p' or cap else ns['half']+1
- if p.lower()=='p':
-  if st.get('ep')==z and not cap:b[_ci(zx,ay)]=''
-  if abs(zy-ay)==2:ns['ep']=_ci(ax,(ay+zy)//2)
- b[z]=p;b[a]=''
- if pr and p.lower()=='p':b[z]=pr.upper() if p.isupper() else pr
- if p.lower()=='k' and abs(z-a)==2:
-  r1,r2=(a+3,a+1) if z>a else (a-4,a-1);b[r2]=b[r1];b[r1]=''
- rights=ns['castle']
- for sq,rr in ((60,'KQ'),(4,'kq'),(63,'K'),(56,'Q'),(7,'k'),(0,'q')):
-  if a==sq or z==sq:
-   for q in rr:rights=rights.replace(q,'')
- ns['castle']=rights;return ns
-def _cmoves(st,side):return [m for m in _cpseudo(st,side) if not _ccheck(_capply(st,m),side)]
-def _ceval(st,side):
- v=sum((_CV.get(p.lower(),0) if p.isupper() else -_CV.get(p.lower(),0)) for p in st['b'] if p);return v if side=='w' else -v
-def _ccpu(st,side,level):
- ms=_cmoves(st,side);rng=random.SystemRandom()
- if not ms:return None
- if level=='easy':return rng.choice(ms)
- best=[]
- for m in ms:
-  ns=_capply(st,m);v=_ceval(ns,side);opp=_cmoves(ns,'b' if side=='w' else 'w')
-  if not opp:v+=50000 if _ccheck(ns,'b' if side=='w' else 'w') else 0
-  elif level in ('hard','malkor'):v=min(_ceval(_capply(ns,o),side) for o in opp)
-  best.append((v+rng.random()*(30 if level=='normal' else 2),m))
- return max(best,key=lambda x:x[0])[1]
-def _cpublic(r,uid):
- st=json.loads(r['board']);side='w' if int(r['white_id'] or 0)==uid else ('b' if int(r['black_id'] or 0)==uid else None)
- legal=[]
- if side and r['status']=='active' and r['turn']==side:
-  legal=[[m[0],m[1],m[2]] for m in _cmoves(st,side)]
- return dict(ok=True,game_id=r['game_id'],board=st['b'],turn=r['turn'],status=r['status'],winner=r.get('winner'),last_move=r.get('last_move'),side=side,mode=r['mode'],cpu_level=r.get('cpu_level'),legal=legal)
-def _chess_settle_stats(c,r,winner,now):
- # Una partida solo se liquida una vez: status aún activo en la fila bloqueada.
- ids=[int(x) for x in (r.get('white_id'),r.get('black_id')) if x]
- if not ids:return
- for uid in ids:
-  c.execute("INSERT INTO tavern_chess_stats(user_id,updated_at) VALUES(?,?) ON CONFLICT(user_id) DO NOTHING",(uid,now))
- if len(ids)==1:
-  uid=ids[0]; won=(winner=='w' and int(r.get('white_id') or 0)==uid) or (winner=='b' and int(r.get('black_id') or 0)==uid)
-  draw=winner=='draw'; c.execute("UPDATE tavern_chess_stats SET games=games+1,wins=wins+?,losses=losses+?,draws=draws+?,updated_at=? WHERE user_id=?",(1 if won else 0,0 if won or draw else 1,1 if draw else 0,now,uid));return
- w,b=int(r['white_id']),int(r['black_id']); sw=c.execute("SELECT elo FROM tavern_chess_stats WHERE user_id=?",(w,)).fetchone();sb=c.execute("SELECT elo FROM tavern_chess_stats WHERE user_id=?",(b,)).fetchone();ew=int(sw['elo']);eb=int(sb['elo']); aw=1 if winner=='w' else (.5 if winner=='draw' else 0); ab=1-aw; exw=1/(1+10**((eb-ew)/400));exb=1-exw;nw=round(ew+24*(aw-exw));nb=round(eb+24*(ab-exb))
- c.execute("UPDATE tavern_chess_stats SET elo=?,best_elo=GREATEST(best_elo,?),games=games+1,wins=wins+?,losses=losses+?,draws=draws+?,updated_at=? WHERE user_id=?",(nw,nw,1 if winner=='w' else 0,1 if winner=='b' else 0,1 if winner=='draw' else 0,now,w))
- c.execute("UPDATE tavern_chess_stats SET elo=?,best_elo=GREATEST(best_elo,?),games=games+1,wins=wins+?,losses=losses+?,draws=draws+?,updated_at=? WHERE user_id=?",(nb,nb,1 if winner=='b' else 0,1 if winner=='w' else 0,1 if winner=='draw' else 0,now,b))
-
-@app.route('/rpg/api/tavern/chess',methods=['POST'])
-def tavern_chess():
- b=request.get_json(silent=True) or {};a=_tavern_auth(b)
- if not a:return jsonify(ok=False,message='No pude verificar Telegram.'),403
- uid=int(a['user']['id']);act=str(b.get('action','state')).lower();now=int(time.time())
- with db_lock:
-  c=get_db()
-  try:
-   if act=='start_cpu':
-    lv=str(b.get('level','normal')).lower();lv=lv if lv in ('easy','normal','hard','malkor') else 'normal';gid=hashlib.sha256(f'{uid}:{time.time_ns()}'.encode()).hexdigest()[:24];st=_cnew()
-    c.execute("UPDATE tavern_chess_games SET status='abandoned',updated_at=? WHERE (white_id=? OR black_id=?) AND status IN ('active','waiting')",(now,uid,uid));c.execute("INSERT INTO tavern_chess_games(game_id,white_id,mode,cpu_level,board,turn,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",(gid,uid,'cpu',lv,json.dumps(st),'w','active',now,now));c.commit();r=c.execute('SELECT * FROM tavern_chess_games WHERE game_id=?',(gid,)).fetchone();c.close();return jsonify(_cpublic(r,uid))
-   if act=='start_pvp':
-    # Matchmaking global: una sola cola. SKIP LOCKED evita que dos workers tomen al mismo rival.
-    mine=c.execute("SELECT * FROM tavern_chess_games WHERE mode='pvp' AND status='waiting' AND white_id=? ORDER BY created_at DESC LIMIT 1 FOR UPDATE",(uid,)).fetchone()
-    if mine:c.close();return jsonify(_cpublic(mine,uid))
-    rival=c.execute("SELECT * FROM tavern_chess_games WHERE mode='pvp' AND status='waiting' AND white_id<>? ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",(uid,)).fetchone()
-    if rival:
-     c.execute("UPDATE tavern_chess_games SET black_id=?,status='active',updated_at=? WHERE game_id=? AND status='waiting'",(uid,now,rival['game_id']));c.commit();r=c.execute('SELECT * FROM tavern_chess_games WHERE game_id=?',(rival['game_id'],)).fetchone();c.close();return jsonify(_cpublic(r,uid))
-    c.execute("UPDATE tavern_chess_games SET status='abandoned',updated_at=? WHERE (white_id=? OR black_id=?) AND status IN ('active','waiting')",(now,uid,uid));gid=hashlib.sha256(f'pvp:{uid}:{time.time_ns()}'.encode()).hexdigest()[:24];st=_cnew();c.execute("INSERT INTO tavern_chess_games(game_id,white_id,mode,board,turn,status,created_at,updated_at) VALUES(?,?,?,?,?,'waiting',?,?)",(gid,uid,'pvp',json.dumps(st),'w',now,now));c.commit();r=c.execute('SELECT * FROM tavern_chess_games WHERE game_id=?',(gid,)).fetchone();c.close();return jsonify(_cpublic(r,uid))
-   gid=str(b.get('game_id',''))[:40];r=c.execute('SELECT * FROM tavern_chess_games WHERE game_id=? FOR UPDATE',(gid,)).fetchone()
-   if not r or uid not in (int(r['white_id'] or 0),int(r['black_id'] or 0)):c.close();return jsonify(ok=False,message='Partida no encontrada.'),404
-   if act=='state':c.close();return jsonify(_cpublic(r,uid))
-   if act!='move' or r['status']!='active':c.close();return jsonify(ok=False,message='Partida terminada.'),409
-   side='w' if int(r['white_id'] or 0)==uid else 'b'
-   if r['turn']!=side:c.close();return jsonify(ok=False,message='No es tu turno.'),409
-   try:fr,to=int(b.get('from')) ,int(b.get('to'))
-   except Exception:fr=to=-1
-   pr=str(b.get('promotion','q')).lower();pr=pr if pr in 'qrbn' else 'q';st=json.loads(r['board']);mv=next((m for m in _cmoves(st,side) if m[0]==fr and m[1]==to and (m[2] is None or m[2]==pr)),None)
-   if not mv:c.close();return jsonify(ok=False,message='Movimiento ilegal.'),400
-   st=_capply(st,mv);nxt='b' if side=='w' else 'w';last=f'{fr}-{to}'+(pr if mv[2] else '')
-   ms=_cmoves(st,nxt);status='active';winner=None
-   repeated=_ctrack(st,nxt)
-   if not ms:status='done' if _ccheck(st,nxt) else 'draw';winner=side if status=='done' else 'draw'
-   elif int(st.get('half',0))>=100 or repeated:status='draw';winner='draw'
-   if status=='active' and r['mode']=='cpu':
-    cm=_ccpu(st,nxt,r.get('cpu_level') or 'normal');st=_capply(st,cm);last+=f'|{cm[0]}-{cm[1]}'+(cm[2] or '');nxt=side;ms=_cmoves(st,nxt);repeated=_ctrack(st,nxt)
-    if not ms:status='done' if _ccheck(st,nxt) else 'draw';winner=('b' if side=='w' else 'w') if status=='done' else 'draw'
-    elif int(st.get('half',0))>=100 or repeated:status='draw';winner='draw'
-   if status!='active':_chess_settle_stats(c,r,winner,now)
-   c.execute('UPDATE tavern_chess_games SET board=?,turn=?,status=?,winner=?,last_move=?,updated_at=? WHERE game_id=?',(json.dumps(st),nxt,status,winner,last,now,gid));c.commit();r=c.execute('SELECT * FROM tavern_chess_games WHERE game_id=?',(gid,)).fetchone();c.close();return jsonify(_cpublic(r,uid))
-  except Exception:
-   try:c.rollback();c.close()
-   except Exception:pass
-   logging.exception('Ajedrez de Malkor');return jsonify(ok=False,message='Error de ajedrez.'),500
-
-@app.route('/rpg/tavern',methods=['GET'])
-def tavern_page():
-    return r'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
-:root{--gold:#e4b85b;--gold2:#8f6423;--ink:#07090d;--panel:#101319;--felt:#073f31;--red:#8d1722;--muted:#9da3ad}*{box-sizing:border-box}body{margin:0;background:#07090d;color:#f5f1e8;font-family:Inter,system-ui,sans-serif;background-image:radial-gradient(circle at 50% -20%,#342415 0,transparent 36%),linear-gradient(180deg,#0d0e13,#06070a 70%)}button,input{font:inherit}.app{max-width:980px;margin:auto;padding:12px}.hero{position:relative;overflow:hidden;border:1px solid #765323;border-radius:24px;padding:20px;background:linear-gradient(135deg,#21160d,#10131a 55%,#17100c);box-shadow:0 16px 45px #0009,inset 0 1px #fff1}.hero:after{content:"";position:absolute;width:220px;height:220px;right:-80px;top:-100px;border-radius:50%;background:radial-gradient(circle,#e6b85725,transparent 68%)}.brand{font-family:Georgia,serif;letter-spacing:.08em;font-size:27px;font-weight:900}.balance{font-size:24px;font-weight:900;color:#f1ca76;margin-top:8px}.muted,.explain{color:var(--muted)}.explain{font-size:13px;line-height:1.45}.nav{display:flex;gap:8px;overflow:auto;padding:12px 0}.nav button,.btn{border:1px solid #564526;background:linear-gradient(#26221b,#151515);color:#f7ecd2;border-radius:12px;padding:12px 15px;font-weight:850;white-space:nowrap;box-shadow:inset 0 1px #fff1,0 5px 14px #0006}.nav button.on,.btn.primary{border-color:#c99842;background:linear-gradient(#8a6027,#4b3014);color:white}.panel{display:none}.panel.on{display:block}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.card{min-width:0;background:linear-gradient(160deg,#151820,#0c0e13);border:1px solid #343842;border-radius:21px;padding:15px;box-shadow:0 16px 34px #0008,inset 0 1px #ffffff0d}.card h3{font-family:Georgia,serif;margin:0 0 5px;font-size:19px}.bet{width:100%;padding:12px;border-radius:10px;border:1px solid #3e434e;background:#090b10;color:#fff;font-size:16px;margin:7px 0 10px}.result{min-height:46px;padding:10px;border-radius:11px;background:#080a0e;border:1px solid #242832;margin-top:10px;white-space:pre-line;color:#d8dbe2}.choices{display:flex;gap:7px;flex-wrap:wrap}.choices .btn{flex:1;min-width:72px}.stage{position:relative;overflow:hidden;border-radius:16px;border:1px solid #49391e;background:#05070a;box-shadow:inset 0 0 30px #000,0 10px 24px #0008}
-/* slots */.slot-machine{padding:14px;background:linear-gradient(145deg,#3a2814,#16100b 35%,#2c1d0e);border:2px solid #a7772c}.slot-top{text-align:center;font:800 12px Georgia,serif;letter-spacing:.22em;color:#e8c477;margin-bottom:8px}.reel-window{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:8px;background:#050505;border-radius:11px;box-shadow:inset 0 0 18px #000}.reel{height:94px;position:relative;overflow:hidden;border-radius:8px;background:linear-gradient(#e8e0cd,#fff9e8,#d8ceb8);box-shadow:inset 0 0 12px #5a4a35}.reel-symbol{position:absolute;inset:0;display:grid;place-items:center}.sigil{width:56px;height:56px;position:relative}.sigil.cat:before{content:"";position:absolute;inset:12px 8px 6px;background:#9b592e;border-radius:50% 50% 42% 42%;box-shadow:inset 0 -8px #6f361f}.sigil.cat:after{content:"";position:absolute;left:11px;top:5px;width:34px;height:28px;background:#c57a3e;clip-path:polygon(0 0,30% 16%,70% 16%,100% 0,88% 100%,12% 100%);border-radius:45%}.sigil.fish{background:#4b86a8;clip-path:polygon(0 50%,22% 22%,70% 25%,100% 4%,90% 50%,100% 96%,70% 75%,22% 78%)}.sigil.mug{border:8px solid #a96822;border-top:0;border-radius:0 0 10px 10px;background:#e7b44b}.sigil.mug:after{content:"";position:absolute;right:-17px;top:9px;width:16px;height:25px;border:6px solid #a96822;border-left:0;border-radius:0 12px 12px 0}.sigil.gem{background:linear-gradient(135deg,#74ddff,#1685c5 55%,#b7f0ff);clip-path:polygon(50% 0,94% 32%,72% 100%,28% 100%,6% 32%)}.sigil.crown{background:#d9a92d;clip-path:polygon(0 20%,25% 52%,50% 5%,75% 52%,100% 20%,88% 92%,12% 92%)}.sigil.paw:before{content:"";position:absolute;left:15px;top:24px;width:28px;height:25px;border-radius:50%;background:#372316}.sigil.paw:after{content:"";position:absolute;left:7px;top:4px;width:13px;height:15px;border-radius:50%;background:#372316;box-shadow:16px -4px #372316,32px 1px #372316}.payline{height:2px;background:#eac35d;box-shadow:0 0 9px #ffd76b;margin:-48px 3px 46px;position:relative;z-index:4}.spinning .reel-symbol{animation:reelblur .14s linear infinite}@keyframes reelblur{0%{transform:translateY(-14px);filter:blur(2px)}100%{transform:translateY(14px);filter:blur(2px)}}
-/* cards */.table{padding:12px;background:radial-gradient(circle at 50% 20%,#0b6b4e,#073b2d 58%,#05251d);border:2px solid #704a22;min-height:178px}.hand-label{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#d4c7a7;margin:5px 0}.hand{display:flex;gap:7px;min-height:74px}.playing-card{width:49px;height:70px;border-radius:7px;background:#f5f0df;color:#161616;position:relative;box-shadow:0 5px 12px #0007;border:1px solid #bdb39d;transform-origin:center;animation:deal .35s cubic-bezier(.2,.8,.2,1)}.playing-card.red{color:#a71925}.playing-card .rank{position:absolute;left:5px;top:3px;font:bold 16px Georgia}.playing-card .suit{position:absolute;inset:0;display:grid;place-items:center;font:26px Georgia}.playing-card.back{background:repeating-linear-gradient(45deg,#222b4a 0 5px,#b99a4d 5px 8px);border:4px solid #e4d4a4}.playing-card.back>*{display:none}@keyframes deal{from{transform:translate(80px,-60px) rotate(15deg);opacity:0}to{transform:none;opacity:1}}
-/* roulette */.roulette-stage{min-height:210px;background:radial-gradient(circle,#124c3a,#072b22);display:grid;place-items:center}.wheel{width:190px;height:190px;border-radius:50%;position:relative;background:conic-gradient(#a51c28 0 9.73deg,#17191d 9.73deg 19.46deg,#a51c28 19.46deg 29.19deg,#17191d 29.19deg 38.92deg,#a51c28 38.92deg 48.65deg,#17191d 48.65deg 58.38deg,#a51c28 58.38deg 68.11deg,#17191d 68.11deg 77.84deg,#a51c28 77.84deg 87.57deg,#17191d 87.57deg 97.3deg,#a51c28 97.3deg 107.03deg,#17191d 107.03deg 116.76deg,#a51c28 116.76deg 126.49deg,#17191d 126.49deg 136.22deg,#a51c28 136.22deg 145.95deg,#17191d 145.95deg 155.68deg,#a51c28 155.68deg 165.41deg,#17191d 165.41deg 175.14deg,#a51c28 175.14deg 184.87deg,#17191d 184.87deg 194.6deg,#a51c28 194.6deg 204.33deg,#17191d 204.33deg 214.06deg,#a51c28 214.06deg 223.79deg,#17191d 223.79deg 233.52deg,#a51c28 233.52deg 243.25deg,#17191d 243.25deg 252.98deg,#a51c28 252.98deg 262.71deg,#17191d 262.71deg 272.44deg,#a51c28 272.44deg 282.17deg,#17191d 282.17deg 291.9deg,#a51c28 291.9deg 301.63deg,#17191d 301.63deg 311.36deg,#a51c28 311.36deg 321.09deg,#17191d 321.09deg 330.82deg,#a51c28 330.82deg 340.55deg,#17191d 340.55deg 350.28deg,#147348 350.28deg 360deg);border:9px solid #b7863b;box-shadow:0 0 0 5px #33200f,0 12px 25px #000a,inset 0 0 0 22px #d6b36a}.wheel:after{content:"";position:absolute;inset:52px;border-radius:50%;background:radial-gradient(circle,#d9b868,#79501d 55%,#2b190a 58%);box-shadow:0 0 0 4px #281708}.ball{position:absolute;left:50%;top:5px;width:11px;height:11px;border-radius:50%;background:#fff9df;box-shadow:0 1px 5px #000;transform-origin:0 90px}.wheel.spin{transition:transform 2.5s cubic-bezier(.12,.7,.15,1)}.ball.spin{transition:transform 2.5s cubic-bezier(.1,.75,.2,1)}.roulette-bets{display:grid;grid-template-columns:1fr 1fr 70px;gap:7px;margin-top:9px}.chipbtn{min-height:44px;border:1px solid #c5a568;border-radius:9px;color:#fff;font-weight:850}.chipbtn.red{background:#8f1822}.chipbtn.black{background:#15171b}.chipbtn.green{background:#12603f}
-/* cups */.cups-stage{height:150px;background:linear-gradient(#16100b 60%,#563716 61%,#2d1b0b);display:flex;align-items:flex-end;justify-content:space-around;padding:20px}.cup{width:64px;height:78px;position:relative;border:0;background:transparent;transition:transform .35s ease}.cup-shape{position:absolute;inset:10px 4px 0;background:linear-gradient(90deg,#7d491d,#d39a4b 42%,#6c3c18);clip-path:polygon(10% 0,90% 0,100% 100%,0 100%);border-radius:5px 5px 13px 13px;box-shadow:0 8px 10px #0008}.cup-shape:before{content:"";position:absolute;left:-5%;top:-8px;width:110%;height:13px;border-radius:50%;background:#d6a253;box-shadow:inset 0 4px #6b3b17}.cup.ballfound{transform:translateY(-35px)}.marble{position:absolute;width:17px;height:17px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#fff,#c9c1ae 35%,#777);bottom:7px;left:calc(50% - 8px);opacity:0}.cup.ballfound .marble{opacity:1}.shuffling .cup:nth-child(1){animation:shuffleA .55s ease 3}.shuffling .cup:nth-child(3){animation:shuffleB .55s ease 3}@keyframes shuffleA{50%{transform:translateX(145%) translateY(-8px)}}@keyframes shuffleB{50%{transform:translateX(-145%) translateY(-8px)}}
-/* dice */.dice-stage{min-height:135px;background:radial-gradient(circle,#4b1820,#1b0b0e);display:grid;place-items:center}.die{width:82px;height:82px;border-radius:16px;background:#eee9dc;box-shadow:inset -7px -7px 12px #b7b0a1,0 12px 20px #0009;display:grid;grid-template:repeat(3,1fr)/repeat(3,1fr);padding:12px;gap:4px}.pip{width:12px;height:12px;border-radius:50%;background:#171717;place-self:center}.die.rolling{animation:roll .12s linear infinite}@keyframes roll{50%{transform:rotate(12deg) scale(.92)}}.numchoices{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;margin-top:8px}.numchoices button{min-width:0;padding:10px 3px}
-/* high card */.versus{min-height:145px;background:radial-gradient(circle,#30384a,#10131a);display:flex;align-items:center;justify-content:center;gap:24px}.versus .playing-card{width:66px;height:94px}.vs{font-family:Georgia,serif;color:#c6a55f;font-weight:900}.flip{animation:flip .55s ease}@keyframes flip{0%{transform:rotateY(90deg)}100%{transform:rotateY(0)}}
-/* memory */.memory-pad{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:370px;margin:12px auto;padding:12px;background:#07090d;border-radius:50%;box-shadow:inset 0 0 30px #000}.mem{height:105px;border:0;opacity:.58;box-shadow:inset 0 0 24px #0009;transition:.12s}.mem:nth-child(1){background:linear-gradient(135deg,#b52732,#5b1118);border-radius:100% 15px 15px 15px}.mem:nth-child(2){background:linear-gradient(225deg,#168c5d,#0a4c34);border-radius:15px 100% 15px 15px}.mem:nth-child(3){background:linear-gradient(45deg,#1e63b8,#0d376d);border-radius:15px 15px 15px 100%}.mem:nth-child(4){background:linear-gradient(315deg,#c39122,#6f4e0b);border-radius:15px 15px 100% 15px}.mem.flash{opacity:1;filter:brightness(2);box-shadow:0 0 30px currentColor,inset 0 0 18px #fff7;transform:scale(.96)}
-/* chess */.chess-card{position:relative;overflow:hidden;background:radial-gradient(circle at 50% 12%,#49351d55,transparent 34%),linear-gradient(160deg,#17140f,#090b10 64%)}.chess-card:before{content:"";position:absolute;inset:-90px auto auto -70px;width:210px;height:210px;border:1px solid #d6aa4d22;transform:rotate(45deg);box-shadow:0 0 60px #d6aa4d10}.chess-wrap{max-width:540px;margin:14px auto;padding:10px;border-radius:18px;background:linear-gradient(145deg,#8b622b,#2a190b 28%,#0b0b0c 50%,#7d5525);box-shadow:0 20px 38px #000c,0 0 35px #d6a64b12,inset 0 0 0 1px #f4d98a55}.chess-board{display:grid;grid-template-columns:repeat(8,1fr);aspect-ratio:1;border:2px solid #1a1008;border-radius:8px;overflow:hidden;box-shadow:inset 0 0 30px #0007}.chess-sq{position:relative;border:0;padding:0;display:grid;place-items:center;font:clamp(28px,8.2vw,54px)/1 Georgia,serif;color:#f2ead8;text-shadow:0 2px 1px #000,0 0 7px #fff3;user-select:none;transition:filter .12s,transform .12s,box-shadow .12s}.chess-sq:active{transform:scale(.94)}.chess-sq.light{background:linear-gradient(135deg,#b78d55,#8f683d)}.chess-sq.dark{background:linear-gradient(135deg,#4b2f1d,#2e1d14)}.chess-sq.sel{z-index:2;box-shadow:inset 0 0 0 4px #ffd66b,0 0 18px #ffc84f;filter:brightness(1.2)}.chess-sq.move:after{content:"";width:25%;height:25%;border-radius:50%;background:#e9cf75aa;box-shadow:0 0 10px #ffe28b;position:absolute}.chess-sq.capture:after{content:"";inset:5px;border:4px solid #d74a45;border-radius:50%;box-shadow:inset 0 0 10px #8d1722,0 0 8px #ff5b50;position:absolute}.chess-sq.blackpiece{color:#15171c;text-shadow:0 1px #e9cf9a,0 2px 4px #000}.chess-status{text-align:center;font:800 15px Georgia,serif;letter-spacing:.08em;margin:11px 0;color:#f0ca72;text-shadow:0 0 12px #c89031}.chess-levels{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.chess-levels button{min-width:0;padding:10px 4px}.chess-levels button[data-lv="malkor"]{border-color:#d2a64e;box-shadow:inset 0 0 16px #b27a2630,0 0 15px #c9984218}.chess-crest{text-align:center;font:700 11px Georgia,serif;letter-spacing:.22em;color:#9f8455;margin:5px 0 2px}.chess-board.thinking{filter:saturate(.65) brightness(.75);pointer-events:none}.chess-board.thinking:after{content:"MALKOR";position:absolute;color:#f1cf80}
-/* cat canvas */#catCanvas{display:block;width:100%;aspect-ratio:1.55;background:#15271d;touch-action:none}.catstage{position:relative}.stick{position:absolute;width:94px;height:94px;border-radius:50%;background:#0007;border:1px solid #ffffff35;display:none;pointer-events:none}.stick i{position:absolute;width:40px;height:40px;left:27px;top:27px;border-radius:50%;background:linear-gradient(#d8b36a,#765021)}
-.relicCard{position:relative;overflow:hidden;border:1px solid #d3a64b;background:radial-gradient(circle at 50% -25%,#ffe49b2e,transparent 38%),linear-gradient(145deg,#2c1d0e,#0b0d12 58%,#201308);box-shadow:0 0 0 1px #6c481c inset,0 12px 30px #000b,0 0 24px #d8a44118}.relicCard:before{content:"RELIQUIA LIMITADA";display:block;margin:-12px -12px 11px;padding:7px 10px;text-align:center;font:800 10px Georgia,serif;letter-spacing:.24em;color:#f8dda0;background:linear-gradient(90deg,#3b230b,#9c6a25,#3b230b);border-bottom:1px solid #d9ad59}.relicCard:after{content:"";position:absolute;inset:-80% -30%;background:linear-gradient(105deg,transparent 44%,#fff4c51a 49%,#fff7d536 50%,#fff4c51a 51%,transparent 56%);transform:translateX(-55%);animation:relicShine 4.8s ease-in-out infinite;pointer-events:none}.relicCard>b{display:block;font:900 22px Georgia,serif;color:#ffe09a;text-shadow:0 0 16px #e0a53b55}.relicStats{position:relative;z-index:1;margin:10px 0;padding:10px;border-radius:10px;border:1px solid #725021;background:#07090dbd;color:#d9c59b;font-size:12px;line-height:1.6}.relicStats b{color:#ffd778;letter-spacing:.05em}.relicCard .primary{position:relative;z-index:2;box-shadow:0 0 18px #dca74435,inset 0 1px #fff3}.relicCard .primary:not(:disabled){animation:relicPulse 2.2s ease-in-out infinite}.relicCard button:disabled{filter:grayscale(.65);opacity:.55}.relicDivider{grid-column:1/-1;padding:16px 4px 5px;text-align:center;font:900 13px Georgia,serif;letter-spacing:.2em;color:#e7c16f;text-shadow:0 0 14px #c88b32}.relicDivider small{display:block;margin-top:5px;font:500 11px system-ui;letter-spacing:.04em;color:#93836b}@keyframes relicShine{0%,60%{transform:translateX(-70%)}82%,100%{transform:translateX(70%)}}@keyframes relicPulse{50%{box-shadow:0 0 28px #e4b85b66,inset 0 1px #fff4}}
-.rewardcard{padding:12px;border:1px solid #3d3425;border-radius:14px;background:linear-gradient(145deg,#18140e,#0b0d11);margin:8px 0}.rewardcard.ready{border-color:#b98a3d;box-shadow:0 0 18px #d6a64b18}.rewardcard b{color:#efcc7b}.rankrow{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid #282c35;padding:8px 0}.drink{display:flex;justify-content:space-between;align-items:center;gap:8px}.toast{position:sticky;bottom:8px;z-index:50;background:#21170d;border:1px solid #8b632b;padding:12px;border-radius:12px;text-align:center;display:none}@media(max-width:640px){.grid{grid-template-columns:1fr}.app{padding:9px}.hero{padding:16px}.roulette-stage{min-height:200px}.btn,.nav button{min-height:46px}}@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
-
-/* ===== KIW CASINO EXPERIENCE v2: lobby -> juego a pantalla completa ===== */
-body.game-open{overflow:hidden;background:#030406}.game-card{position:relative;transition:transform .2s ease,border-color .2s ease}.game-launch{width:100%;margin-top:10px;min-height:48px;border:1px solid #d7ad58;background:linear-gradient(180deg,#b67b2c,#5b3511);color:#fff4d4;border-radius:12px;font-weight:950;letter-spacing:.08em;box-shadow:0 8px 24px #0008,inset 0 1px #fff5}.game-launch:active{transform:scale(.985)}
-.game-card.focused{position:fixed!important;z-index:1000;inset:0!important;width:100vw!important;height:100dvh!important;max-width:none!important;margin:0!important;border:0!important;border-radius:0!important;padding:clamp(12px,2vw,28px)!important;overflow:auto!important;background:radial-gradient(circle at 50% -10%,#3a2412 0,#11141b 34%,#05070a 78%)!important;box-shadow:none!important}.game-card.focused>h3{font:900 clamp(25px,5vw,44px) Georgia,serif;text-align:center;color:#f6d681;letter-spacing:.05em;text-shadow:0 3px 18px #000}.game-card.focused>.explain{text-align:center;max-width:760px;margin:0 auto 10px;font-size:14px}.game-card.focused .stage{max-width:1050px;margin:12px auto;min-height:min(56dvh,620px);border-radius:22px}.game-card.focused .result,.game-card.focused>.choices,.game-card.focused>.bet,.game-card.focused>.numchoices,.game-card.focused>.roulette-bets,.game-card.focused>#dicechoices{max-width:920px;margin-left:auto;margin-right:auto}.game-card.focused .game-launch{display:none}.game-back{position:sticky;top:0;z-index:30;border:1px solid #b98a3e;background:#0b0d11e8;color:#f6d681;border-radius:999px;padding:10px 15px;font-weight:900;backdrop-filter:blur(10px);box-shadow:0 6px 20px #0008}.game-card.focused.slot-focus .slot-machine{min-height:min(60dvh,650px);display:flex;flex-direction:column;justify-content:center;background:radial-gradient(circle at 50% 10%,#7b371d,#2b0c13 38%,#10070a 75%);border:5px solid #d7a43e;box-shadow:0 0 0 5px #4e260e,0 0 55px #c8872440,inset 0 0 80px #000}.game-card.focused .slot-top{font-size:clamp(18px,4vw,34px);color:#ffe083;text-shadow:0 0 18px #ffb32c;letter-spacing:.12em}.game-card.focused .reel-window{gap:12px;padding:16px;border:5px solid #201006;background:linear-gradient(#090909,#23130a,#090909);box-shadow:inset 0 0 35px #000,0 0 24px #f1bd4c22}.game-card.focused .reel{height:clamp(180px,38dvh,390px);border:4px solid #c6974a;background:linear-gradient(#fff4cf,#f7e7b5 45%,#fff9e9 50%,#e2c986);box-shadow:inset 0 0 35px #5b351955}.game-card.focused .sigil{width:clamp(100px,18vw,190px);height:clamp(100px,18vw,190px)}.game-card.focused .payline{height:4px;box-shadow:0 0 18px #ffe063,0 0 35px #ff9f22;margin:-20dvh 8px 20dvh}.game-card.focused.roulette-focus .roulette-stage{min-height:min(62dvh,690px);background:radial-gradient(ellipse,#15523d 0,#082d22 55%,#03140f);border:5px solid #7d5728}.game-card.focused .wheel{width:min(72vw,560px);height:min(72vw,560px);border-width:18px;box-shadow:0 0 0 9px #3a210b,0 20px 55px #000c,inset 0 0 0 48px #d6b36a}.game-card.focused .wheel:after{inset:29%;box-shadow:0 0 0 8px #281708}.game-card.focused .ball{width:16px;height:16px;top:10px;transform-origin:0 calc(min(36vw,280px) - 18px)}.wheel-label{position:absolute;left:50%;top:50%;width:25px;height:25px;margin:-12px;display:grid;place-items:center;font:bold 10px Georgia;color:#fff;text-shadow:0 1px 3px #000;transform:rotate(var(--a)) translateY(calc(-1 * min(30vw,232px))) rotate(calc(-1 * var(--a)));z-index:3;pointer-events:none}.game-card.focused.blackjack-focus .table{min-height:min(57dvh,620px);border:10px solid #6c3d17;border-radius:50% 50% 22px 22px;padding:28px;background:radial-gradient(ellipse at 50% 30%,#0d805a,#06432f 60%,#03271d);box-shadow:inset 0 0 0 4px #b98842,inset 0 0 65px #001b13,0 25px 55px #000b}.game-card.focused .hand{min-height:145px;justify-content:center}.game-card.focused .playing-card{width:clamp(70px,12vw,110px);height:clamp(102px,17vw,158px)}.game-card.focused .playing-card .rank{font-size:25px}.game-card.focused .playing-card .suit{font-size:48px}.game-card.focused.flight-focus .flight-stage,.game-card.focused.cat-focus .catstage{min-height:calc(100dvh - 235px);max-width:none}.game-card.focused #flightCanvas,.game-card.focused #catCanvas{width:100%;height:calc(100dvh - 235px);aspect-ratio:auto}.game-card.focused.memory-focus .memory-pad{max-width:min(75vw,620px);height:min(62dvh,620px)}.game-card.focused.memory-focus .mem{height:auto}.game-card.focused.chess-focus .chess-wrap{max-width:min(78dvh,780px)}.game-card.focused.cups-focus .cups-stage,.game-card.focused.dice-focus .dice-stage,.game-card.focused.highcard-focus .versus{min-height:min(58dvh,600px)}
-/* Reliquias físicas: armas sobre estante */.relic-display{height:210px;margin:10px 0 14px;position:relative;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 88%,#d9a34b33,transparent 45%),linear-gradient(180deg,#090a0d,#160e07);border:1px solid #5e3d17;border-radius:14px;overflow:hidden}.relic-display:before{content:"";position:absolute;left:7%;right:7%;bottom:25px;height:17px;background:linear-gradient(#b88742,#54300f);border-radius:4px;box-shadow:0 10px 18px #000}.weapon{position:relative;width:170px;height:170px;filter:drop-shadow(0 10px 8px #000) drop-shadow(0 0 10px #e3b55b55);transform:rotate(-35deg)}.weapon.sword:before{content:"";position:absolute;left:78px;top:5px;width:16px;height:118px;background:linear-gradient(90deg,#747b86,#f8f3d9 45%,#a9afb7 60%,#4c535e);clip-path:polygon(50% 0,100% 12%,82% 100%,18% 100%,0 12%)}.weapon.sword:after{content:"";position:absolute;left:44px;top:116px;width:84px;height:12px;background:linear-gradient(#f0c765,#7d4d13);border-radius:7px;box-shadow:36px 24px 0 -2px #6f3e16}.weapon.staff{transform:rotate(-18deg)}.weapon.staff:before{content:"";position:absolute;left:79px;top:24px;width:13px;height:137px;background:linear-gradient(90deg,#3a1d0d,#b17b36,#45220e);border-radius:8px}.weapon.staff:after{content:"";position:absolute;left:53px;top:0;width:64px;height:64px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#e9ffff,#54d5ff 25%,#4162e8 58%,#291469 75%);box-shadow:0 0 28px #61dfff}.weapon.bow{transform:rotate(-18deg)}.weapon.bow:before{content:"";position:absolute;left:45px;top:8px;width:78px;height:150px;border:9px solid #d7a84c;border-left-color:transparent;border-radius:50%;box-shadow:inset -4px 0 #6d3f14}.weapon.bow:after{content:"";position:absolute;left:53px;top:14px;width:2px;height:143px;background:#e7dfc6;transform:rotate(-15deg);transform-origin:center}.weapon.katana:before{content:"";position:absolute;left:80px;top:4px;width:10px;height:125px;background:linear-gradient(90deg,#929aa2,#fff 45%,#777f87);border-radius:80% 0 0 0;transform:skewX(-6deg)}.weapon.katana:after{content:"";position:absolute;left:51px;top:124px;width:70px;height:9px;background:#c79a38;border-radius:50%;box-shadow:31px 24px 0 1px #251710}.relic-stock{position:absolute;right:10px;top:10px;padding:5px 8px;border:1px solid #b98b3d;border-radius:999px;background:#090a0dcc;color:#ffd87d;font-size:11px;font-weight:900}
-@media(max-width:640px){.game-card.focused{padding:9px!important}.game-card.focused .stage{min-height:50dvh}.game-card.focused .wheel{width:min(88vw,500px);height:min(88vw,500px)}.wheel-label{display:none}.game-back{font-size:13px}.relic-display{height:175px}.weapon{transform:scale(.86) rotate(-35deg)}}
-</style></head><body><main class="app"><section class="hero"><div class="brand">TABERNA DE MALKOR</div><div class="muted">Sala privada de juegos · Kiwons</div><div class="balance" id="bal">— KW</div><div id="effect" class="muted"></div></section><nav class="nav"><button class="on" data-p="casino">Casino</button><button data-p="arcade">Arcade</button><button data-p="bar">Barra</button><button data-p="shop">Tienda</button><button data-p="rewards">Recompensas</button><button data-p="rank">Rankings</button></nav>
-<section id="casino" class="panel on"><div class="grid">
-<div class="card"><h3>KiwSlot</h3><p class="explain">Tres figuras iguales activan premio. La huella es el gran premio.</p><input class="bet" id="slotbet" type="number" value="500" min="100" max="10000"><div class="stage slot-machine" id="slotMachine"><div class="slot-top">MALKOR GRAND HALL</div><div class="reel-window" id="reels"><div class="reel"><div class="reel-symbol"><i class="sigil gem"></i></div></div><div class="reel"><div class="reel-symbol"><i class="sigil crown"></i></div></div><div class="reel"><div class="reel-symbol"><i class="sigil fish"></i></div></div></div><div class="payline"></div></div><button class="btn primary" id="slotgo">GIRAR CARRETES</button><div class="result" id="slotres"></div></div>
-<div class="card"><h3>Blackjack</h3><p class="explain">Llega a 21 sin pasarte. La casa se planta en 17.</p><input class="bet" id="bjbet" type="number" value="500" min="100" max="10000"><div class="stage table"><div class="hand-label">Casa</div><div class="hand" id="dealerHand"></div><div class="hand-label">Jugador <span id="playerValue"></span></div><div class="hand" id="playerHand"></div></div><div class="choices"><button class="btn primary" id="bjnew">Nueva mano</button><button class="btn" id="bjhit">Pedir</button><button class="btn" id="bjstand">Plantarse</button><button class="btn" id="bjdouble">Doblar</button></div><div class="result" id="bjcards">Mesa lista.</div></div>
-<div class="card"><h3>Ruleta</h3><p class="explain">Rojo o negro paga x2. El cero paga x36.</p><input class="bet" id="roubet" type="number" value="500" min="100" max="10000"><div class="stage roulette-stage"><div class="wheel" id="wheel"><div class="ball" id="ball"></div></div></div><div class="roulette-bets"><button class="chipbtn red rou" data-c="red">ROJO</button><button class="chipbtn black rou" data-c="black">NEGRO</button><button class="chipbtn green rou" data-c="green">0</button></div><div class="result" id="roures"></div></div>
-<div class="card"><h3>Las tres copas</h3><p class="explain">Sigue la copa y encuentra la esfera. Acierto x2.85.</p><input class="bet" id="shellbet" type="number" value="300" min="100" max="10000"><div class="stage cups-stage" id="cups"><button class="cup shell" data-c="1"><i class="marble"></i><i class="cup-shape"></i></button><button class="cup shell" data-c="2"><i class="marble"></i><i class="cup-shape"></i></button><button class="cup shell" data-c="3"><i class="marble"></i><i class="cup-shape"></i></button></div><div class="result" id="shellres"></div></div>
-<div class="card"><h3>Dados</h3><p class="explain">Elige la cara exacta. Acierto x5.70.</p><input class="bet" id="dicebet" type="number" value="250" min="100" max="10000"><div class="stage dice-stage"><div class="die" id="die"></div></div><div class="numchoices" id="dicechoices"></div><div class="result" id="diceres"></div></div>
-<div class="card"><h3>Carta Mayor</h3><p class="explain">Tu carta contra la casa. Mayor gana x1.92.</p><input class="bet" id="cardbet" type="number" value="300" min="100" max="10000"><div class="stage versus"><div id="highPlayer"></div><div class="vs">VS</div><div id="highHouse"></div></div><button class="btn primary" id="cardgo">REPARTIR</button><div class="result" id="cardres"></div></div>
-</div></section>
-<section id="arcade" class="panel"><div class="grid"><div class="card flight-card"><h3>El Vuelo de Malkor</h3><p class="explain">Despega, acumula multiplicador y aterriza antes de perder el vuelo. El resultado vive en el servidor.</p><input class="bet" id="flightbet" type="number" value="500" min="100" max="10000"><div class="stage flight-stage"><canvas id="flightCanvas" width="900" height="500"></canvas><div class="flight-hud"><b id="flightX">x1.00</b><span id="flightMeta">0 m · 120 m alt.</span></div></div><div class="choices"><button class="btn primary" id="flightStart">DESPEGAR</button><button class="btn" id="flightCash">ATERRIZAR Y COBRAR</button></div><div class="result" id="flightRes">Pista disponible.</div></div><div class="card"><h3>Memoria de Malkor</h3><p class="explain">Observa la secuencia luminosa y repítela. Entrada: 150 KW. Los premios pagan únicamente la mejora real de tu récord.</p><div id="meminfo">Ronda 0</div><div class="memory-pad"><button class="mem"></button><button class="mem"></button><button class="mem"></button><button class="mem"></button></div><button class="btn primary" id="memstart">COMENZAR</button><div class="result" id="memres"></div></div><div class="card"><h3>CAT.IO</h3><p class="explain">Arena táctil autoritativa: tu teléfono manda dirección; Malkor decide movimiento, comida y puntuación.</p><div class="cat-garage"><canvas id="catPreview" width="360" height="150"></canvas><div><select id="catSkin" class="bet"></select><select id="catColor" class="bet"></select><div class="choices"><button class="btn" id="catBuy">Comprar seleccionado</button><button class="btn" id="catEquip">Equipar</button></div></div></div><div class="stage catstage"><canvas id="catCanvas" width="900" height="580"></canvas><div class="stick" id="stick"><i></i></div></div><div class="result" id="catres">Pulsa ENTRAR para comenzar.</div><div class="choices"><button class="btn primary" id="catjoin">ENTRAR A LA ARENA</button><button class="btn" id="catfinish">TERMINAR Y COBRAR RÉCORD</button></div></div><div class="card chess-card"><div class="chess-crest">TABLERO REAL DE LA TABERNA</div><h3>Ajedrez de Malkor</h3><p class="explain">Partida legal contra Malkor. El servidor valida cada movimiento; toca una pieza y después su destino.</p><div class="chess-levels"><button class="btn chessNew" data-lv="easy">FÁCIL</button><button class="btn chessNew" data-lv="normal">NORMAL</button><button class="btn chessNew" data-lv="hard">DIFÍCIL</button><button class="btn chessNew" data-lv="malkor">MALKOR</button></div><button class="btn chessPvp" id="chessPvp">BUSCAR RIVAL · ELO</button><div class="chess-status" id="chessStatus">Elige dificultad o busca rival.</div><div class="chess-wrap"><div class="chess-board" id="chessBoard"></div></div><div class="result" id="chessRes">Las blancas comienzan.</div></div></div></section>
-<section id="bar" class="panel"><div class="card"><h3>La Barra</h3><p class="explain">Bebidas de la casa con efectos temporales.</p><div id="drinks"></div><div class="result" id="drinkres"></div></div></section>
-<section id="shop" class="panel"><div class="card"><h3>Mercado de Malkor</h3><p class="explain">Cosméticos, títulos y cofres. Nada de aquí altera las probabilidades del casino.</p><div id="shopItems" class="grid"></div><div class="result" id="shopRes">El oro cambia de manos. La suerte no.</div></div></section><section id="rewards" class="panel"><div class="grid"><div class="card"><h3>Cofre diario</h3><p class="explain">Regresa cada día. La racha aumenta el premio hasta un máximo controlado.</p><div id="dailyInfo" class="result">Cargando…</div><button class="btn primary" id="dailyClaim">ABRIR COFRE</button></div><div class="card"><h3>Logros de la Taberna</h3><div id="achievements"></div></div></div></section><section id="rank" class="panel"><div class="grid"><div class="card"><h3>Reyes del Casino</h3><div id="rw"></div></div><div class="card"><h3>Benefactores de Malkor</h3><div id="rl"></div></div><div class="card"><h3>Memoria</h3><div id="rm"></div></div><div class="card"><h3>CAT.IO</h3><div id="rc"></div></div><div class="card"><h3>Vuelo</h3><div id="rf"></div></div></div></section><div class="toast" id="toast"></div></main>
-<script>
-const tg=window.Telegram.WebApp;tg.ready();tg.expand();const init=tg.initData,$=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function reqId(){try{return crypto.randomUUID()}catch(e){return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)}}const apiFlight=new Map();async function api(path,data={}){const key=path+'|'+JSON.stringify(data);if(apiFlight.has(key))return apiFlight.get(key);const job=(async()=>{const payload={init_data:init,...data};if(!payload.request_id)payload.request_id=reqId();const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const j=await r.json();if(j.balance!=null)$('bal').textContent=Number(j.balance).toLocaleString()+' KW';if(!j.ok&&j.message)toast(j.message);return j})();apiFlight.set(key,job);try{return await job}finally{apiFlight.delete(key)}}function toast(t){const e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}function haptic(type='light'){try{tg.HapticFeedback.impactOccurred(type)}catch(e){}}function rows(el,a,fn){el.innerHTML=(a||[]).map((x,i)=>`<div class="rankrow"><span>${i+1}. ${x.display_name||'Jugador'}</span><b>${fn(x)}</b></div>`).join('')||'<p class="muted">Sin registros todavía.</p>'}async function state(){const j=await api('/rpg/api/tavern/state');if(!j.ok)return;$('effect').textContent=j.effect?j.effect.label:'';rows($('rw'),j.rankings.winners,x=>(x.net>=0?'+':'')+Number(x.net).toLocaleString()+' KW');rows($('rl'),j.rankings.losers,x=>Number(x.lost).toLocaleString()+' KW');rows($('rm'),j.rankings.memory,x=>x.memory_best+' rondas');rows($('rc'),j.rankings.cat,x=>Number(x.cat_best).toLocaleString()+' pts');rows($('rf'),j.rankings.flight,x=>'x'+Number(x.best_x).toFixed(2)+' · '+Number(x.biggest_prize).toLocaleString()+' KW')}document.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('on'));document.querySelectorAll('.panel').forEach(x=>x.classList.remove('on'));b.classList.add('on');$(b.dataset.p).classList.add('on');if(b.dataset.p==='rank')state();if(b.dataset.p==='rewards')loadRewards();if(b.dataset.p==='shop')loadShop()}));
-const symbolMap={cat:'cat',fish:'fish',mug:'mug',gem:'gem',crown:'crown',paw:'paw'};function setReels(detail){const syms=detail.trim().split(/\s+/);document.querySelectorAll('.reel-symbol').forEach((e,i)=>e.innerHTML=`<i class="sigil ${symbolMap[syms[i]]||'gem'}"></i>`)}async function slots(){const m=$('slotMachine');m.classList.add('spinning');haptic();const j=await api('/rpg/api/tavern/play',{game:'slots',bet:Number($('slotbet').value),choice:''});await sleep(850);m.classList.remove('spinning');if(j.ok){setReels(j.detail);$('slotres').textContent=(j.profit>=0?'Premio ':'Resultado ')+Number(j.profit).toLocaleString()+' KW';if(j.profit>0)haptic('heavy');if(j.jackpot)toast('JACKPOT DE MALKOR')}}$('slotgo').onclick=slots;
-function parseCard(s){if(s==='BACK')return{back:true};const suits={'♠':'♠','♥':'♥','♦':'♦','♣':'♣'};let suit=Object.keys(suits).find(x=>s.includes(x))||s.slice(-1),rank=s.replace(suit,'');return{rank,suit,red:suit==='♥'||suit==='♦'}}function cardHTML(s){const c=parseCard(s);if(c.back)return'<div class="playing-card back"></div>';return`<div class="playing-card ${c.red?'red':''}"><span class="rank">${c.rank}</span><span class="suit">${c.suit}</span></div>`}async function bj(action){const j=await api('/rpg/api/tavern/blackjack',{action,bet:Number($('bjbet').value)});if(j.ok){$('playerHand').innerHTML=j.player.map(cardHTML).join('');$('dealerHand').innerHTML=j.dealer.map(cardHTML).join('');$('playerValue').textContent='· '+j.player_value;$('bjcards').textContent=j.result||'Mano en juego';haptic(j.finished?'heavy':'light')}}$('bjnew').onclick=()=>bj('start');$('bjhit').onclick=()=>bj('hit');$('bjstand').onclick=()=>bj('stand');$('bjdouble').onclick=()=>bj('double');
-let wheelRot=0;async function roulette(choice){const j=await api('/rpg/api/tavern/play',{game:'roulette',bet:Number($('roubet').value),choice});if(!j.ok)return;const n=parseInt(j.detail,10)||0;wheelRot+=1440+n*(360/37);$('wheel').classList.add('spin');$('ball').classList.add('spin');$('wheel').style.transform=`rotate(${wheelRot}deg)`;$('ball').style.transform=`rotate(${-wheelRot*1.23}deg)`;await sleep(2500);$('roures').textContent=`Número ${n}\n${j.profit>=0?'Premio':'Pérdida'} ${Math.abs(j.profit).toLocaleString()} KW`;haptic(j.profit>0?'heavy':'light')}document.querySelectorAll('.rou').forEach(b=>b.onclick=()=>roulette(b.dataset.c));
-async function shell(choice){const stage=$('cups');stage.classList.add('shuffling');document.querySelectorAll('.cup').forEach(c=>c.classList.remove('ballfound'));const j=await api('/rpg/api/tavern/play',{game:'shell',bet:Number($('shellbet').value),choice});await sleep(1700);stage.classList.remove('shuffling');if(j.ok){const m=j.detail.match(/(\d)/),n=m?m[1]:'1';document.querySelector(`.cup[data-c="${n}"]`).classList.add('ballfound');$('shellres').textContent=(j.profit>=0?'Acierto · ':'La casa gana · ')+j.profit.toLocaleString()+' KW';haptic(j.profit>0?'heavy':'light')}}document.querySelectorAll('.shell').forEach(b=>b.onclick=()=>shell(b.dataset.c));
-const pipPos={1:[4],2:[0,8],3:[0,4,8],4:[0,2,6,8],5:[0,2,4,6,8],6:[0,2,3,5,6,8]};function drawDie(n){$('die').innerHTML=Array.from({length:9},(_,i)=>pipPos[n].includes(i)?'<i class="pip"></i>':'<i></i>').join('')}drawDie(5);async function dice(n){$('die').classList.add('rolling');const j=await api('/rpg/api/tavern/play',{game:'dice',bet:Number($('dicebet').value),choice:String(n)});for(let i=0;i<8;i++){drawDie(1+Math.floor(Math.random()*6));await sleep(80)}$('die').classList.remove('rolling');if(j.ok){const m=j.detail.match(/(\d)/),d=m?Number(m[1]):1;drawDie(d);$('diceres').textContent=`Salió ${d} · ${j.profit>=0?'Premio':'Pérdida'} ${Math.abs(j.profit).toLocaleString()} KW`;haptic(j.profit>0?'heavy':'light')}}for(let i=1;i<=6;i++){const b=document.createElement('button');b.className='btn';b.textContent=i;b.onclick=()=>dice(i);$('dicechoices').appendChild(b)}
-async function highcard(){const j=await api('/rpg/api/tavern/play',{game:'highcard',bet:Number($('cardbet').value),choice:''});if(!j.ok)return;const m=j.detail.match(/Tú:\s*(\S+)\s*·\s*Malkor:\s*(\S+)/);if(m){$('highPlayer').innerHTML=cardHTML(m[1]);$('highHouse').innerHTML=cardHTML(m[2]);$('highPlayer').firstChild?.classList.add('flip');$('highHouse').firstChild?.classList.add('flip')}$('cardres').textContent=(j.profit>=0?'Premio ':'Pérdida ')+Math.abs(j.profit).toLocaleString()+' KW';haptic(j.profit>0?'heavy':'light')}$('cardgo').onclick=highcard;$('highPlayer').innerHTML=cardHTML('BACK');$('highHouse').innerHTML=cardHTML('BACK');
-const fc=$('flightCanvas'),fx=fc.getContext('2d');let flightActive=false,flightRAF=0,flightX=1,flightDist=0,flightAlt=120,flightT=0,flightPoll=0;
-function drawFlight(ts=0){const w=fc.width,h=fc.height,t=ts/1000;let sky=fx.createLinearGradient(0,0,0,h);sky.addColorStop(0,'#10233a');sky.addColorStop(.55,'#335b74');sky.addColorStop(1,'#d5a66a');fx.fillStyle=sky;fx.fillRect(0,0,w,h);fx.fillStyle='#ffffff22';for(let i=0;i<8;i++){let x=((i*173-t*24)%1100+1100)%1100-100,y=70+(i%4)*55;fx.beginPath();fx.ellipse(x,y,70,18,0,0,7);fx.ellipse(x+45,y-8,45,20,0,0,7);fx.fill()}fx.fillStyle='#17261f';fx.beginPath();fx.moveTo(0,h);for(let x=0;x<=w;x+=70)fx.lineTo(x,h-90-Math.sin(x*.017+t*.15)*38);fx.lineTo(w,h);fx.fill();fx.strokeStyle='#f1d38a';fx.lineWidth=4;fx.beginPath();fx.moveTo(0,h-45);fx.lineTo(w,h-45);fx.stroke();let px=210,py=Math.max(95,h-120-Math.min(220,(flightX-1)*30));fx.save();fx.translate(px,py);fx.rotate(-.08);fx.fillStyle='#d6a84d';fx.beginPath();fx.moveTo(-58,0);fx.lineTo(25,-18);fx.lineTo(62,0);fx.lineTo(25,15);fx.closePath();fx.fill();fx.fillStyle='#6f2b20';fx.fillRect(-28,-9,42,17);fx.strokeStyle='#e8d7a3';fx.lineWidth=5;fx.beginPath();fx.moveTo(62,-24);fx.lineTo(62,24);fx.stroke();fx.save();fx.translate(62,0);fx.rotate(t*20);fx.strokeStyle='#f4e5bd';fx.lineWidth=4;fx.beginPath();fx.moveTo(-20,0);fx.lineTo(20,0);fx.moveTo(0,-20);fx.lineTo(0,20);fx.stroke();fx.restore();fx.restore();if(flightActive)flightRAF=requestAnimationFrame(drawFlight)}
-function setFlightHud(){ $('flightX').textContent='x'+Number(flightX).toFixed(2);$('flightMeta').textContent=Number(flightDist).toLocaleString()+' m · '+Number(flightAlt).toLocaleString()+' m alt.'}
-async function flightTick(){if(!flightActive)return;const j=await api('/rpg/api/tavern/flight',{action:'state'});if(!j.ok){flightActive=false;return}flightX=Number(j.multiplier||1);flightDist=Number(j.distance||0);flightAlt=Number(j.altitude||120);setFlightHud();if(j.crashed){flightActive=false;cancelAnimationFrame(flightRAF);$('flightRes').textContent='Vuelo perdido en x'+flightX.toFixed(2)+'.';haptic('heavy');drawFlight(performance.now());state()}}
-$('flightStart').onclick=async()=>{if(flightActive)return;const j=await api('/rpg/api/tavern/flight',{action:'start',bet:Number($('flightbet').value)});if(!j.ok)return;flightActive=true;flightX=1;flightDist=0;flightAlt=120;setFlightHud();$('flightRes').textContent='En vuelo. Aterriza antes de perderlo.';cancelAnimationFrame(flightRAF);flightRAF=requestAnimationFrame(drawFlight);clearInterval(flightPoll);flightPoll=setInterval(()=>{if(!document.hidden)flightTick()},500)};
-$('flightCash').onclick=async()=>{if(!flightActive)return;const j=await api('/rpg/api/tavern/flight',{action:'cashout'});if(!j.ok)return;if(j.crashed){flightActive=false;$('flightRes').textContent='Demasiado tarde. Vuelo perdido en x'+Number(j.multiplier).toFixed(2)+'.'}else if(j.landed){flightActive=false;flightX=Number(j.multiplier);flightDist=Number(j.distance);setFlightHud();$('flightRes').textContent='Aterrizaje x'+flightX.toFixed(2)+' · '+Number(j.payout).toLocaleString()+' KW';haptic('heavy')}clearInterval(flightPoll);cancelAnimationFrame(flightRAF);drawFlight(performance.now());state()};drawFlight(0);
-
-const drinks=[['beer','Cerveza de Malkor','500','DEF'],['wine','Vino Élfico','1,200','EXP'],['whisky','Whisky Berserker','1,800','ATK'],['gambler','Elixir del Tahúr','2,200','PvE'],['abyss','Absenta del Abismo','3,000','Caos'],['destiny','Copa del Destino','4,200','Especial']];drinks.forEach(d=>{const x=document.createElement('div');x.className='drink';x.innerHTML=`<p><b>${d[1]}</b><br><span class="muted">${d[2]} KW · ${d[3]}</span></p><button class="btn">Servir</button>`;x.querySelector('button').onclick=async()=>{const j=await api('/rpg/api/tavern/drink',{drink:d[0]});if(j.ok){$('drinkres').textContent=j.drink+'\n'+j.effect;state()}};$('drinks').appendChild(x)});
-let seq=[],round=0,locked=true;const mem=[...document.querySelectorAll('.mem')];async function showSeq(){locked=true;await sleep(350);for(const n of seq){mem[n].classList.add('flash');await sleep(330);mem[n].classList.remove('flash');await sleep(130)}locked=false}$('memstart').onclick=async()=>{locked=true;$('memres').textContent='';const j=await api('/rpg/api/tavern/memory',{action:'start'});if(!j.ok)return;seq=j.sequence;round=j.round;$('meminfo').textContent='Ronda '+round;await showSeq()};mem.forEach((b,i)=>b.onclick=async()=>{if(locked)return;locked=true;b.classList.add('flash');setTimeout(()=>b.classList.remove('flash'),110);const j=await api('/rpg/api/tavern/memory',{action:'input',pad:i});if(!j.ok){$('memres').textContent=j.message||'Partida terminada';return}if(j.lost){$('memres').textContent=`Fin · ${j.score} rondas`+(j.new_record?` · Récord +${j.reward} KW`:'');state();return}if(j.round_complete){seq=j.sequence;round=j.round;$('meminfo').textContent='Ronda '+round;await sleep(260);await showSeq()}else locked=false});
-const canvas=$('catCanvas'),ctx=canvas.getContext('2d'),preview=$('catPreview'),pctx=preview.getContext('2d'),stick=$('stick'),knob=stick.querySelector('i');let cx=50,cy=50,cscore=0,csize=1,foods=[],others=[],vx=0,vy=0,joyId=null,joyCx=0,joyCy=0,last=performance.now(),catJoined=false,catCatalog=null,catSkin='classic',catColor='ginger';
-const catHex={ginger:'#c97b3d',coal:'#30343b',snow:'#e7e3d8',cream:'#cdb78d',smoke:'#777d86',cocoa:'#6e4633',blue:'#647487'};
-function catShape(g,x,y,s,name,score,me=false,skin='classic',color='ginger'){g.save();g.translate(x,y);g.scale(s,s);let fur=catHex[color]||catHex.ginger;g.fillStyle=fur;g.shadowColor=me?'#e7bd63':'transparent';g.shadowBlur=me?10:0;g.beginPath();g.ellipse(0,4,16,11,0,0,Math.PI*2);g.fill();g.beginPath();g.arc(12,-5,10,0,Math.PI*2);g.fill();g.beginPath();g.moveTo(5,-12);g.lineTo(8,-23);g.lineTo(13,-14);g.fill();g.beginPath();g.moveTo(14,-14);g.lineTo(21,-23);g.lineTo(21,-10);g.fill();g.strokeStyle=fur;g.lineWidth=5;g.beginPath();g.arc(-14,1,14,.5,4.7);g.stroke();g.shadowBlur=0;if(skin==='tuxedo'){g.fillStyle='#f3efe5';g.beginPath();g.ellipse(5,8,7,7,0,0,7);g.fill()}if(skin==='tabby'){g.strokeStyle='#3c2b22';g.lineWidth=2;[-5,0,5].forEach(k=>{g.beginPath();g.moveTo(k,-2);g.lineTo(k+7,3);g.stroke()})}if(skin==='siamese'){g.fillStyle='#3f302b';g.beginPath();g.arc(14,-5,7,0,7);g.fill()}if(skin==='calico'){g.fillStyle='#f0eee6';g.beginPath();g.ellipse(-4,3,7,6,.4,0,7);g.fill();g.fillStyle='#2c2928';g.beginPath();g.arc(14,-8,4,0,7);g.fill()}if(skin==='knight'){g.fillStyle='#8d98a4';g.fillRect(-8,-13,26,6);g.strokeStyle='#c9d0d6';g.strokeRect(-8,-13,26,6)}if(skin==='pirate'){g.fillStyle='#171717';g.fillRect(8,-9,13,4);g.strokeStyle='#171717';g.beginPath();g.moveTo(14,-5);g.lineTo(14,0);g.stroke()}if(skin==='ninja'){g.fillStyle='#15171c';g.fillRect(5,-13,18,7);g.fillStyle='#b21f2d';g.fillRect(5,-7,18,2)}if(skin==='mage'){g.fillStyle='#47306d';g.beginPath();g.moveTo(5,-13);g.lineTo(16,-35);g.lineTo(24,-11);g.fill()}if(skin==='royal'){g.fillStyle='#d6aa35';g.beginPath();g.moveTo(6,-14);g.lineTo(10,-25);g.lineTo(14,-17);g.lineTo(19,-27);g.lineTo(23,-13);g.fill()}g.fillStyle='#101216';g.beginPath();g.arc(10,-6,1.7,0,7);g.arc(17,-6,1.7,0,7);g.fill();g.restore();if(name){g.font='12px system-ui';g.textAlign='center';g.fillStyle='#fff';g.fillText(name+' · '+score,x,y-24*s)}}
-function previewCat(){pctx.clearRect(0,0,preview.width,preview.height);let g=pctx.createRadialGradient(180,70,5,180,70,180);g.addColorStop(0,'#31483a');g.addColorStop(1,'#0b100d');pctx.fillStyle=g;pctx.fillRect(0,0,preview.width,preview.height);catShape(pctx,170,90,2.2,'',0,true,$('catSkin').value||catSkin,$('catColor').value||catColor)}
-function fillCatalog(cat){catCatalog=cat;catSkin=cat.equipped.skin;catColor=cat.equipped.color;const fill=(el,arr,eq)=>{el.innerHTML=arr.map(x=>`<option value="${x.key}" ${x.key===eq?'selected':''}>${x.name}${x.owned?' · adquirido':' · '+Number(x.price).toLocaleString()+' KW'}</option>`).join('')};fill($('catSkin'),cat.skins,catSkin);fill($('catColor'),cat.colors,catColor);previewCat()}
-async function loadCatCatalog(){const j=await api('/rpg/api/tavern/cat',{action:'catalog'});if(j.ok)fillCatalog(j.catalog)}$('catSkin').onchange=previewCat;$('catColor').onchange=previewCat;$('catBuy').onclick=async()=>{let sk=$('catSkin').value,co=$('catColor').value,all=[...(catCatalog?.skins||[]),...(catCatalog?.colors||[])],target=all.find(x=>(x.key===sk||x.key===co)&&!x.owned);if(!target){toast('Los seleccionados ya son tuyos.');return}const j=await api('/rpg/api/tavern/cat',{action:'buy',key:target.key});if(j.ok){fillCatalog(j.catalog);toast('Cosmético adquirido.')}};$('catEquip').onclick=async()=>{const j=await api('/rpg/api/tavern/cat',{action:'equip',skin:$('catSkin').value,color:$('catColor').value});if(j.ok){fillCatalog(j.catalog);toast('Gato equipado.')}};
-let catBursts=[];function catBurst(x,y,count=18){for(let i=0;i<count;i++){const a=Math.random()*Math.PI*2,sp=1.2+Math.random()*3.8;catBursts.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-1.2,life:1,r:2+Math.random()*4})}}function drawCatBursts(){for(let i=catBursts.length-1;i>=0;i--){const q=catBursts[i];q.x+=q.vx;q.y+=q.vy;q.vy+=.06;q.life-=.035;ctx.globalAlpha=Math.max(0,q.life);ctx.fillStyle=q.life>.55?'#f1cf72':'#d7b064';ctx.beginPath();ctx.arc(q.x,q.y,q.r,0,7);ctx.fill();if(q.life<=0)catBursts.splice(i,1)}ctx.globalAlpha=1}function drawArena(){const w=canvas.width,h=canvas.height,g=ctx.createRadialGradient(w*.5,h*.45,20,w*.5,h*.45,w*.7);g.addColorStop(0,'#31553b');g.addColorStop(1,'#102019');ctx.fillStyle=g;ctx.fillRect(0,0,w,h);ctx.strokeStyle='#ffffff0b';ctx.lineWidth=2;for(let i=0;i<18;i++){ctx.beginPath();ctx.arc((i*137)%w,(i*83)%h,18+(i%4)*9,0,7);ctx.stroke()}foods.forEach(f=>{const x=f.x/100*w,y=f.y/100*h;ctx.fillStyle='#d7b064';ctx.beginPath();ctx.ellipse(x,y,8,5,0,0,7);ctx.fill();ctx.beginPath();ctx.moveTo(x+6,y);ctx.lineTo(x+13,y-6);ctx.lineTo(x+13,y+6);ctx.fill()});others.forEach(o=>catShape(ctx,o.x/100*w,o.y/100*h,.7+Number(o.size)*.12,o.display_name,o.score,false,o.skin_key,o.color_key));catShape(ctx,cx/100*w,cy/100*h,.8+csize*.13,'Tú',cscore,true,catSkin,catColor);drawCatBursts();const leaders=[...others.map(o=>({n:o.display_name||'Michi',s:Number(o.score||0)})),{n:'Tú',s:Number(cscore||0)}].sort((a,b)=>b.s-a.s).slice(0,5);ctx.fillStyle='#08120dcc';ctx.fillRect(w-190,12,176,26+leaders.length*22);ctx.fillStyle='#e8cc86';ctx.font='700 13px system-ui';ctx.fillText('ARENA',w-176,31);ctx.font='12px system-ui';leaders.forEach((r,i)=>{ctx.fillStyle=r.n==='Tú'?'#f1cf72':'#f2eee4';ctx.fillText(`${i+1}. ${String(r.n).slice(0,15)}`,w-176,52+i*22);ctx.textAlign='right';ctx.fillText(Math.floor(r.s).toLocaleString(),w-24,52+i*22);ctx.textAlign='left'})}
-function joyStart(e){if(!catJoined)return;e.preventDefault();joyId=e.pointerId;canvas.setPointerCapture?.(joyId);const r=canvas.getBoundingClientRect();joyCx=e.clientX-r.left;joyCy=e.clientY-r.top;stick.style.left=(joyCx-47)+'px';stick.style.top=(joyCy-47)+'px';stick.style.display='block';joyMove(e)}function joyMove(e){if(e.pointerId!==joyId)return;e.preventDefault();const r=canvas.getBoundingClientRect();let dx=e.clientX-r.left-joyCx,dy=e.clientY-r.top-joyCy,d=Math.hypot(dx,dy)||1,max=34;if(d>max){dx*=max/d;dy*=max/d}vx=dx/max;vy=dy/max;knob.style.transform=`translate(${dx}px,${dy}px)`}function joyEnd(e){if(e.pointerId!==joyId)return;joyId=null;vx=vy=0;stick.style.display='none';knob.style.transform='translate(0,0)'}canvas.addEventListener('pointerdown',joyStart,{passive:false});canvas.addEventListener('pointermove',joyMove,{passive:false});canvas.addEventListener('pointerup',joyEnd);canvas.addEventListener('pointercancel',joyEnd);function catLoop(t){last=t;drawArena();requestAnimationFrame(catLoop)}requestAnimationFrame(catLoop);
-$('catjoin').onclick=async()=>{const j=await api('/rpg/api/tavern/cat',{action:'join'});if(j.ok){catJoined=true;cx=Number(j.x);cy=Number(j.y);cscore=0;csize=1;foods=j.foods||[];fillCatalog(j.catalog);$('catres').textContent='Puntuación: 0 · partida activa';toast('Entraste a la arena.')}};setInterval(async()=>{if(document.hidden||!init||!catJoined)return;const j=await api('/rpg/api/tavern/cat',{action:'tick',dx:vx,dy:vy});if(j.ok){if(j.dead){catBurst(cx/100*canvas.width,cy/100*canvas.height,30);catJoined=false;vx=vy=0;cscore=Number(j.score||0);others=[];$('catres').textContent='Caíste en combate · puntuación '+cscore.toLocaleString()+' · pulsa ENTRAR para reaparecer';haptic('heavy');return}cx=Number(j.x);cy=Number(j.y);cscore=Number(j.score);csize=Number(j.size);foods=j.foods||[];catSkin=j.skin||catSkin;catColor=j.color||catColor;const me=tg.initDataUnsafe?.user?.id;others=(j.players||[]).filter(x=>String(x.user_id)!==String(me));$('catres').textContent='Puntuación: '+cscore.toLocaleString()+(j.eaten?' · alimento recogido':'')+(j.devoured?' · '+j.devoured+' rival devorado':'')+(j.headshots?' · '+j.headshots+' derribo de cabeza':'');if(j.cosmetic_drop){toast('Hallazgo raro: '+j.cosmetic_drop.name+' desbloqueado');loadCatCatalog()}}} ,650);$('catfinish').onclick=async()=>{if(!catJoined)return;const j=await api('/rpg/api/tavern/cat',{action:'finish'});if(j.ok){catJoined=false;vx=vy=0;$('catres').textContent=`Puntuación final: ${Number(j.score).toLocaleString()}`+(j.new_record?` · Récord +${j.reward} KW`:' · Récord no superado');state()}};let chessGame=null,chessSel=null,chessLegal=[];const chessGlyph={K:'♔',Q:'♕',R:'♖',B:'♗',N:'♘',P:'♙',k:'♚',q:'♛',r:'♜',b:'♝',n:'♞',p:'♟'};
-function renderChess(j){if(j)chessGame=j;if(!chessGame)return;chessLegal=chessGame.legal||[];const bd=$('chessBoard');bd.innerHTML='';for(let i=0;i<64;i++){const q=document.createElement('button'),p=chessGame.board[i]||'';q.className='chess-sq '+((((i%8)+Math.floor(i/8))%2)?'dark':'light')+(p&&p===p.toLowerCase()?' blackpiece':'');if(i===chessSel)q.classList.add('sel');const lm=chessLegal.filter(m=>m[0]===chessSel&&m[1]===i);if(lm.length)q.classList.add(p?'capture':'move');q.textContent=chessGlyph[p]||'';q.onclick=()=>chessTap(i);bd.appendChild(q)}let txt=chessGame.status==='waiting'?'Buscando rival…':chessGame.status==='active'?(chessGame.turn==='w'?'Turno: blancas':'Turno: negras'):(chessGame.winner==='draw'?'Tablas':(chessGame.winner===chessGame.side?'Victoria':(chessGame.mode==='pvp'?'Derrota':'Malkor gana')));$('chessStatus').textContent=txt;$('chessRes').textContent=chessGame.status==='waiting'?'Matchmaking global · el tablero se abrirá cuando entre otro jugador.':chessGame.status==='active'?(chessGame.mode==='pvp'?('PVP ELO · juegas con '+(chessGame.side==='w'?'blancas':'negras')+' · movimientos legales: '+chessLegal.length):'Nivel '+String(chessGame.cpu_level||'').toUpperCase()+' · movimientos legales: '+chessLegal.length):txt;}
-async function chessTap(i){if(!chessGame||chessGame.status!=='active'||chessGame.turn!==chessGame.side)return;const own=(chessGame.board[i]||'');const isOwn=own&&(chessGame.side==='w'?own===own.toUpperCase():own===own.toLowerCase());if(chessSel===null){if(isOwn&&chessLegal.some(m=>m[0]===i)){chessSel=i;renderChess();}return}const opts=chessLegal.filter(m=>m[0]===chessSel&&m[1]===i);if(!opts.length){chessSel=isOwn?i:null;renderChess();return}let promotion=opts[0][2]||'q';if(opts.some(m=>m[2])){const x=(prompt('Promoción: Q, R, B o N','Q')||'Q').toLowerCase();promotion='qrbn'.includes(x)?x:'q'}const from=chessSel;chessSel=null;$('chessStatus').textContent='Malkor está pensando…';$('chessBoard').classList.add('thinking');const j=await api('/rpg/api/tavern/chess',{action:'move',game_id:chessGame.game_id,from,to:i,promotion});$('chessBoard').classList.remove('thinking');if(j.ok){renderChess(j);if(j.status!=='active')haptic(j.winner===j.side?'heavy':'medium')}else{$('chessRes').textContent=j.message||'Movimiento rechazado';renderChess()}}
-document.querySelectorAll('.chessNew').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const j=await api('/rpg/api/tavern/chess',{action:'start_cpu',level:b.dataset.lv});if(j.ok){chessSel=null;renderChess(j);toast('Partida contra Malkor iniciada')}}finally{b.disabled=false}});$('chessPvp').onclick=async()=>{const b=$('chessPvp');b.disabled=true;try{const j=await api('/rpg/api/tavern/chess',{action:'start_pvp'});if(j.ok){chessSel=null;renderChess(j);toast(j.status==='waiting'?'Buscando rival…':'Rival encontrado.')}}finally{b.disabled=false}};setInterval(async()=>{if(document.hidden||!chessGame||chessGame.mode!=='pvp'||!['waiting','active'].includes(chessGame.status))return;const j=await api('/rpg/api/tavern/chess',{action:'state',game_id:chessGame.game_id});if(j.ok){const was=chessGame.status;renderChess(j);if(was==='waiting'&&j.status==='active')toast('Rival encontrado. Comienza la partida.')}},1800);
-function relicVisual(a){const n=String(a.name||'').toLowerCase();let t=n.includes('merl')?'staff':n.includes('gandiva')?'bow':(n.includes('kusanagi')||n.includes('masamune'))?'katana':'sword';return `<div class="relic-display"><div class="weapon ${t}"></div><div class="relic-stock">${Number(a.stock||0)}/${Number(a.global_stock||2)} EN EL MUNDO</div></div>`}async function loadShop(){const j=await api('/rpg/api/tavern/shop',{action:'state'});if(!j.ok)return;const arr=j.items||[],normal=arr.filter(a=>a.kind!=='relic'),relics=arr.filter(a=>a.kind==='relic');$('shopItems').innerHTML=[...normal,{divider:true},...relics].map(a=>{if(a.divider)return `<div class="relicDivider">CÁMARA DE RELIQUIAS<small>Solo existen dos ejemplares globales de cada arma · 1,000,000 KW</small></div>`;const relic=a.kind==='relic';const info=relic?`<div class="relicStats">JURAMENTO DE CLASE · ${a.class_name}<br>ATK +${a.atk} · DEF +${a.defense} · HP +${a.hp}<br><b>STOCK GLOBAL ${a.stock}/${a.global_stock}</b>${a.quantity?' · EJEMPLAR EN TU INVENTARIO':a.compatible?' · COMPATIBLE':' · OTRA CLASE'}</div>`:'';const disabled=(a.quantity&&!a.repeatable)||(relic&&(!a.compatible||a.stock<=0));return `<div class="rewardcard ${relic?'relicCard':''}"><b>${relic?'✦ ':''}${a.name}</b><div class="explain">${a.kind.toUpperCase()} · ${Number(a.price).toLocaleString()} KW${a.quantity?' · Tienes '+a.quantity:''}</div>${relic?relicVisual(a):''}${info}<div class="choices"><button class="btn shopBuy ${relic?'primary':''}" data-k="${a.key}" ${disabled?'disabled':''}>${relic?(a.stock<=0?'AGOTADA':'RECLAMAR RELIQUIA'):'COMPRAR'}</button>${a.kind==='chest'&&a.quantity?`<button class="btn primary shopOpen" data-k="${a.key}">ABRIR</button>`:''}</div></div>`}).join('');document.querySelectorAll('.shopBuy').forEach(b=>b.onclick=()=>shopAct('buy',b.dataset.k,b));document.querySelectorAll('.shopOpen').forEach(b=>b.onclick=()=>shopAct('open',b.dataset.k,b))}async function shopAct(action,key,btn){btn.disabled=true;const j=await api('/rpg/api/tavern/shop',{action,key});$('shopRes').textContent=j.message||'';if(j.ok){haptic('heavy');loadShop()}else btn.disabled=false}
-async function loadRewards(){const j=await api('/rpg/api/tavern/rewards',{action:'state'});if(!j.ok)return;$('dailyInfo').textContent=j.daily.available?('Cofre disponible · racha actual '+Number(j.daily.streak||0)):'Ya reclamado hoy · racha '+Number(j.daily.streak||0);$('dailyClaim').disabled=!j.daily.available;$('achievements').innerHTML=(j.achievements||[]).map(a=>`<div class="rewardcard ${a.unlocked&&!a.claimed?'ready':''}"><b>${a.name}</b><div class="explain">${a.description}</div><div>${Number(a.reward).toLocaleString()} KW · ${a.claimed?'Cobrado':a.unlocked?`<button class="btn achClaim" data-k="${a.key}">RECLAMAR</button>`:'Bloqueado'}</div></div>`).join('');document.querySelectorAll('.achClaim').forEach(b=>b.onclick=async()=>{b.disabled=true;const z=await api('/rpg/api/tavern/rewards',{action:'claim',key:b.dataset.k});if(z.ok){toast('Logro cobrado: +'+Number(z.reward).toLocaleString()+' KW');haptic('medium');loadRewards()}else b.disabled=false})}$('dailyClaim').onclick=async()=>{const b=$('dailyClaim');b.disabled=true;const j=await api('/rpg/api/tavern/rewards',{action:'daily'});if(j.ok){toast('Cofre diario: +'+Number(j.reward).toLocaleString()+' KW · racha '+j.streak);haptic('medium');state()}loadRewards()};
-
-// ===== Lobby real: cada juego entra a su propia pantalla =====
-const GAME_TITLES={KiwSlot:'slot-focus',Blackjack:'blackjack-focus',Ruleta:'roulette-focus','Las tres copas':'cups-focus',Dados:'dice-focus','Carta Mayor':'highcard-focus','El Vuelo de Malkor':'flight-focus','Memoria de Malkor':'memory-focus','CAT.IO':'cat-focus','Ajedrez de Malkor':'chess-focus'};
-let activeGame=null;
-function closeGame(){if(!activeGame)return;activeGame.classList.remove('focused');document.body.classList.remove('game-open');activeGame.querySelector('.game-back')?.remove();activeGame=null;window.scrollTo({top:0,behavior:'instant'});}
-function openGame(card,kind){if(activeGame)closeGame();activeGame=card;card.classList.add('focused',kind);document.body.classList.add('game-open');const back=document.createElement('button');back.className='game-back';back.textContent='← VOLVER A LA TABERNA';back.onclick=closeGame;card.insertBefore(back,card.firstChild);card.scrollTop=0;tg?.HapticFeedback?.impactOccurred('light');}
-document.querySelectorAll('#casino .card,#arcade .card').forEach(card=>{const title=card.querySelector('h3')?.textContent?.trim();const kind=GAME_TITLES[title];if(!kind)return;card.classList.add('game-card',kind);const b=document.createElement('button');b.className='game-launch';b.textContent='JUGAR · '+title.toUpperCase();b.onclick=()=>openGame(card,kind);card.appendChild(b);});
-// Números reales alrededor de la ruleta europea (decoración visual; el servidor decide el resultado)
-(()=>{const w=$('wheel');if(!w||w.querySelector('.wheel-label'))return;const order=[0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];order.forEach((n,i)=>{const e=document.createElement('i');e.className='wheel-label';e.textContent=n;e.style.setProperty('--a',(i*360/order.length)+'deg');w.appendChild(e)});})();
-loadCatCatalog();
-if(!init)toast('Abre la Taberna desde KiwBot en Telegram.');state();
-</script></body></html>
-'''
 
 # =========================================================
 # HEALTH CHECK
@@ -14312,128 +12416,6 @@ def configure_webhook():
         "setWebhook: %s",
         result
     )
-
-
-# =========================================================
-# WEBAPP — DIBUJA Y ADIVINA GLOBAL
-# =========================================================
-@app.route('/rpg/draw-global')
-def draw_global_page():
-    # Lienzo global: funciona como espectador incluso fuera de Telegram.
-    # Las acciones del artista sí requieren initData válido de Telegram.
-    html = r"""<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><title>Dibuja y Adivina</title><script src='https://telegram.org/js/telegram-web-app.js'></script><style>
-*{box-sizing:border-box}body{margin:0;background:#0d100d;color:#f3f1e8;font-family:system-ui,-apple-system,sans-serif;overscroll-behavior:none}.wrap{max-width:980px;margin:auto;padding:14px}.head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.title{font-weight:900;font-size:22px}.status{padding:8px 0 12px;color:#e6cf7a;min-height:38px}.choices,.tools{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}.choices button,.tools button{min-height:44px;border:1px solid #68634d;background:#242820;color:#f7f3e8;border-radius:10px;padding:9px 12px;font-weight:700}.sw{width:42px;height:42px;border-radius:50%!important;border:2px solid #eee!important;padding:0!important}.canvas{background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 10px 34px #0009;border:1px solid #3b4035}canvas{display:block;width:100%;height:auto;aspect-ratio:18/13;touch-action:none;background:#fff}.hidden{display:none!important}input[type=range]{width:150px;min-height:44px}input[type=color]{width:48px;height:44px;border:0;background:transparent}.note{font-size:13px;color:#aeb5a7;margin-top:8px}</style></head><body><main class='wrap'><div class='head'><div class='title'>Dibuja y Adivina</div><div id='role'></div></div><div id='drawStatus' class='status'>Conectando con la partida…</div><div id='choicesBox' class='choices'></div><div id='toolsBox' class='tools hidden'></div><div class='canvas'><canvas id='cv' width='900' height='650' aria-label='Lienzo de Dibuja y Adivina'></canvas></div><div id='note' class='note'>Los espectadores pueden abrir este enlace. Para dibujar debes abrir tu turno desde KiwBot.</div></main><script>
-(()=>{'use strict';
-const tg=window.Telegram&&window.Telegram.WebApp?window.Telegram.WebApp:null;if(tg){try{tg.ready();tg.expand()}catch(_){}}
-const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),init=(tg&&tg.initData)||'';
-const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('drawStatus'),choicesEl=document.getElementById('choicesBox'),toolsEl=document.getElementById('toolsBox'),roleEl=document.getElementById('role');
-let drawer=false,drawing=false,color='#111111',brush=7,strokes=[],version=-1,syncing=false,prev=null,lastStateAt=0;
-const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];
-function setStatus(t){statusEl.textContent=String(t||'')}
-function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';ctx.lineJoin='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}
-render();
-async function api(action,data={}){const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),7000);try{const r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:init,chat_id:chat,action,...data}),signal:ctrl.signal,cache:'no-store'});let j;try{j=await r.json()}catch(_){throw new Error('Respuesta inválida del servidor ('+r.status+')')}if(!r.ok&&!j.message)j.message='Error '+r.status;return j}finally{clearTimeout(timer)}}
-function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button type='button' class='sw' data-c='${c}' style='background:${c}' aria-label='Color ${c}'></button>`).join('')+`<input id='customColor' type='color' value='#111111' aria-label='Color personalizado'><input id='brushSize' type='range' min='2' max='36' value='7' aria-label='Grosor'><button type='button' id='eraserBtn'>Goma</button><button type='button' id='undoBtn'>Deshacer</button><button type='button' id='clearBtn'>Borrar</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.addEventListener('click',()=>color=b.dataset.c));document.getElementById('customColor').addEventListener('input',e=>color=e.target.value);document.getElementById('brushSize').addEventListener('input',e=>brush=Number(e.target.value)||7);document.getElementById('eraserBtn').addEventListener('click',()=>color='#ffffff');document.getElementById('undoBtn').addEventListener('click',()=>{strokes.pop();render();sync()});document.getElementById('clearBtn').addEventListener('click',()=>{strokes=[];render();sync()})}
-function paintChoices(j){choicesEl.innerHTML=(j.choices||[]).map((q,i)=>`<button type='button' data-i='${i}'>${String(q)}</button>`).join('')+(j.can_reroll?`<button type='button' id='rerollBtn'>Cambiar palabras (1)</button>`:'');choicesEl.querySelectorAll('[data-i]').forEach(b=>b.addEventListener('click',async()=>{setStatus('Preparando ronda…');try{const z=await api('choose',{choice:Number(b.dataset.i)});if(!z.ok){setStatus(z.message||'No pude elegir la palabra');return}choicesEl.innerHTML='';drawing=true;showTools();setStatus('Palabra: '+z.word+' · '+z.left+'s')}catch(e){setStatus('No pude iniciar la ronda: '+e.message)}}));const rr=document.getElementById('rerollBtn');if(rr)rr.addEventListener('click',async()=>{rr.disabled=true;try{const z=await api('reroll');if(z.ok){j.choices=z.choices;j.can_reroll=false;paintChoices(j)}else setStatus(z.message||'No pude cambiar las palabras')}catch(e){setStatus('Error: '+e.message)}finally{rr.disabled=false}})}
-async function applyState(j){drawer=!!j.drawer;roleEl.textContent=drawer?'ARTISTA':'ESPECTADOR';version=Number(j.version||0);strokes=Array.isArray(j.strokes)?j.strokes:[];render();if(j.status==='choosing'&&drawer){drawing=false;setStatus('Elige una palabra para comenzar');paintChoices(j)}else if(j.status==='drawing'){drawing=drawer;if(drawer){if(toolsEl.classList.contains('hidden'))showTools();setStatus('Palabra: '+j.word+' · '+j.left+'s')}else setStatus('Dibujo en curso · '+j.left+'s')}else{drawing=false;toolsEl.classList.add('hidden');choicesEl.innerHTML='';setStatus(j.status==='finished'?'La ronda terminó. Esperando el siguiente turno…':'Esperando que alguien tome el turno…')}}
-async function boot(){if(!Number.isFinite(chat)||!chat){setStatus('Enlace inválido: falta el chat.');return}try{const j=await api('state');if(!j.ok){setStatus(j.message||'No hay partida disponible');return}await applyState(j)}catch(e){setStatus(e.name==='AbortError'?'El servidor tardó demasiado. Vuelve a abrir el lienzo.':'No pude cargar la partida: '+e.message)}}
-function point(e){const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}
-cv.addEventListener('pointerdown',e=>{if(!drawer||!drawing)return;e.preventDefault();try{cv.setPointerCapture(e.pointerId)}catch(_){}prev=point(e)});cv.addEventListener('pointermove',e=>{if(!prev||!drawer||!drawing)return;e.preventDefault();const p=point(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:brush};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=brush;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%16===0)sync()});
-async function endStroke(){if(!prev)return;prev=null;await sync()}cv.addEventListener('pointerup',endStroke);cv.addEventListener('pointercancel',()=>{prev=null});
-async function sync(){if(syncing||!drawer||!drawing)return;syncing=true;try{const j=await api('stroke',{strokes});if(j.ok)version=Number(j.version||version);else setStatus(j.message||'No pude sincronizar el dibujo')}catch(e){setStatus('Sincronización interrumpida: '+e.message)}finally{syncing=false}}
-setInterval(async()=>{if(document.hidden||drawer||Date.now()-lastStateAt<650)return;lastStateAt=Date.now();try{const j=await api('state',{version});if(j.ok){if(Number(j.version||0)!==version){version=Number(j.version||0);strokes=Array.isArray(j.strokes)?j.strokes:[];render()}setStatus(j.status==='drawing'?'Dibujo en curso · '+j.left+'s':j.status==='choosing'?'El artista está eligiendo palabra…':'Esperando turno…')}}catch(_){}},900);
-boot();
-})();</script></body></html>"""
-    return Response(html, mimetype='text/html', headers={'Cache-Control':'no-store, max-age=0'})
-
-@app.route('/rpg/api/draw-global',methods=['POST'])
-def draw_global_api():
-    b=request.get_json(silent=True) or {}
-    try:
-        chat_id=int(b.get('chat_id') or 0)
-    except Exception:
-        chat_id=0
-    action=str(b.get('action') or 'state')
-    now=int(time.time())
-    if not chat_id:
-        return jsonify(ok=False,message='Chat inválido'),400
-
-    # Ver el lienzo es público para los miembros que recibieron el enlace.
-    # No bloqueamos la fila para polling de espectadores: evita lock storms.
-    if action == 'state':
-        with db_lock:
-            c=get_db()
-            try:
-                row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=?',(chat_id,)).fetchone()
-                if not row:
-                    return jsonify(ok=False,message='No hay partida activa'),404
-                auth=_tavern_auth(b) if b.get('init_data') else None
-                uid=int((auth or {}).get('user',{}).get('id') or 0)
-                drawer=bool(uid and int(row['drawer_id'] or 0)==uid)
-                if row['status']=='drawing' and int(row['ends_at'] or 0)<=now:
-                    expired=True
-                else:
-                    expired=False
-                    payload={'ok':True,'status':row['status'],'drawer':drawer,'strokes':json.loads(row['strokes'] or '[]'),'version':int(row['stroke_version'] or 0),'left':max(0,int(row['ends_at'] or 0)-now)}
-                    if drawer and row['status']=='choosing':
-                        payload['choices']=[q['word'] for q in json.loads(row['choices'] or '[]')]
-                        payload['can_reroll']=int(row['rerolls'] or 0)<1
-                    if drawer and row['status']=='drawing':
-                        payload['word']=row['word']
-            finally:
-                c.close()
-        if expired:
-            _draw_finish(chat_id,'time')
-            return jsonify(ok=True,status='finished',drawer=False,strokes=[],version=0,left=0)
-        return jsonify(payload)
-
-    # Toda mutación exige identidad Telegram válida.
-    auth=_tavern_auth(b) if b.get('init_data') else None
-    uid=int((auth or {}).get('user',{}).get('id') or 0)
-    if not uid:
-        return jsonify(ok=False,message='Abre tu turno desde KiwBot para dibujar.'),403
-
-    with db_lock:
-        c=get_db()
-        try:
-            row=c.execute('SELECT * FROM tavern_draw_games WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
-            if not row:
-                c.rollback(); return jsonify(ok=False,message='No hay partida activa'),404
-            drawer=bool(int(row['drawer_id'] or 0)==uid)
-            if action=='reroll':
-                if not drawer or row['status']!='choosing': c.rollback(); return jsonify(ok=False,message='No eres el artista'),403
-                if int(row['rerolls'] or 0)>=1: c.rollback(); return jsonify(ok=False,message='Ya usaste el cambio'),409
-                old=[q.get('word') for q in json.loads(row['choices'] or '[]')]
-                fresh=[{'word':w,'synonyms':syn} for w,syn in _draw_choices(old)]
-                c.execute('UPDATE tavern_draw_games SET choices=?,rerolls=1,updated_at=? WHERE chat_id=?',(json.dumps(fresh,ensure_ascii=False),now,chat_id));c.commit()
-                return jsonify(ok=True,choices=[q['word'] for q in fresh])
-            if action=='choose':
-                if not drawer or row['status']!='choosing': c.rollback(); return jsonify(ok=False,message='No eres el artista'),403
-                choices=json.loads(row['choices'] or '[]')
-                try: idx=int(b.get('choice',-1))
-                except Exception: idx=-1
-                if idx<0 or idx>=len(choices): c.rollback(); return jsonify(ok=False,message='Palabra inválida'),400
-                q=choices[idx]; end=now+_DRAW_ROUND_SECONDS
-                c.execute("UPDATE tavern_draw_games SET word=?,synonyms=?,status='drawing',started_at=?,ends_at=?,strokes='[]',stroke_version=0,updated_at=? WHERE chat_id=?",(q['word'],json.dumps(q.get('synonyms',[]),ensure_ascii=False),now,end,now,chat_id));c.commit()
-                send_message(chat_id,f'Comenzó el dibujo. Tienen {_DRAW_ROUND_SECONDS} segundos. Escriban sus respuestas directamente en el chat.')
-                threading.Timer(_DRAW_ROUND_SECONDS+1,lambda:_draw_finish(chat_id,'time')).start()
-                return jsonify(ok=True,word=q['word'],left=_DRAW_ROUND_SECONDS)
-            if action=='stroke':
-                if not drawer or row['status']!='drawing': c.rollback(); return jsonify(ok=False,message='No puedes dibujar'),403
-                strokes=b.get('strokes') or []
-                if not isinstance(strokes,list) or len(strokes)>_DRAW_MAX_STROKES: c.rollback(); return jsonify(ok=False,message='Lienzo demasiado grande'),400
-                clean=[]
-                for q in strokes:
-                    try:
-                        clean.append({'a':max(0,min(900,float(q['a']))),'b':max(0,min(650,float(q['b']))),'d':max(0,min(900,float(q['d']))),'e':max(0,min(650,float(q['e']))),'c':str(q['c']) if re.fullmatch(r'#[0-9a-fA-F]{6}',str(q.get('c',''))) else '#111111','w':max(2,min(36,float(q['w'])))})
-                    except Exception:
-                        pass
-                ver=int(row['stroke_version'] or 0)+1
-                c.execute('UPDATE tavern_draw_games SET strokes=?,stroke_version=?,updated_at=? WHERE chat_id=?',(json.dumps(clean,separators=(',',':')),ver,now,chat_id));c.commit()
-                return jsonify(ok=True,version=ver)
-            c.rollback(); return jsonify(ok=False,message='Acción desconocida'),400
-        finally:
-            c.close()
 
 
 # =========================================================

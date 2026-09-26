@@ -9079,172 +9079,491 @@ def help_revive_player(helper_id,target_id):
 
 
 # =========================================================
-# TABERNA RPG - MINIJUEGOS AISLADOS
-# No modifica combate, tecnicas, mazmorras ni cooldowns.
+# TABERNA RPG V2 - casino, bebidas, ranking, arsenal y encargos
+# Modulo aislado: no reescribe combate, tecnicas, mazmorras ni cooldowns.
 # =========================================================
 
 _tavern_lock = threading.RLock()
 _tavern_games = {}
-TAVERN_GAME_TTL = 300
+TAVERN_GAME_TTL = 600
+TAVERN_BETS = (100, 500, 1000, 5000, 10000, 20000)
+TAVERN_WEAPON_PRICE = 1_000_000
+RPG_RARITY_ICON.setdefault("mitico", "🌟")
+
+TAVERN_DRINKS = {
+    "dwarf": {"name":"🍺 Cerveza Enana","price":5000,"effect":"kw","mag":10,"games":5,"desc":"+10% KW ganados durante 5 partidas."},
+    "crimson": {"name":"🍷 Vino Carmesí","price":8000,"effect":"exp","mag":15,"games":5,"desc":"+15% EXP de Taberna durante 5 partidas."},
+    "fortune": {"name":"🍹 Fortuna del Tahúr","price":12000,"effect":"both","mag":10,"games":4,"desc":"+10% EXP y KW durante 4 partidas."},
+    "berserker": {"name":"🥃 Whisky del Berserker","price":15000,"effect":"risk","mag":25,"games":4,"desc":"+25% KW al ganar; al perder, la casa cobra 10% extra de la apuesta."},
+    "mystery": {"name":"❓ Trago de la Casa","price":6000,"effect":"mystery","mag":0,"games":3,"desc":"Tres partidas con un efecto sorpresa. Puede ser glorioso... o una resaca."},
+}
+
+TAVERN_MYTHIC_WEAPONS = {
+    "Guerrero": ("tavern_mythic_guerrero","⚔️ Rompemundos del Rey Caído",13,3,25,2),
+    "Mago": ("tavern_mythic_mago","🔮 Cetro de la Última Estrella",15,1,15,2),
+    "Pícaro": ("tavern_mythic_picaro","🗡️ Gemelas del Pecado",14,2,15,2),
+    "Paladín": ("tavern_mythic_paladin","🔨 Juramento del Sol Eterno",11,6,40,2),
+    "Arquero": ("tavern_mythic_arquero","🏹 Arco del Horizonte Roto",14,2,20,2),
+    "The Cleaner": ("tavern_mythic_cleaner","🦅 Final Bell",16,4,35,1),
+}
+
+TAVERN_MISSIONS = {
+    "games5": ("🍻 Cliente frecuente", "Juega 5 partidas hoy", "games", 5, 3, 5000),
+    "wins3": ("🏆 La casa te odia", "Gana 3 partidas hoy", "wins", 3, 5, 8000),
+    "streak5": ("🔥 Mano caliente", "Consigue una racha de 5", "best_streak", 5, 7, 12000),
+    "drinks2": ("🥂 Catador profesional", "Compra 2 bebidas hoy", "drinks", 2, 4, 6000),
+}
 
 
-def _tavern_key(user_id):
-    return int(user_id)
+def _ensure_tavern_db():
+    """Migracion idempotente y pequeña. Se ejecuta solo al usar la Taberna."""
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_stats (
+                user_id BIGINT PRIMARY KEY, games BIGINT NOT NULL DEFAULT 0,
+                wins BIGINT NOT NULL DEFAULT 0, losses BIGINT NOT NULL DEFAULT 0,
+                net_kw BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL DEFAULT 0)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_effects (
+                user_id BIGINT PRIMARY KEY, drink_key TEXT NOT NULL, effect_type TEXT NOT NULL,
+                magnitude BIGINT NOT NULL DEFAULT 0, games_left BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL DEFAULT 0)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_daily (
+                user_id BIGINT NOT NULL, day_key TEXT NOT NULL,
+                games BIGINT NOT NULL DEFAULT 0, wins BIGINT NOT NULL DEFAULT 0,
+                drinks BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(user_id,day_key))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_claims (
+                user_id BIGINT NOT NULL, day_key TEXT NOT NULL, mission_key TEXT NOT NULL,
+                claimed_at BIGINT NOT NULL, PRIMARY KEY(user_id,day_key,mission_key))""")
+            for cls,(key,name,atk,defn,hp,stock) in TAVERN_MYTHIC_WEAPONS.items():
+                conn.execute("""INSERT INTO rpg_items
+                    (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,
+                     tradeable,created_at,equip_slot,allowed_classes,min_level)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,
+                      description=excluded.description,atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,
+                      max_global_copies=excluded.max_global_copies,tradeable=excluded.tradeable,equip_slot=excluded.equip_slot,
+                      allowed_classes=excluded.allowed_classes,min_level=excluded.min_level""",
+                    (key,name,"mitico","arma",f"Arma mítica de Taberna reservada para {cls}. Solo existen {stock} por mundo.",
+                     atk,defn,hp,stock,0,now,"arma",cls,1))
+            conn.commit(); conn.close()
+        except Exception:
+            conn.rollback(); conn.close(); raise
 
+
+def _tavern_key(user_id): return int(user_id)
 
 def _tavern_cleanup(now=None):
-    now = time.time() if now is None else float(now)
+    now=time.time() if now is None else float(now)
     with _tavern_lock:
-        dead=[uid for uid,g in _tavern_games.items() if now-float(g.get('updated_at',now)) > TAVERN_GAME_TTL]
+        dead=[uid for uid,g in _tavern_games.items() if now-float(g.get("updated_at",now))>TAVERN_GAME_TTL]
         for uid in dead: _tavern_games.pop(uid,None)
 
-
-def _tavern_set(user_id, game):
-    game=dict(game); game['updated_at']=time.time()
+def _tavern_set(user_id,game):
+    game=dict(game); game["updated_at"]=time.time()
     with _tavern_lock: _tavern_games[_tavern_key(user_id)]=game
     return game
-
 
 def _tavern_get(user_id):
     _tavern_cleanup()
     with _tavern_lock:
-        g=_tavern_games.get(_tavern_key(user_id))
-        return dict(g) if g else None
-
+        g=_tavern_games.get(_tavern_key(user_id)); return dict(g) if g else None
 
 def _tavern_pop(user_id):
     with _tavern_lock: return _tavern_games.pop(_tavern_key(user_id),None)
 
+def _tavern_day(): return time.strftime("%Y-%m-%d", time.gmtime())
+
+def _tavern_native_dice(chat_id,emoji):
+    """Animacion nativa de Telegram. Nunca usa el registro de dados del combate."""
+    try:
+        r=telegram("sendDice",{"chat_id":int(chat_id),"emoji":emoji}) or {}
+        return int((((r.get("result") or {}).get("dice") or {}).get("value") or 0))
+    except Exception:
+        logger.exception("Emoji interactivo de Taberna falló")
+        return 0
+
+
+def _tavern_stats_event(user_id,won=False,net_delta=0,streak=0):
+    _ensure_tavern_db(); now=int(time.time()); day=_tavern_day()
+    with db_lock:
+        conn=get_db()
+        conn.execute("""INSERT INTO rpg_tavern_stats(user_id,games,wins,losses,net_kw,best_streak,updated_at)
+            VALUES(?,1,?,?,?, ?,?) ON CONFLICT(user_id) DO UPDATE SET
+            games=rpg_tavern_stats.games+1,wins=rpg_tavern_stats.wins+excluded.wins,
+            losses=rpg_tavern_stats.losses+excluded.losses,net_kw=rpg_tavern_stats.net_kw+excluded.net_kw,
+            best_streak=GREATEST(rpg_tavern_stats.best_streak,excluded.best_streak),updated_at=excluded.updated_at""",
+            (int(user_id),1 if won else 0,0 if won else 1,int(net_delta),int(streak),now))
+        conn.execute("""INSERT INTO rpg_tavern_daily(user_id,day_key,games,wins,drinks,best_streak)
+            VALUES(?,?,1,?,0,?) ON CONFLICT(user_id,day_key) DO UPDATE SET
+            games=rpg_tavern_daily.games+1,wins=rpg_tavern_daily.wins+excluded.wins,
+            best_streak=GREATEST(rpg_tavern_daily.best_streak,excluded.best_streak)""",
+            (int(user_id),day,1 if won else 0,int(streak)))
+        conn.commit(); conn.close()
+
+
+def _tavern_drink_event(user_id):
+    _ensure_tavern_db(); day=_tavern_day()
+    with db_lock:
+        conn=get_db(); conn.execute("""INSERT INTO rpg_tavern_daily(user_id,day_key,games,wins,drinks,best_streak)
+            VALUES(?,?,0,0,1,0) ON CONFLICT(user_id,day_key) DO UPDATE SET drinks=rpg_tavern_daily.drinks+1""",(int(user_id),day)); conn.commit(); conn.close()
+
+
+def _tavern_effect(user_id):
+    _ensure_tavern_db()
+    with db_lock:
+        conn=get_db(); row=conn.execute("SELECT * FROM rpg_tavern_effects WHERE user_id=? AND games_left>0",(int(user_id),)).fetchone(); conn.close()
+    return dict(row) if row else None
+
+
+def _tavern_apply_effect(user_id,won,exp,payout,bet):
+    """Aplica bebida solo a recompensas de Taberna; no toca stats permanentes ni combate."""
+    eff=_tavern_effect(user_id); exp=int(exp); payout=int(payout); extra_loss=0; label=""
+    if not eff: return exp,payout,extra_loss,label
+    typ=str(eff["effect_type"]); mag=int(eff["magnitude"])
+    if typ=="kw" and won: payout=int(round(payout*(1+mag/100)))
+    elif typ=="exp": exp=int(round(exp*(1+mag/100)))
+    elif typ=="both":
+        exp=int(round(exp*(1+mag/100)))
+        if won: payout=int(round(payout*(1+mag/100)))
+    elif typ=="risk":
+        if won: payout=int(round(payout*1.25))
+        else: extra_loss=max(1,int(round(int(bet)*0.10)))
+    elif typ=="lucky" and won: payout=int(round(payout*1.20))
+    elif typ=="resaca":
+        exp=max(1,int(round(exp*0.90)))
+        if won: payout=int(round(payout*0.90))
+    label=f"\n🍹 {eff.get('drink_key','Bebida')} · {int(eff['games_left'])-1} partidas restantes"
+    with db_lock:
+        conn=get_db(); left=max(0,int(eff["games_left"])-1)
+        if left: conn.execute("UPDATE rpg_tavern_effects SET games_left=?,updated_at=? WHERE user_id=?",(left,int(time.time()),int(user_id)))
+        else: conn.execute("DELETE FROM rpg_tavern_effects WHERE user_id=?",(int(user_id),))
+        conn.commit(); conn.close()
+    return exp,payout,extra_loss,label
+
 
 def tavern_home_keyboard():
-    return {'inline_keyboard':[
-        [{'text':'🎲 Dados del Tahúr','callback_data':'tavern:dice'}, {'text':'🃏 Carta Mayor','callback_data':'tavern:cards'}],
-        [{'text':'🥃 Tres Vasos','callback_data':'tavern:cups'}, {'text':'🎯 Dardos','callback_data':'tavern:darts'}],
-        [{'text':'🪙 Cara o Cruz','callback_data':'tavern:coin'}],
-        [{'text':'🚪 Salir','callback_data':'tavern:exit'}]
-    ]}
+    return {"inline_keyboard":[
+        [{"text":"🎲 Dados del Tahúr","callback_data":"tavern:game:dice"},{"text":"🃏 Carta Mayor","callback_data":"tavern:game:cards"}],
+        [{"text":"🥃 Tres Vasos","callback_data":"tavern:game:cups"},{"text":"🎯 Dardos","callback_data":"tavern:game:darts"}],
+        [{"text":"🪙 Cara o Cruz","callback_data":"tavern:game:coin"}],
+        [{"text":"🍹 Bebidas","callback_data":"tavern:drinks"},{"text":"🌟 Arsenal mítico","callback_data":"tavern:arsenal"}],
+        [{"text":"📜 Encargos","callback_data":"tavern:missions"},{"text":"🏆 Ranking","callback_data":"tavern:ranking"}],
+        [{"text":"🚪 Salir","callback_data":"tavern:exit"}]]}
 
 
 def tavern_home_text(user_id):
-    char=get_active_character(user_id)
-    who=f"{char['name']} · Nv.{int(char['level'])}" if char else 'Sin personaje activo'
-    return ("🍻 LA TABERNA DEL KIWRPG\n\n"
-            "Entre jarras, cartas marcadas y un tabernero que jura que jamás hace trampa, puedes ganar EXP y Kiwons.\n\n"
-            f"🧙 {who}\n🪙 {get_kiwons(user_id):,} KW\n\n"
-            "Elige un juego. Todas las partidas dan recompensa; ganar siempre da más.")
+    _ensure_tavern_db(); char=get_active_character(user_id)
+    who=f"{char['name']} · Nv.{int(char['level'])}" if char else "Sin personaje activo"
+    eff=_tavern_effect(user_id); et=f"\n🍹 Efecto activo: {eff['drink_key']} · {eff['games_left']} partidas" if eff else ""
+    return ("🍻 LA TABERNA DEL KIWRPG\n\nLa casa ya acepta apuestas serias. Gana, pierde, haz rachas, bebe algo dudoso y procura no hipotecar la armadura.\n\n"
+            f"🧙 {who}\n🪙 {get_kiwons(user_id):,} KW{et}\n\nElige tu próxima mala decisión.")
 
 
-def _tavern_reward(user_id, chat_id, exp, kw, note):
-    char=get_active_character(user_id)
-    if not char: return False, 'Necesitas un personaje activo para jugar en la Taberna.'
-    exp=max(1,int(exp)); kw=max(0,int(kw))
-    result=grant_rpg_exp(int(char['id']),exp)
-    actual_exp=exp
-    try:
-        if isinstance(result,tuple) and len(result)>1 and isinstance(result[1],int):
-            # grant_rpg_exp devuelve niveles ganados como segundo valor en algunas versiones;
-            # la cifra mostrada sigue siendo la EXP base para no duplicar el bonus visualmente.
-            pass
-    except Exception: pass
-    ok,balance,err=change_kiwons(user_id,kw,'tavern_game',actor_id=user_id,chat_id=chat_id,note=note)
-    if not ok: return False,err or 'No pude entregar los Kiwons.'
-    return True,f"✨ +{actual_exp} EXP · 🪙 +{kw} KW\n💰 Saldo: {balance:,} KW"
+def _tavern_bet_keyboard(game):
+    rows=[]
+    vals=list(TAVERN_BETS)
+    for i in range(0,len(vals),3):
+        rows.append([{"text":f"🪙 {v//1000}K" if v>=1000 else f"🪙 {v}","callback_data":f"tavern:start:{game}:{v}"} for v in vals[i:i+3]])
+    rows.append([{"text":"⬅️ Taberna","callback_data":"tavern:home"}]); return {"inline_keyboard":rows}
 
 
-def _tavern_finish(user_id, chat_id, title, won, exp, kw, detail):
+def _tavern_game_name(game):
+    return {"dice":"🎲 Dados del Tahúr","cards":"🃏 Carta Mayor","cups":"🥃 Tres Vasos","darts":"🎯 Dardos del Dragón","coin":"🪙 Moneda del Tabernero"}.get(game,"🍻 Juego")
+
+
+def _tavern_take_bet(user_id,chat_id,game,bet):
+    bet=int(bet)
+    if bet not in TAVERN_BETS: return False,"Apuesta no válida."
+    ok,balance,err=change_kiwons(user_id,-bet,"tavern_bet",actor_id=user_id,chat_id=chat_id,note=f"Apuesta {_tavern_game_name(game)}")
+    if not ok: return False,f"🪙 No tienes suficiente. Necesitas {bet:,} KW."
+    return True,balance
+
+
+def _tavern_finish(user_id,chat_id,game,won,exp,payout,detail,streak=0):
+    """Cierre atómico: una partida solo puede pagar una vez aunque lleguen callbacks duplicados."""
+    with _tavern_lock:
+        g=_tavern_games.get(_tavern_key(user_id))
+        if not g or g.get("game")!=game or g.get("settling"):
+            return "🍻 Esa partida ya terminó. No se volvió a cobrar ni a pagar nada.", tavern_home_keyboard()
+        g=dict(g); g["settling"]=True
+        _tavern_games[_tavern_key(user_id)]=g
     _tavern_pop(user_id)
-    ok,reward=_tavern_reward(user_id,chat_id,exp,kw,title)
-    if not ok: return reward,tavern_home_keyboard()
-    result='🏆 Victoria' if won else '🍺 Fin de la ronda'
-    txt=f"{title}\n\n{detail}\n\n{result}\n{reward}"
-    kb={'inline_keyboard':[[{'text':'🔁 Jugar otra','callback_data':'tavern:home'}],[{'text':'🍻 Volver a la Taberna','callback_data':'tavern:home'}]]}
+    bet=int(g.get("bet",0)); exp=max(1,int(exp)); payout=max(0,int(payout))
+    exp,payout,extra_loss,effect_txt=_tavern_apply_effect(user_id,won,exp,payout,bet)
+    char=get_active_character(user_id)
+    if not char: return "Necesitas un personaje activo.",tavern_home_keyboard()
+    grant_rpg_exp(int(char["id"]),exp)
+    balance=get_kiwons(user_id)
+    if payout:
+        ok,balance,_=change_kiwons(user_id,payout,"tavern_payout",actor_id=user_id,chat_id=chat_id,note=_tavern_game_name(game))
+        if not ok: payout=0; balance=get_kiwons(user_id)
+    if extra_loss:
+        ok,balance,_=change_kiwons(user_id,-extra_loss,"tavern_drink_risk",actor_id=user_id,chat_id=chat_id,note="Whisky del Berserker")
+        if not ok: extra_loss=0; balance=get_kiwons(user_id)
+    net=payout-bet-extra_loss
+    _tavern_stats_event(user_id,won,net,streak)
+    # Esencia: bonus raro por victoria, limitado a una por partida.
+    essence=""
+    if won and random.random()<0.035:
+        if grant_rpg_item(user_id,int(char["id"]),"esencia_tecnica","taberna:bonus"):
+            essence="\n💠 Bonus raro: Esencia de Técnica ×1"
+    result="🏆 Victoria" if won else "💀 La casa gana"
+    money=f"🪙 {'+' if net>=0 else ''}{net:,} KW netos"
+    if extra_loss: money+=f" (incluye {extra_loss:,} KW extra por el Whisky)"
+    txt=(f"{_tavern_game_name(game)}\n\n{detail}\n\n{result}\n✨ +{exp} EXP\n{money}\n💰 Saldo: {balance:,} KW{essence}{effect_txt}")
+    kb={"inline_keyboard":[[{"text":f"🔁 Otra vez · {bet:,} KW","callback_data":f"tavern:start:{game}:{bet}"}],
+                           [{"text":"🍻 Volver a la Taberna","callback_data":"tavern:home"}]]}
     return txt,kb
 
 
-def tavern_callback(user_id, chat_id, data):
+def _tavern_start_game(user_id,chat_id,game,bet):
+    if game not in ("dice","cards","cups","darts","coin"):
+        return "🍻 Ese juego no existe. No se descontó ninguna apuesta.", tavern_home_keyboard()
+    with _tavern_lock:
+        uid=_tavern_key(user_id)
+        if uid in _tavern_games:
+            return "🍻 Ya tienes una partida activa. Termínala antes de abrir otra apuesta.", tavern_home_keyboard()
+        _tavern_games[uid]={"game":"pending","target_game":game,"bet":int(bet),"updated_at":time.time()}
+    ok,res=_tavern_take_bet(user_id,chat_id,game,bet)
+    if not ok:
+        with _tavern_lock:
+            cur=_tavern_games.get(_tavern_key(user_id))
+            if cur and cur.get("game")=="pending" and cur.get("target_game")==game:
+                _tavern_games.pop(_tavern_key(user_id),None)
+        return res,_tavern_bet_keyboard(game)
+    base={"game":game,"bet":int(bet)}
+    if game=="dice":
+        base.update(player=random.randint(1,6)+random.randint(1,6),dealer=random.randint(11,15)); _tavern_set(user_id,base)
+        return f"🎲 DADOS DEL TAHÚR\n🪙 Apuesta: {bet:,} KW\n\nTus dos dados suman: {base['player']}\nEl tabernero sonríe demasiado.\n\nPuedes plantarte o tirar otro dado. Si pasas de 15, pierdes.",{"inline_keyboard":[[{"text":"🎲 Tirar otro","callback_data":"tavern:dice_hit"},{"text":"✋ Plantarme","callback_data":"tavern:dice_stand"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
+    if game=="cards":
+        base.update(card=random.randint(2,12),streak=0); _tavern_set(user_id,base)
+        return f"🃏 CARTA MAYOR\n🪙 Apuesta: {bet:,} KW\n\nCarta actual: {base['card']}\n¿La siguiente será mayor o menor?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
+    if game=="cups":
+        base.update(prize=random.randint(0,2)); _tavern_set(user_id,base); _tavern_native_dice(chat_id,"🎰")
+        return f"🥃 TRES VASOS\n🪙 Apuesta: {bet:,} KW\n\nEl tabernero esconde la ficha. La máquina de la esquina hace ruido para distraerte...\n\n¿Dónde quedó?",{"inline_keyboard":[[{"text":"🥃 1","callback_data":"tavern:cup_0"},{"text":"🥃 2","callback_data":"tavern:cup_1"},{"text":"🥃 3","callback_data":"tavern:cup_2"}]]}
+    if game=="darts":
+        base.update(throws=0,score=0); _tavern_set(user_id,base)
+        return f"🎯 DARDOS DEL DRAGÓN\n🪙 Apuesta: {bet:,} KW\n\nTienes 3 tiros. Aquí sí usamos el 🎯 animado de Telegram.",{"inline_keyboard":[[{"text":"🎯 Lanzar","callback_data":"tavern:dart_throw"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
+    if game=="coin":
+        base.update(streak=0); _tavern_set(user_id,base)
+        return f"🪙 MONEDA DEL TABERNERO\n🪙 Apuesta: {bet:,} KW\n\nNo hay racha máxima. Sigue hasta que te retires... o la casa te quite la sonrisa.",{"inline_keyboard":[[{"text":"🦅 Cara","callback_data":"tavern:coin_h"},{"text":"👑 Cruz","callback_data":"tavern:coin_t"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
+    return "Juego desconocido.",tavern_home_keyboard()
+
+
+def _tavern_ranking_text():
+    _ensure_tavern_db()
+    with db_lock:
+        conn=get_db(); rows=conn.execute("""SELECT s.*,COALESCE(NULLIF(p.display_name,''),'Jugador '||s.user_id::text) name
+            FROM rpg_tavern_stats s LEFT JOIN players p ON p.user_id=s.user_id
+            ORDER BY s.net_kw DESC,s.best_streak DESC,s.wins DESC LIMIT 10""").fetchall(); conn.close()
+    if not rows: return "🏆 RANKING DE LA TABERNA\n\nTodavía nadie ha dejado suficiente dignidad sobre la mesa."
+    lines=["🏆 RANKING DE LA TABERNA","","Ordenado por ganancias netas:"]
+    for i,r in enumerate(rows,1): lines.append(f"{i}. {r['name']} · {int(r['net_kw']):+,} KW · 🔥 {int(r['best_streak'])} · 🏆 {int(r['wins'])}")
+    return "\n".join(lines)
+
+
+def _tavern_drinks_text(user_id):
+    eff=_tavern_effect(user_id); lines=["🍹 CARTA DE BEBIDAS",""]
+    if eff: lines.append(f"ACTIVA: {eff['drink_key']} · {eff['games_left']} partidas restantes\n")
+    lines.append("Solo puedes tener una bebida activa. Termínala antes de pedir otra.\n")
+    for k,d in TAVERN_DRINKS.items(): lines.append(f"{d['name']} · {d['price']:,} KW\n{d['desc']}")
+    return "\n\n".join(lines)
+
+
+def _tavern_drinks_keyboard():
+    rows=[[{"text":f"{d['name']} · {d['price']//1000}K","callback_data":f"tavern:drink:{k}"}] for k,d in TAVERN_DRINKS.items()]
+    rows.append([{"text":"⬅️ Taberna","callback_data":"tavern:home"}]); return {"inline_keyboard":rows}
+
+
+def _tavern_buy_drink(user_id,chat_id,key):
+    with _tavern_lock:
+        _ensure_tavern_db(); d=TAVERN_DRINKS.get(key)
+        if not d: return "Esa bebida no existe.",_tavern_drinks_keyboard()
+        if _tavern_effect(user_id): return "🍹 Ya tienes una bebida activa. Termina sus partidas antes de mezclar cosas que el tabernero tampoco sabe pronunciar.",_tavern_drinks_keyboard()
+        ok,balance,err=change_kiwons(user_id,-int(d['price']),"tavern_drink",actor_id=user_id,chat_id=chat_id,note=d['name'])
+        if not ok: return f"🪙 Necesitas {d['price']:,} KW.",_tavern_drinks_keyboard()
+        typ=d['effect']; mag=int(d['mag']); games=int(d['games']); reveal=d['desc']
+        if typ=="mystery":
+            typ,mag,reveal=random.choice([("kw",20,"✨ ¡Golpe de suerte! +20% KW al ganar."),("exp",25,"📚 Inspiración etílica: +25% EXP."),("both",15,"🌟 Noche perfecta: +15% EXP y KW."),("resaca",10,"🤢 Resaca: -10% EXP y KW ganados.")])
+        with db_lock:
+            conn=get_db(); conn.execute("""INSERT INTO rpg_tavern_effects(user_id,drink_key,effect_type,magnitude,games_left,updated_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET drink_key=excluded.drink_key,effect_type=excluded.effect_type,
+                magnitude=excluded.magnitude,games_left=excluded.games_left,updated_at=excluded.updated_at""",
+                (int(user_id),d['name'],typ,mag,games,int(time.time()))); conn.commit(); conn.close()
+        _tavern_drink_event(user_id)
+        return f"{d['name']}\n\n{reveal}\n⏳ Duración: {games} partidas.\n💰 Saldo: {balance:,} KW",_tavern_drinks_keyboard()
+
+
+def _tavern_arsenal_text(user_id):
+    _ensure_tavern_db(); char=get_active_character(user_id)
+    if not char: return "🌟 ARSENAL MÍTICO\n\nNecesitas un personaje activo."
+    cls=str(char['class_name']); cfg=TAVERN_MYTHIC_WEAPONS.get(cls)
+    if not cfg: return "Tu clase no tiene arma mítica de Taberna."
+    key,name,atk,defn,hp,stock=cfg; world=current_rpg_world()
+    with db_lock:
+        conn=get_db(); used=_global_item_count(conn,key,world); conn.close()
+    left=max(0,int(stock)-int(used))
+    return (f"🌟 ARSENAL MÍTICO\n\nClase: {cls}\n{name}\n⚔️ +{atk} ATK · 🛡️ +{defn} DEF · ❤️ +{hp} HP\n"
+            f"💰 Precio: {TAVERN_WEAPON_PRICE:,} KW\n📦 Stock mundial: {left}/{stock}\n\nLas armas míticas no son comerciables. Una vez agotadas, se acabó.")
+
+
+def _tavern_arsenal_keyboard(user_id):
+    char=get_active_character(user_id); rows=[]
+    if char and str(char['class_name']) in TAVERN_MYTHIC_WEAPONS:
+        key=TAVERN_MYTHIC_WEAPONS[str(char['class_name'])][0]; rows.append([{"text":"🌟 Comprar · 1,000,000 KW","callback_data":f"tavern:weapon:{key}"}])
+    rows.append([{"text":"⬅️ Taberna","callback_data":"tavern:home"}]); return {"inline_keyboard":rows}
+
+
+def _tavern_buy_weapon(user_id,chat_id,key):
+    _ensure_tavern_db(); char=get_active_character(user_id)
+    if not char: return "Necesitas un personaje activo.",tavern_home_keyboard()
+    cfg=TAVERN_MYTHIC_WEAPONS.get(str(char['class_name']))
+    if not cfg or cfg[0]!=key: return "🌟 Esa arma no pertenece a tu clase.",_tavern_arsenal_keyboard(user_id)
+    world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            item=conn.execute("SELECT * FROM rpg_items WHERE item_key=? FOR UPDATE",(key,)).fetchone()
+            player=conn.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(int(user_id),)).fetchone()
+            if not item or not player: conn.rollback(); conn.close(); return "No pude abrir el Arsenal.",_tavern_arsenal_keyboard(user_id)
+            owned=conn.execute("SELECT 1 FROM rpg_inventory WHERE user_id=? AND item_key=? AND world_id=? LIMIT 1",(int(user_id),key,world)).fetchone()
+            if owned: conn.rollback(); conn.close(); return "🌟 Ya tienes esta arma mítica. No puedes comprar una segunda unidad.",_tavern_arsenal_keyboard(user_id)
+            used=_global_item_count(conn,key,world); limit=int(item['max_global_copies'] or 0)
+            if used>=limit: conn.rollback(); conn.close(); return "🚫 AGOTADA. Ya se vendieron todas las unidades de esta arma mítica.",_tavern_arsenal_keyboard(user_id)
+            if int(player['kiwons'])<TAVERN_WEAPON_PRICE: conn.rollback(); conn.close(); return f"🪙 Necesitas {TAVERN_WEAPON_PRICE:,} KW.",_tavern_arsenal_keyboard(user_id)
+            serial=used+1
+            conn.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(TAVERN_WEAPON_PRICE,now,int(user_id)))
+            conn.execute("""INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,chat_id,note,created_at)
+                VALUES(?,?,?,?,?,?,?)""",(int(user_id),-TAVERN_WEAPON_PRICE,"tavern_mythic",int(user_id),int(chat_id),str(item['name'])[:200],now))
+            conn.execute("""INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id)
+                VALUES(?,?,?,?,1,0,1,?,?,?,?)""",(int(user_id),int(char['id']),key,serial,now,"taberna:mitica",world,int(user_id)))
+            conn.commit(); conn.close()
+            return f"🌟 COMPRA MÍTICA\n\n{item['name']} #{serial}\n💰 -{TAVERN_WEAPON_PRICE:,} KW\n\nEl tabernero deja de sonreír. Esa pieza no vuelve al estante.",_tavern_arsenal_keyboard(user_id)
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def _tavern_missions_text_keyboard(user_id):
+    _ensure_tavern_db(); day=_tavern_day()
+    with db_lock:
+        conn=get_db(); d=conn.execute("SELECT * FROM rpg_tavern_daily WHERE user_id=? AND day_key=?",(int(user_id),day)).fetchone()
+        claims={str(r['mission_key']) for r in conn.execute("SELECT mission_key FROM rpg_tavern_claims WHERE user_id=? AND day_key=?",(int(user_id),day)).fetchall()}; conn.close()
+    vals={"games":0,"wins":0,"drinks":0,"best_streak":0}
+    if d:
+        for k in vals: vals[k]=int(d[k] or 0)
+    lines=["📜 ENCARGOS DEL TABERNERO","","Se renuevan cada día. Las recompensas incluyen 💠 Esencias de Técnica.",""]; rows=[]
+    for key,(name,desc,field,target,ess,kw) in TAVERN_MISSIONS.items():
+        cur=min(target,vals[field]); done=vals[field]>=target; claimed=key in claims
+        status="✅ COBRADA" if claimed else ("🎁 LISTA" if done else f"{cur}/{target}")
+        lines.append(f"{name}\n{desc} · {status}\n🎁 💠 ×{ess} + 🪙 {kw:,} KW")
+        if done and not claimed: rows.append([{"text":f"🎁 Cobrar {name}","callback_data":f"tavern:claim:{key}"}])
+    rows.append([{"text":"⬅️ Taberna","callback_data":"tavern:home"}]); return "\n\n".join(lines),{"inline_keyboard":rows}
+
+
+def _tavern_claim_mission(user_id,chat_id,key):
+    _ensure_tavern_db(); cfg=TAVERN_MISSIONS.get(key); char=get_active_character(user_id)
+    if not cfg or not char: return "No pude cobrar ese encargo.",tavern_home_keyboard()
+    name,desc,field,target,ess,kw=cfg; day=_tavern_day(); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            d=conn.execute("SELECT * FROM rpg_tavern_daily WHERE user_id=? AND day_key=? FOR UPDATE",(int(user_id),day)).fetchone()
+            if not d or int(d[field] or 0)<target: conn.rollback(); conn.close(); return "📜 Ese encargo todavía no está completo.",_tavern_missions_text_keyboard(user_id)[1]
+            old=conn.execute("SELECT 1 FROM rpg_tavern_claims WHERE user_id=? AND day_key=? AND mission_key=?",(int(user_id),day,key)).fetchone()
+            if old: conn.rollback(); conn.close(); return "✅ Ya cobraste ese encargo hoy.",_tavern_missions_text_keyboard(user_id)[1]
+            conn.execute("INSERT INTO rpg_tavern_claims(user_id,day_key,mission_key,claimed_at) VALUES(?,?,?,?)",(int(user_id),day,key,now)); conn.commit(); conn.close()
+        except Exception:
+            conn.rollback(); conn.close(); raise
+    change_kiwons(user_id,kw,"tavern_mission",actor_id=user_id,chat_id=chat_id,note=name)
+    got=0
+    for _ in range(ess):
+        if grant_rpg_item(user_id,int(char['id']),"esencia_tecnica",f"taberna:mision:{key}"): got+=1
+    txt,kb=_tavern_missions_text_keyboard(user_id)
+    return f"🎁 ENCARGO COBRADO\n{name}\n\n💠 Esencia de Técnica ×{got}\n🪙 +{kw:,} KW\n\n{txt}",kb
+
+
+def tavern_callback(user_id,chat_id,data):
     """Devuelve (texto, teclado). Cada callback resuelve una sola transición."""
-    action=(data.split(':',1)[1] if ':' in data else 'home')
-    if action=='home':
-        _tavern_pop(user_id); return tavern_home_text(user_id),tavern_home_keyboard()
-    if action=='exit':
-        _tavern_pop(user_id); return '🚪 Sales de la Taberna. El tabernero limpia tu vaso... sospechosamente rápido.',None
-    if not get_active_character(user_id):
-        return '🍻 El tabernero te mira de arriba abajo.\n\nNecesitas un personaje activo antes de jugar.',tavern_home_keyboard()
-
-    if action=='dice':
-        g={'game':'dice','player':random.randint(1,6)+random.randint(1,6),'dealer':random.randint(7,12)}
-        _tavern_set(user_id,g)
-        return (f"🎲 DADOS DEL TAHÚR\n\nTus dos dados suman: {g['player']}\nEl tabernero sonríe demasiado.\n\nPuedes plantarte o tirar otro dado. Si pasas de 15, pierdes.",
-                {'inline_keyboard':[[{'text':'🎲 Tirar otro','callback_data':'tavern:dice_hit'},{'text':'✋ Plantarme','callback_data':'tavern:dice_stand'}],[{'text':'🍻 Salir del juego','callback_data':'tavern:home'}]]})
-    if action in ('dice_hit','dice_stand'):
+    _ensure_tavern_db(); parts=data.split(":"); action=parts[1] if len(parts)>1 else "home"
+    if action=="home": _tavern_pop(user_id); return tavern_home_text(user_id),tavern_home_keyboard()
+    if action=="exit": _tavern_pop(user_id); return "🚪 Sales de la Taberna. El tabernero cuenta tus Kiwons. Tú también deberías.",None
+    if action=="ranking": return _tavern_ranking_text(),{"inline_keyboard":[[{"text":"⬅️ Taberna","callback_data":"tavern:home"}]]}
+    if action=="drinks": return _tavern_drinks_text(user_id),_tavern_drinks_keyboard()
+    if action=="drink" and len(parts)>=3: return _tavern_buy_drink(user_id,chat_id,parts[2])
+    if action=="arsenal": return _tavern_arsenal_text(user_id),_tavern_arsenal_keyboard(user_id)
+    if action=="weapon" and len(parts)>=3: return _tavern_buy_weapon(user_id,chat_id,parts[2])
+    if action=="missions": return _tavern_missions_text_keyboard(user_id)
+    if action=="claim" and len(parts)>=3: return _tavern_claim_mission(user_id,chat_id,parts[2])
+    if not get_active_character(user_id): return "🍻 Necesitas un personaje activo antes de jugar.",tavern_home_keyboard()
+    if action=="game" and len(parts)>=3:
+        game=parts[2]; return f"{_tavern_game_name(game)}\n\nElige cuánto quieres apostar. Si pierdes, la apuesta se queda en la barra.",_tavern_bet_keyboard(game)
+    if action=="start" and len(parts)>=4:
+        try: bet=int(parts[3])
+        except: bet=0
+        return _tavern_start_game(user_id,chat_id,parts[2],bet)
+    if action=="forfeit":
         g=_tavern_get(user_id)
-        if not g or g.get('game')!='dice': return 'Esa partida ya terminó.',tavern_home_keyboard()
-        if action=='dice_hit':
+        if not g: return "Esa partida ya terminó.",tavern_home_keyboard()
+        return _tavern_finish(user_id,chat_id,g['game'],False,3,0,"Abandonaste la mesa. La apuesta se queda con la casa.",int(g.get('streak',0)))
+
+    if action in ("dice_hit","dice_stand"):
+        g=_tavern_get(user_id)
+        if not g or g.get("game")!="dice": return "Esa partida ya terminó.",tavern_home_keyboard()
+        if action=="dice_hit":
             roll=random.randint(1,6); g['player']+=roll
-            if g['player']>15: return _tavern_finish(user_id,chat_id,'🎲 DADOS DEL TAHÚR',False,5,15,f"Sacaste {roll}. Total: {g['player']}. Te pasaste de 15. El tabernero intenta no reírse.")
-            _tavern_set(user_id,g)
-            return f"🎲 Sacaste {roll}.\nTu total: {g['player']}\n\n¿Otra vez o te plantas?",{'inline_keyboard':[[{'text':'🎲 Tirar otro','callback_data':'tavern:dice_hit'},{'text':'✋ Plantarme','callback_data':'tavern:dice_stand'}]]}
-        won=g['player']>=g['dealer']; detail=f"Tú: {g['player']} · Tabernero: {g['dealer']}."+(" Le borraste la sonrisa." if won else " Esta vez la casa gana.")
-        return _tavern_finish(user_id,chat_id,'🎲 DADOS DEL TAHÚR',won,28 if won else 6,70 if won else 18,detail)
+            if g['player']>15: return _tavern_finish(user_id,chat_id,"dice",False,5,0,f"Sacaste {roll}. Total {g['player']}: te pasaste de 15.")
+            _tavern_set(user_id,g); return f"🎲 Sacaste {roll}.\nTu total: {g['player']}\n\n¿Otra vez o te plantas?",{"inline_keyboard":[[{"text":"🎲 Tirar otro","callback_data":"tavern:dice_hit"},{"text":"✋ Plantarme","callback_data":"tavern:dice_stand"}]]}
+        won=int(g['player'])>=int(g['dealer']); payout=int(round(g['bet']*1.45)) if won else 0
+        return _tavern_finish(user_id,chat_id,"dice",won,30 if won else 6,payout,f"Tú: {g['player']} · Tabernero: {g['dealer']}.")
 
-    if action=='cards':
-        card=random.randint(2,12); _tavern_set(user_id,{'game':'cards','card':card,'streak':0})
-        return f"🃏 CARTA MAYOR\n\nCarta actual: {card}\n¿La siguiente será mayor o menor?",{'inline_keyboard':[[{'text':'⬆️ Mayor','callback_data':'tavern:card_hi'},{'text':'⬇️ Menor','callback_data':'tavern:card_lo'}],[{'text':'🍻 Salir','callback_data':'tavern:home'}]]}
-    if action in ('card_hi','card_lo','card_cash'):
+    if action in ("card_hi","card_lo","card_cash"):
         g=_tavern_get(user_id)
-        if not g or g.get('game')!='cards': return 'Esa partida ya terminó.',tavern_home_keyboard()
-        if action=='card_cash':
-            st=int(g.get('streak',0)); return _tavern_finish(user_id,chat_id,'🃏 CARTA MAYOR',True,12+st*10,30+st*35,f"Te retiraste con una racha de {st}.")
-        old=int(g['card']); new=random.randint(2,12); hi=action=='card_hi'; won=(new>old if hi else new<old)
-        if new==old: won=False
-        if not won: return _tavern_finish(user_id,chat_id,'🃏 CARTA MAYOR',False,5,15,f"Era {old} y salió {new}. La racha terminó.")
-        g['card']=new; g['streak']=int(g.get('streak',0))+1
-        if g['streak']>=3: return _tavern_finish(user_id,chat_id,'🃏 CARTA MAYOR',True,45,130,f"¡{old} → {new}! Completaste la racha máxima ×3.")
-        _tavern_set(user_id,g)
-        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']}\n\n¿Sigues o cobras?",{'inline_keyboard':[[{'text':'⬆️ Mayor','callback_data':'tavern:card_hi'},{'text':'⬇️ Menor','callback_data':'tavern:card_lo'}],[{'text':'💰 Cobrar racha','callback_data':'tavern:card_cash'}]]}
+        if not g or g.get("game")!="cards": return "Esa partida ya terminó.",tavern_home_keyboard()
+        st=int(g.get('streak',0))
+        if action=="card_cash":
+            if st<=0: return "Necesitas acertar al menos una carta antes de cobrar.",tavern_home_keyboard()
+            mult=min(8.0,1.0+0.50*st); return _tavern_finish(user_id,chat_id,"cards",True,15+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
+        old=int(g['card']); new=random.randint(2,12); hi=action=="card_hi"; won=(new>old if hi else new<old) and new!=old
+        if not won: return _tavern_finish(user_id,chat_id,"cards",False,5,0,f"Era {old} y salió {new}. La racha terminó.",st)
+        g['card']=new; g['streak']=st+1; _tavern_set(user_id,g); mult=min(8.0,1.0+0.50*g['streak'])
+        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n\nNo hay máximo de racha. ¿Sigues o cobras?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"💰 Cobrar","callback_data":"tavern:card_cash"}]]}
 
-    if action=='cups':
-        prize=random.randint(0,2); _tavern_set(user_id,{'game':'cups','prize':prize})
-        return '🥃 TRES VASOS\n\nEl tabernero esconde la ficha y mueve los vasos a una velocidad bastante ilegal.\n\n¿Dónde quedó?',{'inline_keyboard':[[{'text':'🥃 1','callback_data':'tavern:cup_0'},{'text':'🥃 2','callback_data':'tavern:cup_1'},{'text':'🥃 3','callback_data':'tavern:cup_2'}]]}
-    if action.startswith('cup_'):
+    if action.startswith("cup_"):
         g=_tavern_get(user_id)
-        if not g or g.get('game')!='cups': return 'Esa partida ya terminó.',tavern_home_keyboard()
-        try: pick=int(action.rsplit('_',1)[1])
-        except: return 'Ese vaso no existe.',tavern_home_keyboard()
-        won=pick==int(g['prize']); return _tavern_finish(user_id,chat_id,'🥃 TRES VASOS',won,24 if won else 5,65 if won else 15,(f"¡La ficha estaba bajo el vaso {pick+1}!" if won else f"Elegiste {pick+1}; estaba bajo el {int(g['prize'])+1}."))
+        if not g or g.get("game")!="cups": return "Esa partida ya terminó.",tavern_home_keyboard()
+        try: pick=int(action.rsplit("_",1)[1])
+        except: return "Ese vaso no existe.",tavern_home_keyboard()
+        won=pick==int(g['prize']); payout=int(round(g['bet']*2.40)) if won else 0
+        return _tavern_finish(user_id,chat_id,"cups",won,28 if won else 5,payout,(f"¡La ficha estaba bajo el vaso {pick+1}!" if won else f"Elegiste {pick+1}; estaba bajo el {int(g['prize'])+1}."))
 
-    if action=='darts':
-        _tavern_set(user_id,{'game':'darts','throws':0,'score':0})
-        return '🎯 DARDOS DEL DRAGÓN\n\nTienes 3 tiros. Elige cómo lanzar; cada estilo cambia el riesgo.',{'inline_keyboard':[[{'text':'🎯 Seguro','callback_data':'tavern:dart_safe'},{'text':'🔥 Fuerte','callback_data':'tavern:dart_power'},{'text':'☠️ Al centro','callback_data':'tavern:dart_bull'}]]}
-    if action.startswith('dart_'):
+    if action=="dart_throw":
         g=_tavern_get(user_id)
-        if not g or g.get('game')!='darts': return 'Esa partida ya terminó.',tavern_home_keyboard()
-        style=action[5:]
-        pools={'safe':[5,6,7,8,9,10],'power':[0,4,8,10,12,14],'bull':[0,0,5,10,15,20]}
-        pts=random.choice(pools.get(style,pools['safe'])); g['score']+=pts; g['throws']+=1
+        if not g or g.get("game")!="darts": return "Esa partida ya terminó.",tavern_home_keyboard()
+        val=_tavern_native_dice(chat_id,"🎯") or random.randint(1,6); pts={1:4,2:7,3:10,4:13,5:17,6:25}.get(val,7)
+        g['score']+=pts; g['throws']+=1
         if g['throws']>=3:
-            score=int(g['score']); won=score>=24; exp=max(5,min(45,score+5)); kw=max(15,min(140,score*4))
-            return _tavern_finish(user_id,chat_id,'🎯 DARDOS DEL DRAGÓN',won,exp,kw,f"Último tiro: {pts} puntos. Marcador final: {score}.")
-        _tavern_set(user_id,g)
-        return f"🎯 Tiro: +{pts}\nMarcador: {g['score']} · Tiros: {g['throws']}/3",{'inline_keyboard':[[{'text':'🎯 Seguro','callback_data':'tavern:dart_safe'},{'text':'🔥 Fuerte','callback_data':'tavern:dart_power'},{'text':'☠️ Al centro','callback_data':'tavern:dart_bull'}]]}
+            score=int(g['score']); won=score>=35
+            mult=0 if not won else min(2.0,1.05+(score-35)*0.030); payout=int(round(g['bet']*mult)) if won else 0
+            return _tavern_finish(user_id,chat_id,"darts",won,max(5,min(55,score)),payout,f"Último dardo: {pts}. Marcador final: {score}." )
+        _tavern_set(user_id,g); return f"🎯 +{pts} puntos\nMarcador: {g['score']} · Tiros: {g['throws']}/3",{"inline_keyboard":[[{"text":"🎯 Lanzar otro","callback_data":"tavern:dart_throw"}]]}
 
-    if action=='coin':
-        _tavern_set(user_id,{'game':'coin','streak':0})
-        return '🪙 MONEDA DEL TABERNERO\n\nElige. Cada acierto aumenta la recompensa; máximo 3 seguidos.',{'inline_keyboard':[[{'text':'🦅 Cara','callback_data':'tavern:coin_h'},{'text':'👑 Cruz','callback_data':'tavern:coin_t'}]]}
-    if action in ('coin_h','coin_t','coin_cash'):
+    if action in ("coin_h","coin_t","coin_cash"):
         g=_tavern_get(user_id)
-        if not g or g.get('game')!='coin': return 'Esa partida ya terminó.',tavern_home_keyboard()
-        if action=='coin_cash':
-            st=int(g.get('streak',0)); return _tavern_finish(user_id,chat_id,'🪙 MONEDA DEL TABERNERO',True,10+st*9,25+st*30,f"Cobraste con racha ×{st}.")
-        result=random.choice(('h','t')); pick=action[-1]
-        if pick!=result: return _tavern_finish(user_id,chat_id,'🪙 MONEDA DEL TABERNERO',False,5,15,f"Salió {'Cara' if result=='h' else 'Cruz'}. Tu racha terminó.")
-        g['streak']=int(g.get('streak',0))+1
-        if g['streak']>=3: return _tavern_finish(user_id,chat_id,'🪙 MONEDA DEL TABERNERO',True,40,120,'¡Tres aciertos seguidos! El tabernero revisa la moneda por si acaso.')
-        _tavern_set(user_id,g)
-        return f"🪙 ¡ACIERTO! Salió {'Cara' if result=='h' else 'Cruz'}.\n🔥 Racha ×{g['streak']}\n\n¿Sigues o cobras?",{'inline_keyboard':[[{'text':'🦅 Cara','callback_data':'tavern:coin_h'},{'text':'👑 Cruz','callback_data':'tavern:coin_t'}],[{'text':'💰 Cobrar','callback_data':'tavern:coin_cash'}]]}
+        if not g or g.get("game")!="coin": return "Esa partida ya terminó.",tavern_home_keyboard()
+        st=int(g.get('streak',0))
+        if action=="coin_cash":
+            if st<=0: return "Necesitas un acierto antes de cobrar.",tavern_home_keyboard()
+            mult=min(8.0,1.0+0.60*st); return _tavern_finish(user_id,chat_id,"coin",True,12+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
+        result=random.choice(("h","t")); pick=action[-1]
+        if pick!=result: return _tavern_finish(user_id,chat_id,"coin",False,5,0,f"Salió {'Cara' if result=='h' else 'Cruz'}. Tu racha ×{st} terminó.",st)
+        g['streak']=st+1; _tavern_set(user_id,g); mult=min(8.0,1.0+0.60*g['streak'])
+        return f"🪙 ¡ACIERTO! Salió {'Cara' if result=='h' else 'Cruz'}.\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n\nPuedes seguir indefinidamente; el premio sí tiene tope ×8 para no destruir la economía.",{"inline_keyboard":[[{"text":"🦅 Cara","callback_data":"tavern:coin_h"},{"text":"👑 Cruz","callback_data":"tavern:coin_t"}],[{"text":"💰 Cobrar","callback_data":"tavern:coin_cash"}]]}
 
-    return 'El tabernero no entendió esa jugada.',tavern_home_keyboard()
-
+    return "El tabernero no entendió esa jugada.",tavern_home_keyboard()
 
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")

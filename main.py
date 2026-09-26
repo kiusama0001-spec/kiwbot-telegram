@@ -9076,9 +9076,187 @@ def help_revive_player(helper_id,target_id):
         conn.commit(); conn.close()
     return True,f"🤝 ¡Rescate completado!\n❤️ Vuelve con {hp}/{eff['max_hp']} HP.\n🪙 +{RPG_HELP_REVIVE_REWARD} KW para quien ayudó."
 
+
+
+# =========================================================
+# TABERNA RPG - MINIJUEGOS AISLADOS
+# No modifica combate, tecnicas, mazmorras ni cooldowns.
+# =========================================================
+
+_tavern_lock = threading.RLock()
+_tavern_games = {}
+TAVERN_GAME_TTL = 300
+
+
+def _tavern_key(user_id):
+    return int(user_id)
+
+
+def _tavern_cleanup(now=None):
+    now = time.time() if now is None else float(now)
+    with _tavern_lock:
+        dead=[uid for uid,g in _tavern_games.items() if now-float(g.get('updated_at',now)) > TAVERN_GAME_TTL]
+        for uid in dead: _tavern_games.pop(uid,None)
+
+
+def _tavern_set(user_id, game):
+    game=dict(game); game['updated_at']=time.time()
+    with _tavern_lock: _tavern_games[_tavern_key(user_id)]=game
+    return game
+
+
+def _tavern_get(user_id):
+    _tavern_cleanup()
+    with _tavern_lock:
+        g=_tavern_games.get(_tavern_key(user_id))
+        return dict(g) if g else None
+
+
+def _tavern_pop(user_id):
+    with _tavern_lock: return _tavern_games.pop(_tavern_key(user_id),None)
+
+
+def tavern_home_keyboard():
+    return {'inline_keyboard':[
+        [{'text':'🎲 Dados del Tahúr','callback_data':'tavern:dice'}, {'text':'🃏 Carta Mayor','callback_data':'tavern:cards'}],
+        [{'text':'🥃 Tres Vasos','callback_data':'tavern:cups'}, {'text':'🎯 Dardos','callback_data':'tavern:darts'}],
+        [{'text':'🪙 Cara o Cruz','callback_data':'tavern:coin'}],
+        [{'text':'🚪 Salir','callback_data':'tavern:exit'}]
+    ]}
+
+
+def tavern_home_text(user_id):
+    char=get_active_character(user_id)
+    who=f"{char['name']} · Nv.{int(char['level'])}" if char else 'Sin personaje activo'
+    return ("🍻 LA TABERNA DEL KIWRPG\n\n"
+            "Entre jarras, cartas marcadas y un tabernero que jura que jamás hace trampa, puedes ganar EXP y Kiwons.\n\n"
+            f"🧙 {who}\n🪙 {get_kiwons(user_id):,} KW\n\n"
+            "Elige un juego. Todas las partidas dan recompensa; ganar siempre da más.")
+
+
+def _tavern_reward(user_id, chat_id, exp, kw, note):
+    char=get_active_character(user_id)
+    if not char: return False, 'Necesitas un personaje activo para jugar en la Taberna.'
+    exp=max(1,int(exp)); kw=max(0,int(kw))
+    result=grant_rpg_exp(int(char['id']),exp)
+    actual_exp=exp
+    try:
+        if isinstance(result,tuple) and len(result)>1 and isinstance(result[1],int):
+            # grant_rpg_exp devuelve niveles ganados como segundo valor en algunas versiones;
+            # la cifra mostrada sigue siendo la EXP base para no duplicar el bonus visualmente.
+            pass
+    except Exception: pass
+    ok,balance,err=change_kiwons(user_id,kw,'tavern_game',actor_id=user_id,chat_id=chat_id,note=note)
+    if not ok: return False,err or 'No pude entregar los Kiwons.'
+    return True,f"✨ +{actual_exp} EXP · 🪙 +{kw} KW\n💰 Saldo: {balance:,} KW"
+
+
+def _tavern_finish(user_id, chat_id, title, won, exp, kw, detail):
+    _tavern_pop(user_id)
+    ok,reward=_tavern_reward(user_id,chat_id,exp,kw,title)
+    if not ok: return reward,tavern_home_keyboard()
+    result='🏆 Victoria' if won else '🍺 Fin de la ronda'
+    txt=f"{title}\n\n{detail}\n\n{result}\n{reward}"
+    kb={'inline_keyboard':[[{'text':'🔁 Jugar otra','callback_data':'tavern:home'}],[{'text':'🍻 Volver a la Taberna','callback_data':'tavern:home'}]]}
+    return txt,kb
+
+
+def tavern_callback(user_id, chat_id, data):
+    """Devuelve (texto, teclado). Cada callback resuelve una sola transición."""
+    action=(data.split(':',1)[1] if ':' in data else 'home')
+    if action=='home':
+        _tavern_pop(user_id); return tavern_home_text(user_id),tavern_home_keyboard()
+    if action=='exit':
+        _tavern_pop(user_id); return '🚪 Sales de la Taberna. El tabernero limpia tu vaso... sospechosamente rápido.',None
+    if not get_active_character(user_id):
+        return '🍻 El tabernero te mira de arriba abajo.\n\nNecesitas un personaje activo antes de jugar.',tavern_home_keyboard()
+
+    if action=='dice':
+        g={'game':'dice','player':random.randint(1,6)+random.randint(1,6),'dealer':random.randint(7,12)}
+        _tavern_set(user_id,g)
+        return (f"🎲 DADOS DEL TAHÚR\n\nTus dos dados suman: {g['player']}\nEl tabernero sonríe demasiado.\n\nPuedes plantarte o tirar otro dado. Si pasas de 15, pierdes.",
+                {'inline_keyboard':[[{'text':'🎲 Tirar otro','callback_data':'tavern:dice_hit'},{'text':'✋ Plantarme','callback_data':'tavern:dice_stand'}],[{'text':'🍻 Salir del juego','callback_data':'tavern:home'}]]})
+    if action in ('dice_hit','dice_stand'):
+        g=_tavern_get(user_id)
+        if not g or g.get('game')!='dice': return 'Esa partida ya terminó.',tavern_home_keyboard()
+        if action=='dice_hit':
+            roll=random.randint(1,6); g['player']+=roll
+            if g['player']>15: return _tavern_finish(user_id,chat_id,'🎲 DADOS DEL TAHÚR',False,5,15,f"Sacaste {roll}. Total: {g['player']}. Te pasaste de 15. El tabernero intenta no reírse.")
+            _tavern_set(user_id,g)
+            return f"🎲 Sacaste {roll}.\nTu total: {g['player']}\n\n¿Otra vez o te plantas?",{'inline_keyboard':[[{'text':'🎲 Tirar otro','callback_data':'tavern:dice_hit'},{'text':'✋ Plantarme','callback_data':'tavern:dice_stand'}]]}
+        won=g['player']>=g['dealer']; detail=f"Tú: {g['player']} · Tabernero: {g['dealer']}."+(" Le borraste la sonrisa." if won else " Esta vez la casa gana.")
+        return _tavern_finish(user_id,chat_id,'🎲 DADOS DEL TAHÚR',won,28 if won else 6,70 if won else 18,detail)
+
+    if action=='cards':
+        card=random.randint(2,12); _tavern_set(user_id,{'game':'cards','card':card,'streak':0})
+        return f"🃏 CARTA MAYOR\n\nCarta actual: {card}\n¿La siguiente será mayor o menor?",{'inline_keyboard':[[{'text':'⬆️ Mayor','callback_data':'tavern:card_hi'},{'text':'⬇️ Menor','callback_data':'tavern:card_lo'}],[{'text':'🍻 Salir','callback_data':'tavern:home'}]]}
+    if action in ('card_hi','card_lo','card_cash'):
+        g=_tavern_get(user_id)
+        if not g or g.get('game')!='cards': return 'Esa partida ya terminó.',tavern_home_keyboard()
+        if action=='card_cash':
+            st=int(g.get('streak',0)); return _tavern_finish(user_id,chat_id,'🃏 CARTA MAYOR',True,12+st*10,30+st*35,f"Te retiraste con una racha de {st}.")
+        old=int(g['card']); new=random.randint(2,12); hi=action=='card_hi'; won=(new>old if hi else new<old)
+        if new==old: won=False
+        if not won: return _tavern_finish(user_id,chat_id,'🃏 CARTA MAYOR',False,5,15,f"Era {old} y salió {new}. La racha terminó.")
+        g['card']=new; g['streak']=int(g.get('streak',0))+1
+        if g['streak']>=3: return _tavern_finish(user_id,chat_id,'🃏 CARTA MAYOR',True,45,130,f"¡{old} → {new}! Completaste la racha máxima ×3.")
+        _tavern_set(user_id,g)
+        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']}\n\n¿Sigues o cobras?",{'inline_keyboard':[[{'text':'⬆️ Mayor','callback_data':'tavern:card_hi'},{'text':'⬇️ Menor','callback_data':'tavern:card_lo'}],[{'text':'💰 Cobrar racha','callback_data':'tavern:card_cash'}]]}
+
+    if action=='cups':
+        prize=random.randint(0,2); _tavern_set(user_id,{'game':'cups','prize':prize})
+        return '🥃 TRES VASOS\n\nEl tabernero esconde la ficha y mueve los vasos a una velocidad bastante ilegal.\n\n¿Dónde quedó?',{'inline_keyboard':[[{'text':'🥃 1','callback_data':'tavern:cup_0'},{'text':'🥃 2','callback_data':'tavern:cup_1'},{'text':'🥃 3','callback_data':'tavern:cup_2'}]]}
+    if action.startswith('cup_'):
+        g=_tavern_get(user_id)
+        if not g or g.get('game')!='cups': return 'Esa partida ya terminó.',tavern_home_keyboard()
+        try: pick=int(action.rsplit('_',1)[1])
+        except: return 'Ese vaso no existe.',tavern_home_keyboard()
+        won=pick==int(g['prize']); return _tavern_finish(user_id,chat_id,'🥃 TRES VASOS',won,24 if won else 5,65 if won else 15,(f"¡La ficha estaba bajo el vaso {pick+1}!" if won else f"Elegiste {pick+1}; estaba bajo el {int(g['prize'])+1}."))
+
+    if action=='darts':
+        _tavern_set(user_id,{'game':'darts','throws':0,'score':0})
+        return '🎯 DARDOS DEL DRAGÓN\n\nTienes 3 tiros. Elige cómo lanzar; cada estilo cambia el riesgo.',{'inline_keyboard':[[{'text':'🎯 Seguro','callback_data':'tavern:dart_safe'},{'text':'🔥 Fuerte','callback_data':'tavern:dart_power'},{'text':'☠️ Al centro','callback_data':'tavern:dart_bull'}]]}
+    if action.startswith('dart_'):
+        g=_tavern_get(user_id)
+        if not g or g.get('game')!='darts': return 'Esa partida ya terminó.',tavern_home_keyboard()
+        style=action[5:]
+        pools={'safe':[5,6,7,8,9,10],'power':[0,4,8,10,12,14],'bull':[0,0,5,10,15,20]}
+        pts=random.choice(pools.get(style,pools['safe'])); g['score']+=pts; g['throws']+=1
+        if g['throws']>=3:
+            score=int(g['score']); won=score>=24; exp=max(5,min(45,score+5)); kw=max(15,min(140,score*4))
+            return _tavern_finish(user_id,chat_id,'🎯 DARDOS DEL DRAGÓN',won,exp,kw,f"Último tiro: {pts} puntos. Marcador final: {score}.")
+        _tavern_set(user_id,g)
+        return f"🎯 Tiro: +{pts}\nMarcador: {g['score']} · Tiros: {g['throws']}/3",{'inline_keyboard':[[{'text':'🎯 Seguro','callback_data':'tavern:dart_safe'},{'text':'🔥 Fuerte','callback_data':'tavern:dart_power'},{'text':'☠️ Al centro','callback_data':'tavern:dart_bull'}]]}
+
+    if action=='coin':
+        _tavern_set(user_id,{'game':'coin','streak':0})
+        return '🪙 MONEDA DEL TABERNERO\n\nElige. Cada acierto aumenta la recompensa; máximo 3 seguidos.',{'inline_keyboard':[[{'text':'🦅 Cara','callback_data':'tavern:coin_h'},{'text':'👑 Cruz','callback_data':'tavern:coin_t'}]]}
+    if action in ('coin_h','coin_t','coin_cash'):
+        g=_tavern_get(user_id)
+        if not g or g.get('game')!='coin': return 'Esa partida ya terminó.',tavern_home_keyboard()
+        if action=='coin_cash':
+            st=int(g.get('streak',0)); return _tavern_finish(user_id,chat_id,'🪙 MONEDA DEL TABERNERO',True,10+st*9,25+st*30,f"Cobraste con racha ×{st}.")
+        result=random.choice(('h','t')); pick=action[-1]
+        if pick!=result: return _tavern_finish(user_id,chat_id,'🪙 MONEDA DEL TABERNERO',False,5,15,f"Salió {'Cara' if result=='h' else 'Cruz'}. Tu racha terminó.")
+        g['streak']=int(g.get('streak',0))+1
+        if g['streak']>=3: return _tavern_finish(user_id,chat_id,'🪙 MONEDA DEL TABERNERO',True,40,120,'¡Tres aciertos seguidos! El tabernero revisa la moneda por si acaso.')
+        _tavern_set(user_id,g)
+        return f"🪙 ¡ACIERTO! Salió {'Cara' if result=='h' else 'Cruz'}.\n🔥 Racha ×{g['streak']}\n\n¿Sigues o cobras?",{'inline_keyboard':[[{'text':'🦅 Cara','callback_data':'tavern:coin_h'},{'text':'👑 Cruz','callback_data':'tavern:coin_t'}],[{'text':'💰 Cobrar','callback_data':'tavern:coin_cash'}]]}
+
+    return 'El tabernero no entendió esa jugada.',tavern_home_keyboard()
+
+
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("tavern:"):
+        try:
+            txt,kb=tavern_callback(uid,chat_id,data)
+            send_message(chat_id,txt,reply_markup=kb)
+        except Exception:
+            logger.exception("Error en Taberna RPG")
+            send_message(chat_id,"🍺 El tabernero tiró una jarra. Intenta abrir /taberna otra vez.")
+        return True
     if data.startswith("qm:"):
         try:
             _,mid,kind,choice=data.split(":",3)
@@ -9879,6 +10057,12 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+
+    if command in ("/taberna", "/tavern"):
+        ensure_player(message.get("from",{}))
+        _tavern_pop(user_id)
+        send_message(chat_id,tavern_home_text(user_id),reply_markup=tavern_home_keyboard())
+        return True
 
     if command == "/testimagenia":
         if not is_owner(user_id):

@@ -1350,6 +1350,32 @@ def init_db():
                 PRIMARY KEY(user_id, item_key)
             )
         """)
+        # Crónicas — Fase II: Expediciones. Estado persistente y cobro idempotente.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_expeditions (
+                user_id BIGINT PRIMARY KEY, chat_id BIGINT NOT NULL, thread_id BIGINT NOT NULL DEFAULT 0,
+                zone_key TEXT NOT NULL, depth BIGINT NOT NULL DEFAULT 0, max_depth BIGINT NOT NULL DEFAULT 5,
+                hp_state BIGINT NOT NULL DEFAULT 3, findings BIGINT NOT NULL DEFAULT 0,
+                pending_type TEXT NOT NULL DEFAULT '', pending_code TEXT NOT NULL DEFAULT '',
+                pending_data TEXT NOT NULL DEFAULT '', reward_kw BIGINT NOT NULL DEFAULT 0,
+                reward_essence BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+                nonce BIGINT NOT NULL DEFAULT 1, started_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_zone_unlocks (
+                user_id BIGINT NOT NULL, zone_key TEXT NOT NULL, unlocked_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id,zone_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_expedition_claims (
+                user_id BIGINT NOT NULL, expedition_started_at BIGINT NOT NULL,
+                reward_kw BIGINT NOT NULL DEFAULT 0, reward_essence BIGINT NOT NULL DEFAULT 0,
+                claimed_at BIGINT NOT NULL, PRIMARY KEY(user_id,expedition_started_at)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_expedition_status ON rpg_chronicle_expeditions(status,updated_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_bestiary_user ON rpg_bestiary(user_id, defeats DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_firsts_time ON rpg_chronicle_firsts(discovered_at ASC)")
 
@@ -4400,7 +4426,7 @@ def chronicles_grant_key_item(user_id,item_key,note=''):
     if item_key not in CHRONICLES_KEY_ITEMS: return False
     with db_lock:
         conn=get_db(); conn.execute("""INSERT INTO rpg_chronicle_key_items(user_id,item_key,quantity,discovered_at,note) VALUES(?,?,1,?,?)
-            ON CONFLICT(user_id,item_key) DO UPDATE SET quantity=rpg_chronicle_key_items.quantity+1,note=EXCLUDED.note""",(int(user_id),item_key,int(time.time()),str(note or ''))); conn.commit(); conn.close()
+            ON CONFLICT(user_id,item_key) DO UPDATE SET quantity=1,note=EXCLUDED.note""",(int(user_id),item_key,int(time.time()),str(note or ''))); conn.commit(); conn.close()
     return True
 
 
@@ -4429,6 +4455,7 @@ def chronicles_keyboard():
     return {"inline_keyboard":[
         [{"text":"📖 Bestiario","callback_data":"chron:bestiary"},{"text":"🏆 Logros","callback_data":"chron:achievements"}],
         [{"text":"🎖️ Títulos","callback_data":"chron:titles"},{"text":"🏛️ Los Primeros","callback_data":"chron:firsts"}],
+        [{"text":"🗺️ Expediciones","callback_data":"chron:expeditions"}],
         [{"text":"🗝️ Objetos clave","callback_data":"chron:keyitems"}],
     ]}
 
@@ -4486,6 +4513,199 @@ def chronicles_firsts_text():
     lines=["🏛️ SALA DE LOS PRIMEROS\n","Las primeras huellas del mundo quedan aquí.\n"]
     for r in rows: lines.append(f"✦ {r['display_name']} — {r['detail']}")
     return "\n".join(lines)
+
+# =========================================================
+# CRÓNICAS — FASE II: EXPEDICIONES
+# Persistentes, privadas por usuario, callbacks con nonce e idempotencia de cobro.
+# =========================================================
+CHRON_EXP_ZONES = {
+    "ash": ("🌲 Bosque de Ceniza", "Un bosque gris donde hasta las huellas parecen observarte.", 4),
+    "ruins": ("🏚️ Ruinas Malditas", "Piedra vieja, símbolos nuevos y demasiadas puertas cerradas.", 5),
+    "swamp": ("🐊 Pantano Umbrío", "El agua se mueve incluso cuando no hay viento.", 5),
+    "veil": ("🌘 ???", "Un lugar que no debería aparecer en ningún mapa.", 6),
+}
+CHRON_EXP_EVENTS=("chest","runes","mine","altar","traveler","tracks","corpse","fountain")
+
+def _chron_exp_row(user_id, lock=False, conn=None):
+    own=conn is None
+    if own: conn=get_db()
+    q="SELECT * FROM rpg_chronicle_expeditions WHERE user_id=?"+(" FOR UPDATE" if lock else "")
+    row=conn.execute(q,(int(user_id),)).fetchone()
+    if own: conn.close()
+    return row
+
+def chron_exp_unlocked(user_id, zone):
+    if zone!="veil": return zone in CHRON_EXP_ZONES
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT 1 FROM rpg_chronicle_zone_unlocks WHERE user_id=? AND zone_key='veil'",(int(user_id),)).fetchone(); c.close()
+    return bool(r)
+
+def chron_exp_zone_keyboard(user_id):
+    rows=[]
+    for k,(name,_,__) in CHRON_EXP_ZONES.items():
+        if k=="veil" and not chron_exp_unlocked(user_id): rows.append([{"text":"🔒 ???","callback_data":"cex:locked"}])
+        else: rows.append([{"text":name,"callback_data":f"cex:start:{k}"}])
+    rows.append([{"text":"⬅️ Crónicas","callback_data":"chron:home"}])
+    return {"inline_keyboard":rows}
+
+def chron_exp_menu_text(user_id):
+    r=_chron_exp_row(user_id)
+    if r and str(r['status'])=='active': return chron_exp_render(r)
+    return "🗺️ EXPEDICIONES\n\nElige una zona. Cada viaje cambia: puedes retirarte con tus hallazgos o arriesgarte a perder parte de ellos.\n\n🌘 Algunas rutas no aparecen hasta que el mundo decide mostrarlas."
+
+def _chron_exp_cb(r, action): return f"cex:go:{int(r['nonce'])}:{action}"
+
+def chron_exp_render(r, scene=None):
+    zone=CHRON_EXP_ZONES.get(str(r['zone_key']),CHRON_EXP_ZONES['ash'])[0]
+    pending=str(r.get('pending_type') or '')
+    txt=(f"🗺️ EXPEDICIÓN — {zone}\n\n📍 Profundidad: {int(r['depth'])}/{int(r['max_depth'])}\n"
+         f"❤️ Estado: {'Estable' if int(r['hp_state'])>=3 else 'Tocado' if int(r['hp_state'])==2 else 'En peligro'}\n"
+         f"🎒 Hallazgos: {int(r['findings'])}\n💰 Bolsa: {int(r['reward_kw']):,} KW · 💠 {int(r['reward_essence'])} esencia\n")
+    if scene: txt+="\n"+scene
+    elif pending: txt+="\nAlgo espera una decisión."
+    else: txt+="\nEl camino vuelve a dividirse."
+    return txt
+
+def chron_exp_keyboard(r):
+    n=int(r['nonce']); typ=str(r.get('pending_type') or '')
+    def b(t,a): return {"text":t,"callback_data":f"cex:go:{n}:{a}"}
+    if typ=='chest': rows=[[b("🗝️ Forzar","chest_force"),b("👂 Escuchar","chest_listen")],[b("🚶 Dejarlo","skip")]]
+    elif typ=='runes': rows=[[b("☽","rune_moon"),b("◆","rune_diamond"),b("✦","rune_star")],[b("🚶 Dejarlo","skip")]]
+    elif typ=='mine': rows=[[b("⛏️ Profundizar","mine_more"),b("🎒 Guardar","mine_cash")]]
+    elif typ=='altar': rows=[[b("🕯️ Tocar","altar_touch"),b("🙏 Inclinarse","altar_bow")],[b("🚶 Seguir","skip")]]
+    elif typ=='traveler': rows=[[b("💬 Hablar","traveler_talk"),b("🪙 Dar 50 KW","traveler_pay")],[b("🚶 Seguir","skip")]]
+    elif typ=='tracks': rows=[[b("👣 Seguir","tracks_follow"),b("🔎 Examinar","tracks_check")],[b("🚶 Ignorar","skip")]]
+    elif typ=='corpse': rows=[[b("🎒 Revisar bolsa","corpse_bag"),b("🔎 Examinar","corpse_check")],[b("🚶 Seguir","skip")]]
+    elif typ=='fountain': rows=[[b("💧 Beber","fountain_drink"),b("🪙 Lanzar moneda","fountain_coin")],[b("🚶 Seguir","skip")]]
+    else: rows=[[b("🔦 Avanzar","advance"),b("↩️ Regresar","retreat")]]
+    return {"inline_keyboard":rows}
+
+def chron_exp_start(user_id, chat_id, thread_id, zone):
+    if zone not in CHRON_EXP_ZONES or not chron_exp_unlocked(user_id,zone): return False,"🔒 Esa ruta todavía no existe para ti.",None
+    now=int(time.time()); mx=CHRON_EXP_ZONES[zone][2]
+    with db_lock:
+        c=get_db()
+        try:
+            old=_chron_exp_row(user_id,True,c)
+            if old and str(old['status'])=='active': c.rollback(); c.close(); return False,"Ya tienes una expedición activa.",old
+            c.execute("""INSERT INTO rpg_chronicle_expeditions(user_id,chat_id,thread_id,zone_key,depth,max_depth,hp_state,findings,pending_type,pending_code,pending_data,reward_kw,reward_essence,status,nonce,started_at,updated_at)
+                VALUES(?,?,?,?,0,?,3,0,'','','',0,0,'active',1,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,thread_id=EXCLUDED.thread_id,zone_key=EXCLUDED.zone_key,depth=0,max_depth=EXCLUDED.max_depth,hp_state=3,findings=0,pending_type='',pending_code='',pending_data='',reward_kw=0,reward_essence=0,status='active',nonce=rpg_chronicle_expeditions.nonce+1,started_at=EXCLUDED.started_at,updated_at=EXCLUDED.updated_at""",
+                (int(user_id),int(chat_id),int(thread_id or 0),zone,int(mx),now,now)); c.commit(); row=_chron_exp_row(user_id,False,c); c.close(); return True,"",row
+        except Exception: c.rollback(); c.close(); raise
+
+def _chron_exp_new_scene(row, rng=random):
+    typ=rng.choice(CHRON_EXP_EVENTS); code=''
+    if typ=='runes': code=rng.choice(('moon','diamond','star'))
+    scene={
+      'chest':'📦 Un cofre demasiado limpio descansa en mitad del camino. Eso nunca es buena señal.',
+      'runes':f"🜁 Tres runas rodean una cerradura. Una inscripción apenas legible dice: «La respuesta es { {'moon':'la que gobierna la noche','diamond':'la que no tiene curvas','star':'la que cae del cielo'}[code] }». ",
+      'mine':'⛏️ Una veta brilla detrás de una pared rota. Puedes sacar algo… o hacer caer el techo.',
+      'altar':'🕯️ Un altar sin nombre sigue encendido. Nadie debería haber estado aquí antes que tú.',
+      'traveler':'🧥 Un viajero encapuchado bloquea el sendero. «Cincuenta monedas por un rumor. Hablar es gratis».',
+      'tracks':'👣 Encuentras huellas que empiezan como garras y terminan como botas.',
+      'corpse':'🪦 Hay un cuerpo junto al camino. Su mano todavía aprieta una bolsa.',
+      'fountain':'⛲ Una fuente funciona en mitad de las ruinas. El agua refleja un cielo que no está sobre ti.'}[typ]
+    return typ,code,scene
+
+def _chron_exp_finish_locked(c,row,reason):
+    uid=int(row['user_id']); started=int(row['started_at']); kw=max(0,int(row['reward_kw'])); es=max(0,int(row['reward_essence']))
+    claim=c.execute("SELECT 1 FROM rpg_chronicle_expedition_claims WHERE user_id=? AND expedition_started_at=?",(uid,started)).fetchone()
+    if claim: return 0,0
+    c.execute("INSERT INTO rpg_chronicle_expedition_claims(user_id,expedition_started_at,reward_kw,reward_essence,claimed_at) VALUES(?,?,?,?,?)",(uid,started,kw,es,int(time.time())))
+    c.execute("UPDATE rpg_chronicle_expeditions SET status='finished',pending_type='',pending_code='',pending_data=?,nonce=nonce+1,updated_at=? WHERE user_id=?",(str(reason),int(time.time()),uid))
+    return kw,es
+
+def _chron_exp_pay_rewards(user_id,kw,essence,chat_id):
+    if kw: change_kiwons(user_id,kw,'chronicle_expedition',actor_id=user_id,chat_id=chat_id,note='Regreso de expedición')
+    if essence:
+        char=get_active_character(user_id)
+        if char:
+            for _ in range(int(essence)):
+                grant_rpg_item(user_id,int(char['id']),'esencia_tecnica',source='cronicas_expedicion')
+
+def chron_exp_act(user_id,nonce,action,rng=random):
+    uid=int(user_id); now=int(time.time()); payout=(0,0); final=None
+    with db_lock:
+        c=get_db()
+        try:
+            r=_chron_exp_row(uid,True,c)
+            if not r or str(r['status'])!='active': c.rollback(); c.close(); return False,"Esa expedición ya terminó.",None,None
+            if int(r['nonce'])!=int(nonce): c.rollback(); c.close(); return False,"Ese botón ya es antiguo.",r,None
+            typ=str(r.get('pending_type') or ''); valid={'advance','retreat','skip'}
+            valid|={f'{x}_{y}' for x,ys in {'chest':['force','listen'],'rune':['moon','diamond','star'],'mine':['more','cash'],'altar':['touch','bow'],'traveler':['talk','pay'],'tracks':['follow','check'],'corpse':['bag','check'],'fountain':['drink','coin']}.items() for y in ys}
+            if action not in valid: c.rollback(); c.close(); return False,"Esa decisión no pertenece a esta escena.",r,None
+            if action=='retreat':
+                kw,es=_chron_exp_finish_locked(c,r,'retreat'); c.commit(); c.close(); return True,f"🏕️ Regresas con vida.\n\n💰 {kw:,} KW · 💠 {es} esencia",None,(kw,es,int(r['chat_id']))
+            if not typ and action!='advance': c.rollback(); c.close(); return False,"Primero debes avanzar.",r,None
+            if typ and action=='advance': c.rollback(); c.close(); return False,"Resuelve la escena actual primero.",r,None
+            depth=int(r['depth']); hp=int(r['hp_state']); findings=int(r['findings']); kw=int(r['reward_kw']); es=int(r['reward_essence']); scene=''
+            if action=='advance':
+                depth+=1
+                if depth>int(r['max_depth']):
+                    kw2,es2=_chron_exp_finish_locked(c,r,'complete'); c.commit(); c.close(); return True,"🏆 La ruta termina. Has completado la expedición.",None,(kw2,es2,int(r['chat_id']))
+                typ,code,scene=_chron_exp_new_scene(r,rng)
+            elif action=='skip': typ=''; code=''; scene='🚶 Decides no tentar a la suerte.'
+            elif action.startswith('rune_'):
+                pick=action.split('_',1)[1]
+                if pick==str(r['pending_code']): kw+=rng.randint(80,180); findings+=1; scene='✨ Las runas se apagan. Dentro encuentras monedas antiguas.'
+                else: hp-=1; scene='⚡ La runa equivocada responde. Algo te golpea desde dentro de la piedra.'
+                typ=''; code=''
+            elif action=='chest_listen':
+                scene='👂 Escuchas '+('una respiración lenta. Definitivamente NO es un cofre.' if rng.random()<.45 else 'silencio absoluto. Eso tampoco tranquiliza demasiado.')
+            elif action=='chest_force':
+                if rng.random()<.25: hp-=1; scene='👹 ¡Mímico! Logras escapar de sus dientes, pero no ileso.'
+                else: gain=rng.randint(100,260); kw+=gain; findings+=1; scene=f'📦 Se abre. Encuentras {gain} KW.'
+                typ=''; code=''
+            elif action=='mine_more':
+                if rng.random()<.28: hp-=1; scene='💥 La veta cede. Sales antes del derrumbe, cubierto de polvo.'; typ=''; code=''
+                else: gain=rng.randint(1,2); es+=gain; findings+=1; scene=f'💠 Extraes {gain} esencia. La veta continúa.'
+            elif action=='mine_cash': typ=''; code=''; scene='🎒 Guardas lo extraído antes de que la montaña cambie de opinión.'
+            elif action.startswith('altar_'):
+                if action=='altar_bow': findings+=1; scene='🕯️ La llama se inclina contigo. Cuando levantas la vista hay una pluma negra en el altar.'; final=('key','pluma_negra')
+                else:
+                    if rng.random()<.5: es+=1; findings+=1; scene='✨ El altar deja una chispa de esencia en tu mano.'
+                    else: hp-=1; scene='🩸 El altar estaba esperando una ofrenda. Decide tomarla de ti.'
+                typ=''; code=''
+            elif action.startswith('traveler_'):
+                if action=='traveler_pay':
+                    bal=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+                    if not bal or int(bal['kiwons'])<50:
+                        c.rollback(); c.close(); return False,'🧥 El viajero extiende la mano. Te faltan KW para comprar el rumor.',r,None
+                    c.execute("UPDATE players SET kiwons=kiwons-50,updated_at=? WHERE user_id=?",(now,uid))
+                    c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,chat_id,note,created_at) VALUES(?, -50, 'chronicle_rumor', ?, ?, 'Rumor del viajero', ?)",(uid,uid,int(r['chat_id']),now))
+                    scene='🧥 «Cuando encuentres una moneda sin rostro, no la gastes. Y no confíes en puertas que golpean primero».'
+                else: scene='🧥 «Hay un camino que solo aparece a quien vuelve con algo que no entiende».'
+                typ=''; code=''
+            elif action.startswith('tracks_'):
+                if action=='tracks_follow' and rng.random()<.35: hp-=1; scene='🐾 Las huellas te llevaron exactamente a donde su dueño quería.'
+                else: gain=rng.randint(60,140); kw+=gain; findings+=1; scene='🔎 Entre las huellas encuentras una pequeña bolsa abandonada.'
+                typ=''; code=''
+            elif action.startswith('corpse_'):
+                if action=='corpse_bag' and rng.random()<.30: hp-=1; scene='🧟 El cadáver abre los ojos. La bolsa era el cebo.'
+                else: gain=rng.randint(70,170); kw+=gain; findings+=1; scene='🪦 No se mueve. Esta vez. Encuentras algo útil.'
+                typ=''; code=''
+            elif action.startswith('fountain_'):
+                if action=='fountain_drink': hp=min(3,hp+1); scene='💧 El agua sabe a lluvia. Te sientes mejor.'
+                else: scene='🪙 La moneda nunca toca el fondo. Durante un segundo ves una ruta donde antes no había nada.'; final=('unlock','veil')
+                typ=''; code=''
+            if hp<=0:
+                # El peligro cuesta la mitad de la bolsa, nunca objetos clave.
+                kw//=2; es//=2
+                c.execute("UPDATE rpg_chronicle_expeditions SET reward_kw=?,reward_essence=? WHERE user_id=?",(kw,es,uid)); r=_chron_exp_row(uid,False,c)
+                kw2,es2=_chron_exp_finish_locked(c,r,'failed'); c.commit(); c.close(); return True,scene+f"\n\n💀 Regresas malherido. Conservas la mitad de los hallazgos.",None,(kw2,es2,int(r['chat_id']))
+            c.execute("UPDATE rpg_chronicle_expeditions SET depth=?,hp_state=?,findings=?,pending_type=?,pending_code=?,reward_kw=?,reward_essence=?,nonce=nonce+1,updated_at=? WHERE user_id=?",(depth,hp,findings,typ,code,kw,es,now,uid)); c.commit(); nr=_chron_exp_row(uid,False,c); c.close()
+        except Exception: c.rollback(); c.close(); raise
+    if final:
+        if final[0]=='key': chronicles_grant_key_item(uid,final[1],'Encontrado en una expedición')
+        elif final[0]=='unlock':
+            with db_lock:
+                c=get_db(); c.execute("INSERT INTO rpg_chronicle_zone_unlocks(user_id,zone_key,unlocked_at) VALUES(?,?,?) ON CONFLICT(user_id,zone_key) DO NOTHING",(uid,final[1],now)); c.commit(); c.close()
+    return True,scene,nr,None
+
+def chron_exp_status(user_id):
+    r=_chron_exp_row(user_id)
+    if not r or str(r['status'])!='active': return chron_exp_menu_text(user_id),chron_exp_zone_keyboard(user_id)
+    return chron_exp_render(r),chron_exp_keyboard(r)
 
 # La tirada se hace por CADA /encuentro del mundo, sin importar quién lo genere.
 # Los porcentajes no son pity: el #2000 no está obligado a ser legendario.
@@ -10060,8 +10280,29 @@ def tavern_callback(user_id,chat_id,data):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("cex:"):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        thread_id=int(msg.get("message_thread_id") or 0)
+        try:
+            if data=="cex:locked": send_message(chat_id,"🔒 Esa ruta todavía no aparece en tu mapa."); return True
+            if data.startswith("cex:start:"):
+                zone=data.split(":",2)[2]; ok,note,row=chron_exp_start(uid,chat_id,thread_id,zone)
+                if not ok: send_message(chat_id,note); return True
+                send_message(chat_id,chron_exp_render(row,"🚪 Das el primer paso. Aún puedes regresar... por ahora."),reply_markup=chron_exp_keyboard(row)); return True
+            if data.startswith("cex:go:"):
+                _,_,nonce,action=data.split(":",3); ok,note,row,payout=chron_exp_act(uid,int(nonce),action)
+                if payout:
+                    _chron_exp_pay_rewards(uid,payout[0],payout[1],payout[2]); send_message(chat_id,note,reply_markup=chron_exp_zone_keyboard(uid)); return True
+                if not ok: send_message(chat_id,note); return True
+                send_message(chat_id,chron_exp_render(row,note),reply_markup=chron_exp_keyboard(row)); return True
+        except Exception:
+            logger.exception("Error en Expediciones de Crónicas")
+            send_message(chat_id,"🗺️ La ruta se volvió inestable. Tu progreso quedó guardado; abre /expedicion otra vez."); return True
+        return True
     if data.startswith("chron:"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        if data=="chron:expeditions":
+            txt,kb=chron_exp_status(uid); send_message(chat_id,txt,reply_markup=kb); return True
         if data=="chron:bestiary": send_message(chat_id,chronicles_bestiary_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:achievements": send_message(chat_id,chronicles_achievements_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:titles":
@@ -11076,6 +11317,10 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+
+    if command in ("/expedicion", "/expedición", "/explorar"):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        ensure_player(message.get("from",{})); txt,kb=chron_exp_status(user_id); send_message(chat_id,txt,reply_markup=kb); return True
 
     if command in ("/cronicas", "/chronicles"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True

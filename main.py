@@ -10429,6 +10429,106 @@ def _rpg_ai_usage_release(day):
     except Exception:
         logger.exception("No pude devolver una reserva de generación IA")
 
+def _rpg_ai_asset_info(asset_key):
+    """Valida una clave visual del RPG y devuelve metadatos para generar su arte."""
+    raw=str(asset_key or "").strip().lower()
+    if ":" not in raw:
+        return None
+    kind,key=raw.split(":",1)
+    key=key.strip().split(":",1)[0]
+    if not key:
+        return None
+    if kind=="enemy":
+        cfg=_rpg_enemy_info(key)
+        if not cfg: return None
+        visual=_RPG_ENEMY_VISUALS.get(key, f"a hostile fantasy creature named {cfg.get('name',key)}")
+        return {"canonical":f"enemy:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":"dangerous bestiary encounter"}
+    if kind=="class":
+        aliases={"picaro":"picaro","pícaro":"picaro","paladin":"paladin","paladín":"paladin","the cleaner":"the_cleaner","the_cleaner":"the_cleaner"}
+        key=aliases.get(key,key)
+        if key not in ("guerrero","mago","picaro","paladin","arquero","the_cleaner"): return None
+        labels={"guerrero":"Guerrero","mago":"Mago","picaro":"Pícaro","paladin":"Paladín","arquero":"Arquero","the_cleaner":"The Cleaner"}
+        visuals={
+          "guerrero":"a heroic armored fantasy warrior with sword and shield",
+          "mago":"a powerful arcane mage wielding luminous magic and a staff",
+          "picaro":"an agile fantasy rogue with light leather armor and twin daggers",
+          "paladin":"a noble heavily armored paladin with shield and radiant holy weapon",
+          "arquero":"an expert fantasy archer with longbow, quiver and light ranger armor",
+          "the_cleaner":"an elite dark fantasy cleaner-assassin, elegant black combat coat, twin angelic blades, controlled intimidating presence",
+        }
+        return {"canonical":f"class:{key}","kind":kind,"key":key,"name":labels[key],"visual":visuals[key],"scene":"iconic playable hero portrait"}
+    if kind=="boss":
+        cfg=RPG_BOSSES.get(key)
+        if not cfg: return None
+        return {"canonical":f"boss:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":f"a colossal unique dark fantasy raid boss named {cfg.get('name',key)}, visual theme {cfg.get('style','tactical')}","scene":"epic raid boss arena"}
+    if kind=="pet":
+        cfg=RPG_PETS.get(key)
+        if not cfg: return None
+        return {"canonical":f"pet:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":f"a charming collectible fantasy companion creature named {cfg.get('name',key)}, rarity {cfg.get('rarity','fantasy')}","scene":"magical companion showcase"}
+    if kind=="npc" and key=="malkor":
+        return {"canonical":"npc:malkor","kind":kind,"key":key,"name":"Malkor","visual":"Malkor, a charismatic mysterious dark-fantasy traveling merchant, clever rogue-like human trader with layered merchant clothes, satchel, trinkets and a knowing expression","scene":"mysterious fantasy market stall"}
+    if kind in ("event","eventboss"):
+        if key=="opening_2026": cfg=_opening_cfg()
+        else:
+            m=re.fullmatch(r"event_(2026|2027|2028)_(0[1-9]|1[0-2])",key)
+            cfg=_event_cfg(int(m.group(1)),int(m.group(2))) if m else None
+        if not cfg: return None
+        if kind=="event":
+            return {"canonical":f"event:{key}","kind":kind,"key":key,"name":f"{cfg['title']} {cfg['year']}","visual":f"a grand seasonal fantasy RPG event scene for {cfg['title']} {cfg['year']}, celebratory environment, thematic decorations, adventurers in the distance","scene":"wide cinematic seasonal event key art"}
+        return {"canonical":f"eventboss:{key}","kind":kind,"key":key,"name":str(cfg['boss']),"visual":f"a colossal unique seasonal raid boss named {cfg['boss']}, themed for {cfg['title']} {cfg['year']}","scene":"epic seasonal raid boss arena"}
+    return None
+
+def cloudflare_generate_rpg_asset_image(asset_key):
+    """Generador universal para enemy/class/boss/pet/npc/event/eventboss."""
+    info=_rpg_ai_asset_info(asset_key)
+    if not info:
+        raise ValueError(f"Asset RPG desconocido o no generable: {asset_key}")
+    if info['kind']=="enemy":
+        return cloudflare_generate_rpg_enemy_image(info['key'])
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise RuntimeError("Faltan CLOUDFLARE_ACCOUNT_ID o CLOUDFLARE_API_TOKEN en Render.")
+    framing="single subject, full body or nearly full body, centered, readable silhouette" if info['kind'] not in ("event",) else "wide environmental composition, clear focal point, cinematic depth"
+    prompt=(
+        "Premium dark fantasy cinematic RPG concept art. "
+        f"Subject: {info['visual']}. Scene: {info['scene']}. {framing}. "
+        "Consistent KiwRPG visual identity, dramatic volumetric lighting, atmospheric depth, realistic fantasy materials, high detail, polished game key art. "
+        "ABSOLUTELY NO text, letters, words, title, logo, watermark, signature, UI, border, frame, card design or branding."
+    )
+    ok,used,limit,day=_rpg_ai_usage_reserve()
+    if not ok: raise RuntimeError(f"Límite diario de arte IA alcanzado ({used}/{limit}).")
+    url=f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    try:
+        response=TELEGRAM_SESSION.post(url,headers={"Authorization":f"Bearer {CLOUDFLARE_API_TOKEN}","Content-Type":"application/json"},json={"prompt":prompt},timeout=90)
+        if response.status_code!=200: raise RuntimeError(f"Cloudflare respondió HTTP {response.status_code}: {(response.text or '')[:700]}")
+        content_type=str(response.headers.get("content-type") or "").lower(); raw=response.content
+        if "application/json" in content_type:
+            payload=response.json(); result=payload.get("result") if isinstance(payload,dict) else None; b64=None
+            if isinstance(result,dict): b64=result.get("image") or result.get("data")
+            if not b64 and isinstance(payload,dict): b64=payload.get("image")
+            if not b64: raise RuntimeError(f"Cloudflare devolvió JSON sin imagen: {str(payload)[:700]}")
+            import base64
+            raw=base64.b64decode(b64); content_type="image/png"
+        if len(raw)<1000: raise RuntimeError("Cloudflare devolvió una imagen vacía o demasiado pequeña.")
+        return raw,(content_type.split(";",1)[0] or "image/png")
+    except Exception:
+        _rpg_ai_usage_release(day); raise
+
+def generate_and_register_rpg_art(chat_id, asset_key, caption="", reply_markup=None, message_thread_id=None, force=False):
+    """Genera, sube y registra cualquier asset visual soportado del RPG."""
+    info=_rpg_ai_asset_info(asset_key)
+    if not info: return None
+    canonical=info['canonical']; cache_key=f"img:{canonical}"
+    lock=_rpg_ai_lock(canonical)
+    with lock:
+        cached=_rpg_asset_get(cache_key)
+        if cached and not force:
+            return send_photo(chat_id,cached,caption,reply_markup=reply_markup)
+        raw,ctype=cloudflare_generate_rpg_asset_image(canonical)
+        data,fid=_upload_generated_enemy_art(chat_id,info['key'],raw,ctype,caption,reply_markup,message_thread_id)
+        _rpg_asset_set(cache_key,fid)
+        logger.info("Arte IA universal registrado | asset=%s | bytes=%s | force=%s",canonical,len(raw),bool(force))
+        return data
+
 def cloudflare_generate_rpg_enemy_image(enemy_key):
     """Genera arte para un monstruo real del catálogo, con anatomía explícita y sin texto."""
     enemy=_rpg_enemy_info(enemy_key)
@@ -10622,55 +10722,38 @@ def process_command(
         if not is_owner(user_id):
             send_message(chat_id,"Solo Kiu puede reemplazar arte oficial generado por IA."); return True
         key=(parts[1].strip().lower() if len(parts)>1 else "")
-        if not key.startswith("enemy:"):
-            send_message(chat_id,"Usa /regenerarimagen enemy:CLAVE"); return True
-        enemy_key=key.split(":",1)[1].split(":",1)[0]; enemy=_rpg_enemy_info(enemy_key)
-        if not enemy:
-            send_message(chat_id,f"❌ No existe ese monstruo: {enemy_key}"); return True
-        canonical=f"enemy:{enemy_key}"
-        send_message(chat_id,f"🎨 Regenerando {enemy.get('name',enemy_key)}. Si sale bien reemplazaré el arte anterior…")
+        info=_rpg_ai_asset_info(key)
+        if not info:
+            send_message(chat_id,"❌ Clave desconocida. Tipos: enemy:, class:, boss:, pet:, npc:, event:, eventboss:\nEjemplo: /regenerarimagen boss:fenrir"); return True
+        canonical=info['canonical']
+        send_message(chat_id,f"🎨 Regenerando {info['name']}. Si sale bien reemplazaré el arte anterior…")
         try:
-            generated=generate_and_register_enemy_art(chat_id,canonical,caption=f"🎨 {enemy.get('name',enemy_key)}\n✅ Arte reemplazado: {canonical}",message_thread_id=message.get("message_thread_id"),force=True)
+            generated=generate_and_register_rpg_art(chat_id,canonical,caption=f"🎨 {info['name']}\n✅ Arte reemplazado: {canonical}",message_thread_id=message.get("message_thread_id"),force=True)
             if not generated: raise RuntimeError("No se pudo regenerar la imagen.")
         except Exception as e:
-            logger.exception("Falló /regenerarimagen %s",canonical); msg=str(e)[:1200]; send_message(chat_id,"❌ No pude regenerar el arte. El anterior sigue registrado.\n\n"+msg)
+            logger.exception("Falló /regenerarimagen %s",canonical); send_message(chat_id,"❌ No pude regenerar el arte. El anterior sigue registrado.\n\n"+str(e)[:1200])
         return True
 
     if command in ("/generarimagen", "/generarimagenrpg", "/generararte"):
         if not is_owner(user_id):
-            send_message(chat_id,"Solo Kiu puede generar arte oficial del RPG.")
-            return True
+            send_message(chat_id,"Solo Kiu puede generar arte oficial del RPG."); return True
         key=(parts[1].strip().lower() if len(parts)>1 else "")
         if not key:
-            send_message(chat_id,"Usa /generarimagen enemy:CLAVE\nEjemplo: /generarimagen enemy:lobo_ceniza")
+            send_message(chat_id,"Usa /generarimagen TIPO:CLAVE\n\nTipos: enemy, class, boss, pet, npc, event, eventboss\nEjemplo: /generarimagen boss:fenrir")
             return True
-        if not key.startswith("enemy:"):
-            send_message(chat_id,"Por ahora la generación automática está habilitada solo para enemy:*")
-            return True
-        enemy_key=key.split(":",1)[1].split(":",1)[0]
-        enemy=_rpg_enemy_info(enemy_key)
-        if not enemy:
-            send_message(chat_id,f"❌ No existe ese monstruo en el catálogo: {enemy_key}")
-            return True
-        canonical=f"enemy:{enemy_key}"
-        existing=_rpg_asset_get(f"img:{canonical}")
+        info=_rpg_ai_asset_info(key)
+        if not info:
+            send_message(chat_id,"❌ Esa clave no existe en el catálogo generable. Usa /imagenesrpg para revisar las claves."); return True
+        canonical=info['canonical']; existing=_rpg_asset_get(f"img:{canonical}")
         if existing:
-            send_photo(chat_id,existing,f"🖼️ {enemy.get('name',enemy_key)}\n✅ Ya estaba registrado como {canonical}.")
+            send_photo(chat_id,existing,f"🖼️ {info['name']}\n✅ Ya estaba registrado como {canonical}.\nUsa /regenerarimagen {canonical} si quieres reemplazarlo.")
             return True
-        send_message(chat_id,f"🎨 Generando arte oficial para {enemy.get('name',enemy_key)}…")
+        send_message(chat_id,f"🎨 Generando arte oficial para {info['name']}…")
         try:
-            generated=generate_and_register_enemy_art(
-                chat_id,canonical,
-                caption=f"🎨 {enemy.get('name',enemy_key)}\n✅ Arte IA registrado: {canonical}",
-                message_thread_id=message.get("message_thread_id")
-            )
-            if not generated:
-                raise RuntimeError("No se pudo generar o registrar la imagen.")
+            generated=generate_and_register_rpg_art(chat_id,canonical,caption=f"🎨 {info['name']}\n✅ Arte IA registrado: {canonical}",message_thread_id=message.get("message_thread_id"))
+            if not generated: raise RuntimeError("No se pudo generar o registrar la imagen.")
         except Exception as e:
-            logger.exception("Falló /generarimagen %s",canonical)
-            msg=str(e)
-            if len(msg)>1200: msg=msg[:1200]+"…"
-            send_message(chat_id,"❌ No pude generar el arte.\n\n"+msg)
+            logger.exception("Falló /generarimagen %s",canonical); send_message(chat_id,"❌ No pude generar el arte.\n\n"+str(e)[:1200])
         return True
 
 

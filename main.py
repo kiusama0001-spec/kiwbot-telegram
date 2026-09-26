@@ -661,9 +661,25 @@ def init_db():
                 artist_name TEXT DEFAULT '', word TEXT DEFAULT '', synonyms TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT 'idle', choices TEXT NOT NULL DEFAULT '[]', strokes TEXT NOT NULL DEFAULT '[]',
                 stroke_version BIGINT NOT NULL DEFAULT 0, started_at BIGINT NOT NULL DEFAULT 0,
-                ends_at BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0
+                ends_at BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0,
+                preview_message_id BIGINT NOT NULL DEFAULT 0, preview_updated_at BIGINT NOT NULL DEFAULT 0
             )
         """)
+        cur.execute("ALTER TABLE rpg_draw_global ADD COLUMN IF NOT EXISTS preview_message_id BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_draw_global ADD COLUMN IF NOT EXISTS preview_updated_at BIGINT NOT NULL DEFAULT 0")
+        # V2: una partida por chat/topic. Evita que dos grupos o dos topics compartan estado.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_draw_global_v2 (
+                scope_key TEXT PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
+                artist_id BIGINT NOT NULL DEFAULT 0, artist_name TEXT DEFAULT '', word TEXT DEFAULT '',
+                synonyms TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'idle', choices TEXT NOT NULL DEFAULT '[]',
+                strokes TEXT NOT NULL DEFAULT '[]', stroke_version BIGINT NOT NULL DEFAULT 0,
+                started_at BIGINT NOT NULL DEFAULT 0, ends_at BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0,
+                preview_message_id BIGINT NOT NULL DEFAULT 0, preview_updated_at BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_draw_global_v2_chat_topic ON rpg_draw_global_v2(chat_id,message_thread_id)")
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_draw_global_stats (
                 user_id BIGINT PRIMARY KEY, wins BIGINT NOT NULL DEFAULT 0, exp_won BIGINT NOT NULL DEFAULT 0,
@@ -9026,14 +9042,16 @@ def handle_rpg_callback(query):
         ok,msg2=_drawg_claim(chat_id,user,msg.get("message_thread_id"))
         if not ok:
             telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True}); return True
-        url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}"
+        topic=int(msg.get("message_thread_id") or 0); url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}&topic={topic}"
         dm=send_private_message(int(uid),"🎨 Tu turno. Elige una palabra. Puedes cambiarla todas las veces que quieras.",reply_markup={"inline_keyboard":[[{"text":"🎨 Abrir lienzo","web_app":{"url":url}}]]})
         if not dm:
             with db_lock:
-                c=get_db(); c.execute("UPDATE rpg_draw_global SET status='idle',artist_id=0,artist_name='',updated_at=? WHERE chat_id=?",(int(time.time()),int(chat_id))); c.commit(); c.close()
+                c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET status='idle',artist_id=0,artist_name='',updated_at=? WHERE scope_key=?",(int(time.time()),_drawg_scope(chat_id,topic))); c.commit(); c.close()
             botname=str(get_bot_identity().get('username') or '').strip(); link=f"https://t.me/{botname}" if botname else PUBLIC_BASE_URL
             send_message(chat_id,"No puedo enviarte el lienzo por privado todavía. Abre primero el chat de KiwBot y vuelve a tomar el turno.",reply_markup={"inline_keyboard":[[{"text":"Abrir KiwBot","url":link}]]}); return True
-        send_message(chat_id,f"🎨 {user.get('first_name') or 'El artista'} tomó el turno. Está eligiendo palabra.")
+        old_topic=get_current_message_thread_id(); set_current_message_thread_id(topic or None)
+        try: send_message(chat_id,f"🎨 {user.get('first_name') or 'El artista'} tomó el turno. Está eligiendo palabra.")
+        finally: set_current_message_thread_id(old_topic)
         return True
     if data.startswith("qm:"):
         try:
@@ -9822,6 +9840,13 @@ RPG_DRAW_GLOBAL_WORDS=[
     ('goblin',[]),('mimic',[]),('pollo',[]),('monstruo',[])
 ]
 
+def _drawg_scope(chat_id, topic=None):
+    """Identidad estable de una partida: chat + topic. General usa topic 0."""
+    return f"{int(chat_id)}:{int(topic or 0)}"
+
+def _drawg_topic_from_message(message):
+    return int((message or {}).get('message_thread_id') or 0)
+
 def _drawg_norm(v):
     import unicodedata
     v=unicodedata.normalize('NFKD',str(v or '').casefold())
@@ -9832,65 +9857,118 @@ def _drawg_choices(exclude=None):
     if len(pool)<3: pool=list(RPG_DRAW_GLOBAL_WORDS)
     return random.SystemRandom().sample(pool,3)
 
+def _drawg_render_png(strokes):
+    """Renderiza el lienzo compartido a PNG para mostrarlo dentro del grupo."""
+    from PIL import Image, ImageDraw
+    import io
+    im=Image.new('RGB',(900,650),'white'); d=ImageDraw.Draw(im)
+    for q in (strokes or []):
+        try:
+            a=float(q.get('a',0)); b=float(q.get('b',0)); x=float(q.get('d',0)); y=float(q.get('e',0))
+            color=str(q.get('c') or '#111111'); width=max(2,min(36,int(float(q.get('w',7)))))
+            if not re.fullmatch(r'#[0-9a-fA-F]{6}',color): color='#111111'
+            d.line((a,b,x,y),fill=color,width=width)
+        except Exception:
+            continue
+    out=io.BytesIO(); im.save(out,format='PNG',optimize=True); return out.getvalue()
+
+def _drawg_publish_preview(chat_id, topic=None, force=False):
+    """Publica/actualiza el lienzo SOLO en el chat/topic dueño de la ronda."""
+    chat_id=int(chat_id); topic=int(topic or 0); scope=_drawg_scope(chat_id,topic); now=int(time.time())
+    try:
+        with db_lock:
+            c=get_db(); row=c.execute("SELECT status,artist_name,strokes,preview_message_id,preview_updated_at FROM rpg_draw_global_v2 WHERE scope_key=?",(scope,)).fetchone(); c.close()
+        if not row or row['status']!='drawing': return False
+        if not force and now-int(row.get('preview_updated_at') or 0)<3: return False
+        try: strokes=json.loads(row.get('strokes') or '[]')
+        except Exception: strokes=[]
+        raw=_drawg_render_png(strokes); mid=int(row.get('preview_message_id') or 0)
+        caption=f"🎨 DIBUJA Y ADIVINA — lienzo en vivo\n✏️ {row.get('artist_name') or 'Artista'} está dibujando.\n💬 Adivinen escribiendo en este chat."
+        if mid:
+            payload={'chat_id':str(chat_id),'message_id':str(mid),'media':json.dumps({'type':'photo','media':'attach://drawing','caption':caption},ensure_ascii=False)}
+            files={'drawing':('dibujo.png',raw,'image/png')}
+            r=TELEGRAM_SESSION.post(f"{TELEGRAM_API}/editMessageMedia",data=payload,files=files,timeout=TELEGRAM_TIMEOUT)
+            data=r.json() if r.content else {}; ok=bool(r.ok and data.get('ok'))
+        else:
+            sent=send_photo_bytes(chat_id,raw,caption=caption,message_thread_id=(topic or None),content_type='image/png')
+            mid=int((((sent or {}).get('result') or {}).get('message_id') or 0)); ok=bool(mid)
+        if ok:
+            with db_lock:
+                c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET preview_message_id=?,preview_updated_at=? WHERE scope_key=?",(mid,now,scope)); c.commit(); c.close()
+        return ok
+    except Exception:
+        logger.exception("No pude actualizar el lienzo global en su chat/topic")
+        return False
+
+def _drawg_queue_preview(chat_id, topic=None, force=False):
+    try: executor.submit(_drawg_publish_preview,int(chat_id),int(topic or 0),bool(force))
+    except Exception: pass
+
 def _drawg_offer(chat_id,topic=None):
-    now=int(time.time()); chat_id=int(chat_id)
+    now=int(time.time()); chat_id=int(chat_id); topic=int(topic or 0); scope=_drawg_scope(chat_id,topic)
     with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global_v2 WHERE scope_key=? FOR UPDATE',(scope,)).fetchone()
         if row and row['status']=='drawing' and int(row['ends_at'] or 0)>now:
             left=int(row['ends_at'])-now; c.rollback(); c.close(); return False,f'🎨 Ya hay una ronda activa. Quedan {left}s.'
-        c.execute("""INSERT INTO rpg_draw_global(chat_id,message_thread_id,status,updated_at) VALUES(?,?,'idle',?)
-                     ON CONFLICT(chat_id) DO UPDATE SET message_thread_id=EXCLUDED.message_thread_id,artist_id=0,artist_name='',word='',synonyms='[]',status='idle',choices='[]',strokes='[]',stroke_version=0,started_at=0,ends_at=0,updated_at=EXCLUDED.updated_at""",(chat_id,int(topic) if topic is not None else None,now)); c.commit(); c.close()
-    send_message(chat_id,'🎨 DIBUJA Y ADIVINA\n\nEl lienzo está libre. El primero en tomar el turno será el artista.\n⏱️ Al elegir palabra comienzan 90 segundos.\n💬 Todos los demás adivinan escribiendo en el grupo.',reply_markup={'inline_keyboard':[[{'text':'🎨 Tomar turno','callback_data':'drawg_take'}]]})
+        c.execute("""INSERT INTO rpg_draw_global_v2(scope_key,chat_id,message_thread_id,status,updated_at) VALUES(?,?,?,'idle',?)
+                     ON CONFLICT(scope_key) DO UPDATE SET chat_id=EXCLUDED.chat_id,message_thread_id=EXCLUDED.message_thread_id,artist_id=0,artist_name='',word='',synonyms='[]',status='idle',choices='[]',strokes='[]',stroke_version=0,started_at=0,ends_at=0,preview_message_id=0,preview_updated_at=0,updated_at=EXCLUDED.updated_at""",(scope,chat_id,(topic or None),now)); c.commit(); c.close()
+    old=get_current_message_thread_id(); set_current_message_thread_id(topic or None)
+    try: send_message(chat_id,'🎨 DIBUJA Y ADIVINA\n\nEl lienzo está libre. El primero en tomar el turno será el artista.\n⏱️ Al elegir palabra comienzan 90 segundos.\n💬 Todos los demás adivinan escribiendo en este chat.',reply_markup={'inline_keyboard':[[{'text':'🎨 Tomar turno','callback_data':'drawg_take'}]]})
+    finally: set_current_message_thread_id(old)
     return True,'Ronda preparada.'
 
 def _drawg_claim(chat_id,user,topic=None):
-    now=int(time.time()); uid=int((user or {}).get('id') or 0); name=((user or {}).get('first_name') or (user or {}).get('username') or 'Artista')[:80]
+    now=int(time.time()); chat_id=int(chat_id); topic=int(topic or 0); scope=_drawg_scope(chat_id,topic); uid=int((user or {}).get('id') or 0); name=((user or {}).get('first_name') or (user or {}).get('username') or 'Artista')[:80]
     with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global_v2 WHERE scope_key=? FOR UPDATE',(scope,)).fetchone()
         if not row or row['status']!='idle': c.rollback(); c.close(); return False,'Ese turno ya fue tomado.'
         choices=[{'word':w,'synonyms':sy} for w,sy in _drawg_choices()]
-        c.execute("UPDATE rpg_draw_global SET artist_id=?,artist_name=?,status='choosing',choices=?,strokes='[]',stroke_version=0,updated_at=? WHERE chat_id=?",(uid,name,json.dumps(choices,ensure_ascii=False),now,int(chat_id))); c.commit(); c.close()
+        c.execute("UPDATE rpg_draw_global_v2 SET artist_id=?,artist_name=?,status='choosing',choices=?,strokes='[]',stroke_version=0,preview_message_id=0,preview_updated_at=0,updated_at=? WHERE scope_key=?",(uid,name,json.dumps(choices,ensure_ascii=False),now,scope)); c.commit(); c.close()
     return True,'Turno tomado.'
 
-def _drawg_finish(chat_id,reason='time'):
-    now=int(time.time()); chat_id=int(chat_id)
+def _drawg_finish(chat_id,topic=None,reason='time'):
+    now=int(time.time()); chat_id=int(chat_id); topic=int(topic or 0); scope=_drawg_scope(chat_id,topic)
     with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global_v2 WHERE scope_key=? FOR UPDATE',(scope,)).fetchone()
         if not row or row['status']!='drawing': c.rollback(); c.close(); return False
-        word=str(row['word'] or '?'); topic=row.get('message_thread_id')
-        c.execute("UPDATE rpg_draw_global SET status='finished',updated_at=? WHERE chat_id=?",(now,chat_id)); c.commit(); c.close()
-    old=get_current_message_thread_id(); set_current_message_thread_id(topic)
+        word=str(row['word'] or '?')
+        try: strokes=json.loads(row.get('strokes') or '[]')
+        except Exception: strokes=[]
+        c.execute("UPDATE rpg_draw_global_v2 SET status='finished',updated_at=? WHERE scope_key=?",(now,scope)); c.commit(); c.close()
+    try:
+        raw=_drawg_render_png(strokes); mid=int(row.get('preview_message_id') or 0)
+        if mid:
+            payload={'chat_id':str(chat_id),'message_id':str(mid),'media':json.dumps({'type':'photo','media':'attach://drawing','caption':"🎨 DIBUJA Y ADIVINA — dibujo final\n💬 La ronda terminó."},ensure_ascii=False)}
+            TELEGRAM_SESSION.post(f"{TELEGRAM_API}/editMessageMedia",data=payload,files={'drawing':('dibujo.png',raw,'image/png')},timeout=TELEGRAM_TIMEOUT)
+    except Exception: pass
+    old=get_current_message_thread_id(); set_current_message_thread_id(topic or None)
     try: send_message(chat_id,f'⏰ Tiempo. Nadie adivinó.\nLa palabra era: {word}')
     finally: set_current_message_thread_id(old)
     _drawg_offer(chat_id,topic); return True
 
 def _drawg_guess(message,text):
-    chat=message.get('chat') or {}; chat_id=chat.get('id'); user=message.get('from') or {}; uid=int(user.get('id') or 0); now=int(time.time())
+    chat=message.get('chat') or {}; chat_id=chat.get('id'); topic=_drawg_topic_from_message(message); scope=_drawg_scope(chat_id,topic) if chat_id else ''; user=message.get('from') or {}; uid=int(user.get('id') or 0); now=int(time.time())
     if not chat_id or chat.get('type') not in ('group','supergroup') or not text or str(text).startswith('/'): return False
     with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global_v2 WHERE scope_key=? FOR UPDATE',(scope,)).fetchone()
         if not row or row['status']!='drawing': c.rollback(); c.close(); return False
-        if int(row['ends_at'] or 0)<=now: c.rollback(); c.close(); _drawg_finish(chat_id); return False
+        if int(row['ends_at'] or 0)<=now: c.rollback(); c.close(); _drawg_finish(chat_id,topic); return False
         if int(row['artist_id'] or 0)==uid: c.rollback(); c.close(); return False
         answers=[str(row['word'] or '')]+list(json.loads(row['synonyms'] or '[]'))
         if _drawg_norm(text) not in {_drawg_norm(a) for a in answers}: c.rollback(); c.close(); return False
-        # Primer acierto cierra la ronda atómicamente.
-        topic=row.get('message_thread_id'); word=str(row['word']); artist=int(row['artist_id'] or 0)
-        c.execute("UPDATE rpg_draw_global SET status='finished',updated_at=? WHERE chat_id=? AND status='drawing'",(now,int(chat_id)))
+        word=str(row['word']); artist=int(row['artist_id'] or 0)
+        changed=c.execute("UPDATE rpg_draw_global_v2 SET status='finished',updated_at=? WHERE scope_key=? AND status='drawing'",(now,scope)).rowcount
+        if not changed: c.rollback(); c.close(); return False
         prow=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
-        if prow is None:
-            c.execute("INSERT INTO players(user_id,display_name,kiwons,created_at,updated_at) VALUES(?,?,?,?,?)",(uid,(user.get('first_name') or f'Jugador {uid}'),RPG_DRAW_GLOBAL_KW,now,now))
-        else:
-            c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(RPG_DRAW_GLOBAL_KW,now,uid))
+        if prow is None: c.execute("INSERT INTO players(user_id,display_name,kiwons,created_at,updated_at) VALUES(?,?,?,?,?)",(uid,(user.get('first_name') or f'Jugador {uid}'),RPG_DRAW_GLOBAL_KW,now,now))
+        else: c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(RPG_DRAW_GLOBAL_KW,now,uid))
         c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(uid,RPG_DRAW_GLOBAL_KW,'draw_global_win',uid,None,int(chat_id),f'Dibuja y Adivina: {word}',now))
         ch=c.execute("SELECT id FROM characters WHERE user_id=? AND is_active=1 LIMIT 1",(uid,)).fetchone()
-        c.execute("""INSERT INTO rpg_draw_global_stats(user_id,wins,exp_won,kw_won,rounds_drawn,updated_at) VALUES(?,1,?,?,0,?)
-                     ON CONFLICT(user_id) DO UPDATE SET wins=rpg_draw_global_stats.wins+1,exp_won=rpg_draw_global_stats.exp_won+EXCLUDED.exp_won,kw_won=rpg_draw_global_stats.kw_won+EXCLUDED.kw_won,updated_at=EXCLUDED.updated_at""",(uid,RPG_DRAW_GLOBAL_EXP,RPG_DRAW_GLOBAL_KW,now))
-        c.execute("""INSERT INTO rpg_draw_global_stats(user_id,wins,exp_won,kw_won,rounds_drawn,updated_at) VALUES(?,0,0,0,1,?)
-                     ON CONFLICT(user_id) DO UPDATE SET rounds_drawn=rpg_draw_global_stats.rounds_drawn+1,updated_at=EXCLUDED.updated_at""",(artist,now))
+        c.execute("""INSERT INTO rpg_draw_global_stats(user_id,wins,exp_won,kw_won,rounds_drawn,updated_at) VALUES(?,1,?,?,0,?) ON CONFLICT(user_id) DO UPDATE SET wins=rpg_draw_global_stats.wins+1,exp_won=rpg_draw_global_stats.exp_won+EXCLUDED.exp_won,kw_won=rpg_draw_global_stats.kw_won+EXCLUDED.kw_won,updated_at=EXCLUDED.updated_at""",(uid,RPG_DRAW_GLOBAL_EXP,RPG_DRAW_GLOBAL_KW,now))
+        c.execute("""INSERT INTO rpg_draw_global_stats(user_id,wins,exp_won,kw_won,rounds_drawn,updated_at) VALUES(?,0,0,0,1,?) ON CONFLICT(user_id) DO UPDATE SET rounds_drawn=rpg_draw_global_stats.rounds_drawn+1,updated_at=EXCLUDED.updated_at""",(artist,now))
         c.commit(); c.close()
     if ch: grant_rpg_exp(int(ch['id']),RPG_DRAW_GLOBAL_EXP)
-    old=get_current_message_thread_id(); set_current_message_thread_id(topic)
+    old=get_current_message_thread_id(); set_current_message_thread_id(topic or None)
     try: send_message(chat_id,f"🏆 {(user.get('first_name') or user.get('username') or 'Alguien')} adivinó: {word.upper()}\n🪙 +{RPG_DRAW_GLOBAL_KW:,} KW · ✨ +{RPG_DRAW_GLOBAL_EXP} EXP")
     finally: set_current_message_thread_id(old)
     _drawg_offer(chat_id,topic); return True
@@ -12500,36 +12578,37 @@ def rpg_draw_submit():
 @app.route('/rpg/draw-global')
 def rpg_draw_global_page():
     html="""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><title>Dibuja y Adivina</title><script src='https://telegram.org/js/telegram-web-app.js'></script><style>*{box-sizing:border-box}body{margin:0;background:#10120f;color:#eee;font-family:system-ui;overscroll-behavior:none}.wrap{max-width:950px;margin:auto;padding:10px}.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.choices,.tools{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.choices button,.tools button,.change{border:1px solid #5f674f;background:#252a20;color:#eee;border-radius:10px;padding:10px;font-weight:700}.change{background:#5d451b}.sw{width:31px;height:31px;border-radius:50%;border:2px solid #ddd;padding:0}.canvas{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 8px 30px #0008}canvas{display:block;width:100%;height:auto;touch-action:none}.status{padding:8px 0;color:#e7cf7a;font-weight:700}.hidden{display:none}input[type=range]{width:120px}</style></head><body><div class='wrap'><div class='bar'><b>🎨 Dibuja y Adivina</b><span id='status' class='status'>Cargando…</span></div><div id='choices' class='choices'></div><div id='tools' class='tools hidden'></div><div class='canvas'><canvas id='cv' width='900' height='650'></canvas></div></div><script>
-const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),init=tg?.initData||'',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,chat_id:chat,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%10===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
+const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),topic=Number(qs.get('topic')||0),init=tg?.initData||'',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,chat_id:chat,topic_id:topic,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%10===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
     return Response(html,mimetype='text/html')
 
 @app.route('/rpg/api/draw-global',methods=['POST'])
 def rpg_draw_global_api():
-    b=request.get_json(silent=True) or {}; chat_id=int(b.get('chat_id') or 0); action=str(b.get('action') or 'state'); now=int(time.time())
+    b=request.get_json(silent=True) or {}; chat_id=int(b.get('chat_id') or 0); topic=int(b.get('topic_id') or 0); scope=_drawg_scope(chat_id,topic); action=str(b.get('action') or 'state'); now=int(time.time())
     auth=validate_telegram_init_data(b.get('init_data','')) if b.get('init_data') else None; uid=int((auth or {}).get('user',{}).get('id') or 0)
     if not chat_id: return jsonify(ok=False,message='Chat inválido'),400
     with db_lock:
-        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global_v2 WHERE scope_key=? FOR UPDATE',(scope,)).fetchone()
         if not row: c.rollback(); c.close(); return jsonify(ok=False,message='No hay partida activa'),404
         artist=bool(uid and int(row['artist_id'] or 0)==uid)
         if action=='reroll':
             if not artist or row['status']!='choosing': c.rollback(); c.close(); return jsonify(ok=False,message='No eres el artista'),403
             old=[q.get('word') for q in json.loads(row['choices'] or '[]')]; fresh=[{'word':w,'synonyms':sy} for w,sy in _drawg_choices(old)]
-            c.execute('UPDATE rpg_draw_global SET choices=?,updated_at=? WHERE chat_id=?',(json.dumps(fresh,ensure_ascii=False),now,chat_id)); c.commit(); c.close(); return jsonify(ok=True,choices=[q['word'] for q in fresh])
+            c.execute('UPDATE rpg_draw_global_v2 SET choices=?,updated_at=? WHERE scope_key=?',(json.dumps(fresh,ensure_ascii=False),now,scope)); c.commit(); c.close(); return jsonify(ok=True,choices=[q['word'] for q in fresh])
         if action=='choose':
             if not artist or row['status']!='choosing': c.rollback(); c.close(); return jsonify(ok=False,message='No eres el artista'),403
             choices=json.loads(row['choices'] or '[]'); idx=int(b.get('choice',-1))
             if idx<0 or idx>=len(choices): c.rollback(); c.close(); return jsonify(ok=False,message='Palabra inválida'),400
             q=choices[idx]; end=now+RPG_DRAW_GLOBAL_SECONDS
-            c.execute("UPDATE rpg_draw_global SET word=?,synonyms=?,status='drawing',started_at=?,ends_at=?,strokes='[]',stroke_version=0,updated_at=? WHERE chat_id=?",(q['word'],json.dumps(q.get('synonyms',[]),ensure_ascii=False),now,end,now,chat_id)); c.commit(); topic=row.get('message_thread_id'); c.close()
+            c.execute("UPDATE rpg_draw_global_v2 SET word=?,synonyms=?,status='drawing',started_at=?,ends_at=?,strokes='[]',stroke_version=0,preview_message_id=0,preview_updated_at=0,updated_at=? WHERE scope_key=?",(q['word'],json.dumps(q.get('synonyms',[]),ensure_ascii=False),now,end,now,scope)); c.commit(); topic=int(row.get('message_thread_id') or 0); c.close()
             old=get_current_message_thread_id(); set_current_message_thread_id(topic)
             try: send_message(chat_id,f'🎨 ¡Comenzó el dibujo! Tienen {RPG_DRAW_GLOBAL_SECONDS} segundos.\n💬 Escriban sus respuestas directamente en el chat.')
             finally: set_current_message_thread_id(old)
-            threading.Timer(RPG_DRAW_GLOBAL_SECONDS+1,lambda:_drawg_finish(chat_id,'time')).start(); return jsonify(ok=True,word=q['word'],left=RPG_DRAW_GLOBAL_SECONDS)
+            _drawg_queue_preview(chat_id,topic,True)
+            threading.Timer(RPG_DRAW_GLOBAL_SECONDS+1,lambda:_drawg_finish(chat_id,topic,'time')).start(); return jsonify(ok=True,word=q['word'],left=RPG_DRAW_GLOBAL_SECONDS)
         if action=='change_word':
             if not artist or row['status']!='drawing': c.rollback(); c.close(); return jsonify(ok=False,message='No puedes cambiar palabra ahora'),403
             w,sy=random.SystemRandom().choice(RPG_DRAW_GLOBAL_WORDS); ver=int(row['stroke_version'] or 0)+1; left=max(0,int(row['ends_at'] or 0)-now)
-            c.execute("UPDATE rpg_draw_global SET word=?,synonyms=?,strokes='[]',stroke_version=?,updated_at=? WHERE chat_id=?",(w,json.dumps(sy,ensure_ascii=False),ver,now,chat_id)); c.commit(); c.close(); return jsonify(ok=True,word=w,left=left,version=ver)
+            topic=int(row.get('message_thread_id') or 0); c.execute("UPDATE rpg_draw_global_v2 SET word=?,synonyms=?,strokes='[]',stroke_version=?,preview_updated_at=0,updated_at=? WHERE scope_key=?",(w,json.dumps(sy,ensure_ascii=False),ver,now,scope)); c.commit(); c.close(); _drawg_queue_preview(chat_id,topic,True); return jsonify(ok=True,word=w,left=left,version=ver)
         if action=='stroke':
             if not artist or row['status']!='drawing' or int(row['ends_at'] or 0)<=now: c.rollback(); c.close(); return jsonify(ok=False,message='No puedes dibujar'),403
             raw=b.get('strokes') or []
@@ -12538,9 +12617,9 @@ def rpg_draw_global_api():
             for q in raw:
                 try: clean.append({'a':max(0,min(900,float(q['a']))),'b':max(0,min(650,float(q['b']))),'d':max(0,min(900,float(q['d']))),'e':max(0,min(650,float(q['e']))),'c':str(q['c']) if re.fullmatch(r'#[0-9a-fA-F]{6}',str(q.get('c',''))) else '#111111','w':max(2,min(36,float(q['w'])))})
                 except Exception: pass
-            ver=int(row['stroke_version'] or 0)+1; c.execute('UPDATE rpg_draw_global SET strokes=?,stroke_version=?,updated_at=? WHERE chat_id=?',(json.dumps(clean,separators=(',',':')),ver,now,chat_id)); c.commit(); c.close(); return jsonify(ok=True,version=ver)
+            topic=int(row.get('message_thread_id') or 0); ver=int(row['stroke_version'] or 0)+1; c.execute('UPDATE rpg_draw_global_v2 SET strokes=?,stroke_version=?,updated_at=? WHERE scope_key=?',(json.dumps(clean,separators=(',',':')),ver,now,scope)); c.commit(); c.close(); _drawg_queue_preview(chat_id,topic,False); return jsonify(ok=True,version=ver)
         if row['status']=='drawing' and int(row['ends_at'] or 0)<=now:
-            c.rollback(); c.close(); _drawg_finish(chat_id); return jsonify(ok=True,status='finished',artist=False,strokes=[],version=0,left=0)
+            c.rollback(); c.close(); _drawg_finish(chat_id,topic); return jsonify(ok=True,status='finished',artist=False,strokes=[],version=0,left=0)
         payload={'ok':True,'status':row['status'],'artist':artist,'strokes':json.loads(row['strokes'] or '[]'),'version':int(row['stroke_version'] or 0),'left':max(0,int(row['ends_at'] or 0)-now)}
         if artist and row['status']=='choosing': payload['choices']=[q['word'] for q in json.loads(row['choices'] or '[]')]
         if artist and row['status']=='drawing': payload['word']=row['word']

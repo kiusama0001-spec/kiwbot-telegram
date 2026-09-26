@@ -4543,7 +4543,7 @@ def chron_exp_unlocked(user_id, zone):
 def chron_exp_zone_keyboard(user_id):
     rows=[]
     for k,(name,_,__) in CHRON_EXP_ZONES.items():
-        if k=="veil" and not chron_exp_unlocked(user_id): rows.append([{"text":"🔒 ???","callback_data":"cex:locked"}])
+        if k=="veil" and not chron_exp_unlocked(user_id, k): rows.append([{"text":"🔒 ???","callback_data":"cex:locked"}])
         else: rows.append([{"text":name,"callback_data":f"cex:start:{k}"}])
     rows.append([{"text":"⬅️ Crónicas","callback_data":"chron:home"}])
     return {"inline_keyboard":rows}

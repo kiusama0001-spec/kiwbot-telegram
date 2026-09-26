@@ -9115,44 +9115,53 @@ TAVERN_MISSIONS = {
 }
 
 
-def _ensure_tavern_db():
-    """Migracion idempotente y pequeña. Se ejecuta solo al usar la Taberna."""
-    now=int(time.time())
-    with db_lock:
-        conn=get_db()
-        try:
-            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_stats (
-                user_id BIGINT PRIMARY KEY, games BIGINT NOT NULL DEFAULT 0,
-                wins BIGINT NOT NULL DEFAULT 0, losses BIGINT NOT NULL DEFAULT 0,
-                net_kw BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
-                updated_at BIGINT NOT NULL DEFAULT 0)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_effects (
-                user_id BIGINT PRIMARY KEY, drink_key TEXT NOT NULL, effect_type TEXT NOT NULL,
-                magnitude BIGINT NOT NULL DEFAULT 0, games_left BIGINT NOT NULL DEFAULT 0,
-                updated_at BIGINT NOT NULL DEFAULT 0)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_daily (
-                user_id BIGINT NOT NULL, day_key TEXT NOT NULL,
-                games BIGINT NOT NULL DEFAULT 0, wins BIGINT NOT NULL DEFAULT 0,
-                drinks BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
-                PRIMARY KEY(user_id,day_key))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_claims (
-                user_id BIGINT NOT NULL, day_key TEXT NOT NULL, mission_key TEXT NOT NULL,
-                claimed_at BIGINT NOT NULL, PRIMARY KEY(user_id,day_key,mission_key))""")
-            for cls,(key,name,atk,defn,hp,stock) in TAVERN_MYTHIC_WEAPONS.items():
-                conn.execute("""INSERT INTO rpg_items
-                    (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,
-                     tradeable,created_at,equip_slot,allowed_classes,min_level)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,
-                      description=excluded.description,atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,
-                      max_global_copies=excluded.max_global_copies,tradeable=excluded.tradeable,equip_slot=excluded.equip_slot,
-                      allowed_classes=excluded.allowed_classes,min_level=excluded.min_level""",
-                    (key,name,"mitico","arma",f"Arma mítica de Taberna reservada para {cls}. Solo existen {stock} por mundo.",
-                     atk,defn,hp,stock,0,now,"arma",cls,1))
-            conn.commit(); conn.close()
-        except Exception:
-            conn.rollback(); conn.close(); raise
+_tavern_db_ready = False
+_tavern_db_init_lock = threading.Lock()
 
+def _ensure_tavern_db():
+    """Inicializa la Taberna una sola vez por proceso; evita DDL/UPSERT en cada callback."""
+    global _tavern_db_ready
+    if _tavern_db_ready:
+        return
+    with _tavern_db_init_lock:
+        if _tavern_db_ready:
+            return
+        now=int(time.time())
+        with db_lock:
+            conn=get_db()
+            try:
+                conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_stats (
+                    user_id BIGINT PRIMARY KEY, games BIGINT NOT NULL DEFAULT 0,
+                    wins BIGINT NOT NULL DEFAULT 0, losses BIGINT NOT NULL DEFAULT 0,
+                    net_kw BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
+                    updated_at BIGINT NOT NULL DEFAULT 0)""")
+                conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_effects (
+                    user_id BIGINT PRIMARY KEY, drink_key TEXT NOT NULL, effect_type TEXT NOT NULL,
+                    magnitude BIGINT NOT NULL DEFAULT 0, games_left BIGINT NOT NULL DEFAULT 0,
+                    updated_at BIGINT NOT NULL DEFAULT 0)""")
+                conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_daily (
+                    user_id BIGINT NOT NULL, day_key TEXT NOT NULL,
+                    games BIGINT NOT NULL DEFAULT 0, wins BIGINT NOT NULL DEFAULT 0,
+                    drinks BIGINT NOT NULL DEFAULT 0, best_streak BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY(user_id,day_key))""")
+                conn.execute("""CREATE TABLE IF NOT EXISTS rpg_tavern_claims (
+                    user_id BIGINT NOT NULL, day_key TEXT NOT NULL, mission_key TEXT NOT NULL,
+                    claimed_at BIGINT NOT NULL, PRIMARY KEY(user_id,day_key,mission_key))""")
+                for cls,(key,name,atk,defn,hp,stock) in TAVERN_MYTHIC_WEAPONS.items():
+                    conn.execute("""INSERT INTO rpg_items
+                        (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,
+                         tradeable,created_at,equip_slot,allowed_classes,min_level)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,
+                          description=excluded.description,atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,
+                          max_global_copies=excluded.max_global_copies,tradeable=excluded.tradeable,equip_slot=excluded.equip_slot,
+                          allowed_classes=excluded.allowed_classes,min_level=excluded.min_level""",
+                        (key,name,"mitico","arma",f"Arma mítica de Taberna reservada para {cls}. Solo existen {stock} por mundo.",
+                         atk,defn,hp,stock,0,now,"arma",cls,1))
+                conn.commit(); conn.close()
+            except Exception:
+                conn.rollback(); conn.close(); raise
+        _tavern_db_ready = True
 
 def _tavern_key(user_id): return int(user_id)
 
@@ -9253,10 +9262,11 @@ def _tavern_player_label(user_id):
         return f"Jugador {int(user_id)}"
 
 
-def _tavern_tag_text(user_id, text):
-    """Marca todos los mensajes de Taberna para que en grupos se sepa de quién son."""
+def _tavern_tag_text(user_id, text, player_name=None):
+    """Marca mensajes de Taberna; usa el nombre del update para evitar una consulta DB extra."""
     text=str(text or "")
-    tag=f"👤 Jugador: {_tavern_player_label(user_id)}"
+    name=str(player_name or "").strip() or _tavern_player_label(user_id)
+    tag=f"👤 Jugador: {name}"
     if text.startswith(tag):
         return text
     return f"{tag}\n\n{text}"
@@ -9593,7 +9603,8 @@ def handle_rpg_callback(query):
     if data.startswith("tavern:"):
         try:
             txt,kb=tavern_callback(uid,chat_id,data)
-            send_message(chat_id,_tavern_tag_text(uid,txt),reply_markup=kb)
+            player_name=" ".join(x for x in (str(user.get("first_name") or "").strip(), str(user.get("last_name") or "").strip()) if x)
+            send_message(chat_id,_tavern_tag_text(uid,txt,player_name),reply_markup=kb)
         except Exception:
             logger.exception("Error en Taberna RPG")
             send_message(chat_id,"🍺 El tabernero tiró una jarra. Intenta abrir /taberna otra vez.")
@@ -10402,7 +10413,9 @@ def process_command(
     if command in ("/taberna", "/tavern"):
         ensure_player(message.get("from",{}))
         _tavern_pop(user_id)
-        send_message(chat_id,_tavern_tag_text(user_id,tavern_home_text(user_id)),reply_markup=tavern_home_keyboard())
+        sender=message.get("from") or {}
+        player_name=" ".join(x for x in (str(sender.get("first_name") or "").strip(), str(sender.get("last_name") or "").strip()) if x)
+        send_message(chat_id,_tavern_tag_text(user_id,tavern_home_text(user_id),player_name),reply_markup=tavern_home_keyboard())
         return True
 
     if command == "/testimagenia":

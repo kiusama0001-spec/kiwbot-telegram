@@ -9042,16 +9042,20 @@ def handle_rpg_callback(query):
         ok,msg2=_drawg_claim(chat_id,user,msg.get("message_thread_id"))
         if not ok:
             telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True}); return True
-        topic=int(msg.get("message_thread_id") or 0); url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}&topic={topic}"
-        dm=send_private_message(int(uid),"🎨 Tu turno. Elige una palabra. Puedes cambiarla todas las veces que quieras.",reply_markup={"inline_keyboard":[[{"text":"🎨 Abrir lienzo","web_app":{"url":url}}]]})
-        if not dm:
+        topic=int(msg.get("message_thread_id") or 0)
+        url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}&topic={topic}"
+        # LoginUrl autentica al usuario que abre el lienzo sin mandarlo al privado del bot.
+        keyboard={"inline_keyboard":[[{"text":"🎨 ABRIR MI LIENZO","login_url":{"url":url}}]]}
+        edited=telegram("editMessageReplyMarkup",{"chat_id":chat_id,"message_id":msg.get("message_id"),"reply_markup":keyboard})
+        old_topic=get_current_message_thread_id(); set_current_message_thread_id(topic or None)
+        try:
+            send_message(chat_id,f"🎨 {user.get('first_name') or 'El artista'} tomó el turno.\nPulsa «ABRIR MI LIENZO» en el mensaje de la ronda; ya no necesitas ir al privado de KiwBot.")
+        finally: set_current_message_thread_id(old_topic)
+        if not edited or not edited.get('ok'):
+            # Si Telegram aún no tiene el dominio vinculado para LoginUrl, liberamos el turno en vez de dejarlo atrapado.
             with db_lock:
                 c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET status='idle',artist_id=0,artist_name='',updated_at=? WHERE scope_key=?",(int(time.time()),_drawg_scope(chat_id,topic))); c.commit(); c.close()
-            botname=str(get_bot_identity().get('username') or '').strip(); link=f"https://t.me/{botname}" if botname else PUBLIC_BASE_URL
-            send_message(chat_id,"No puedo enviarte el lienzo por privado todavía. Abre primero el chat de KiwBot y vuelve a tomar el turno.",reply_markup={"inline_keyboard":[[{"text":"Abrir KiwBot","url":link}]]}); return True
-        old_topic=get_current_message_thread_id(); set_current_message_thread_id(topic or None)
-        try: send_message(chat_id,f"🎨 {user.get('first_name') or 'El artista'} tomó el turno. Está eligiendo palabra.")
-        finally: set_current_message_thread_id(old_topic)
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"Telegram rechazó la apertura directa. Vincula el dominio del bot y vuelve a intentar.","show_alert":True})
         return True
     if data.startswith("qm:"):
         try:
@@ -9858,19 +9862,40 @@ def _drawg_choices(exclude=None):
     return random.SystemRandom().sample(pool,3)
 
 def _drawg_render_png(strokes):
-    """Renderiza el lienzo compartido a PNG para mostrarlo dentro del grupo."""
-    from PIL import Image, ImageDraw
-    import io
-    im=Image.new('RGB',(900,650),'white'); d=ImageDraw.Draw(im)
+    """Renderiza el lienzo a PNG usando solo stdlib (sin depender de Pillow en Render)."""
+    import struct, zlib
+    W,H=900,650
+    pix=bytearray([255])*(W*H*3)
+    def rgb(hexv):
+        try:
+            h=str(hexv or '#111111').lstrip('#')
+            if len(h)!=6: raise ValueError
+            return tuple(int(h[i:i+2],16) for i in (0,2,4))
+        except Exception:
+            return (17,17,17)
+    def dot(x,y,r,col):
+        x=int(round(x)); y=int(round(y)); r=max(1,int(r)); rr=r*r
+        x0=max(0,x-r); x1=min(W-1,x+r); y0=max(0,y-r); y1=min(H-1,y+r)
+        for yy in range(y0,y1+1):
+            dy=(yy-y)*(yy-y)
+            for xx in range(x0,x1+1):
+                if (xx-x)*(xx-x)+dy<=rr:
+                    i=(yy*W+xx)*3; pix[i:i+3]=bytes(col)
     for q in (strokes or []):
         try:
-            a=float(q.get('a',0)); b=float(q.get('b',0)); x=float(q.get('d',0)); y=float(q.get('e',0))
-            color=str(q.get('c') or '#111111'); width=max(2,min(36,int(float(q.get('w',7)))))
-            if not re.fullmatch(r'#[0-9a-fA-F]{6}',color): color='#111111'
-            d.line((a,b,x,y),fill=color,width=width)
+            x0=float(q.get('a',0)); y0=float(q.get('b',0)); x1=float(q.get('d',0)); y1=float(q.get('e',0))
+            col=rgb(q.get('c')); radius=max(1,min(18,int(float(q.get('w',7))/2)))
+            dx=x1-x0; dy=y1-y0; steps=max(1,int(max(abs(dx),abs(dy))))
+            for n in range(steps+1):
+                t=n/steps; dot(x0+dx*t,y0+dy*t,radius,col)
         except Exception:
             continue
-    out=io.BytesIO(); im.save(out,format='PNG',optimize=True); return out.getvalue()
+    raw=bytearray()
+    stride=W*3
+    for y in range(H): raw.append(0); raw.extend(pix[y*stride:(y+1)*stride])
+    def chunk(tag,data):
+        return struct.pack('>I',len(data))+tag+data+struct.pack('>I',zlib.crc32(tag+data)&0xffffffff)
+    return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(bytes(raw),6))+chunk(b'IEND',b'')
 
 def _drawg_publish_preview(chat_id, topic=None, force=False):
     """Publica/actualiza el lienzo SOLO en el chat/topic dueño de la ronda."""
@@ -12575,16 +12600,53 @@ def rpg_draw_submit():
     except Exception: logger.exception('No pude publicar el dibujo para adivinar')
     return jsonify({'ok':True,'message':'🎨 Dibujo publicado. Ahora el grupo debe adivinar la palabra.'})
 
+def _drawg_validate_login_query(args, max_age=900):
+    """Valida Telegram LoginUrl/Login Widget sin depender del chat privado del bot."""
+    try:
+        data={k:str(args.get(k,'')) for k in ('id','first_name','last_name','username','photo_url','auth_date') if args.get(k) is not None}
+        got=str(args.get('hash') or '')
+        if not got or not data.get('id') or not data.get('auth_date'):
+            return None
+        if abs(int(time.time())-int(data['auth_date']))>int(max_age):
+            return None
+        check='\\n'.join(f'{k}={data[k]}' for k in sorted(data))
+        secret=hashlib.sha256(BOT_TOKEN.encode()).digest()
+        want=hmac.new(secret,check.encode(),hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(want,got):
+            return None
+        return {'id':int(data['id']),'first_name':data.get('first_name',''),'username':data.get('username','')}
+    except Exception:
+        return None
+
+def _drawg_access_token(uid,chat_id,topic,ttl=1800):
+    exp=int(time.time())+int(ttl)
+    body=f'{int(uid)}:{int(chat_id)}:{int(topic or 0)}:{exp}'
+    sig=hmac.new(BOT_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
+    return f'{body}:{sig}'
+
+def _drawg_access_uid(token,chat_id,topic):
+    try:
+        uid_s,chat_s,topic_s,exp_s,sig=str(token or '').split(':',4)
+        body=f'{uid_s}:{chat_s}:{topic_s}:{exp_s}'
+        want=hmac.new(BOT_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(want,sig) or int(exp_s)<int(time.time()): return 0
+        if int(chat_s)!=int(chat_id) or int(topic_s)!=int(topic or 0): return 0
+        return int(uid_s)
+    except Exception: return 0
+
 @app.route('/rpg/draw-global')
 def rpg_draw_global_page():
+    qchat=int(request.args.get('chat') or 0); qtopic=int(request.args.get('topic') or 0)
+    login_user=_drawg_validate_login_query(request.args)
+    access=_drawg_access_token(login_user['id'],qchat,qtopic) if login_user and qchat else ''
     html="""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><title>Dibuja y Adivina</title><script src='https://telegram.org/js/telegram-web-app.js'></script><style>*{box-sizing:border-box}body{margin:0;background:#10120f;color:#eee;font-family:system-ui;overscroll-behavior:none}.wrap{max-width:950px;margin:auto;padding:10px}.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.choices,.tools{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.choices button,.tools button,.change{border:1px solid #5f674f;background:#252a20;color:#eee;border-radius:10px;padding:10px;font-weight:700}.change{background:#5d451b}.sw{width:31px;height:31px;border-radius:50%;border:2px solid #ddd;padding:0}.canvas{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 8px 30px #0008}canvas{display:block;width:100%;height:auto;touch-action:none}.status{padding:8px 0;color:#e7cf7a;font-weight:700}.hidden{display:none}input[type=range]{width:120px}</style></head><body><div class='wrap'><div class='bar'><b>🎨 Dibuja y Adivina</b><span id='status' class='status'>Cargando…</span></div><div id='choices' class='choices'></div><div id='tools' class='tools hidden'></div><div class='canvas'><canvas id='cv' width='900' height='650'></canvas></div></div><script>
-const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),topic=Number(qs.get('topic')||0),init=tg?.initData||'',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,chat_id:chat,topic_id:topic,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%10===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
-    return Response(html,mimetype='text/html')
+const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),topic=Number(qs.get('topic')||0),init=tg?.initData||'',access='__DRAW_ACCESS__',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,access_token:access,chat_id:chat,topic_id:topic,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%10===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
+    return Response(html.replace('__DRAW_ACCESS__',access),mimetype='text/html')
 
 @app.route('/rpg/api/draw-global',methods=['POST'])
 def rpg_draw_global_api():
     b=request.get_json(silent=True) or {}; chat_id=int(b.get('chat_id') or 0); topic=int(b.get('topic_id') or 0); scope=_drawg_scope(chat_id,topic); action=str(b.get('action') or 'state'); now=int(time.time())
-    auth=validate_telegram_init_data(b.get('init_data','')) if b.get('init_data') else None; uid=int((auth or {}).get('user',{}).get('id') or 0)
+    auth=validate_telegram_init_data(b.get('init_data','')) if b.get('init_data') else None; uid=int((auth or {}).get('user',{}).get('id') or 0); uid=uid or _drawg_access_uid(b.get('access_token',''),chat_id,topic)
     if not chat_id: return jsonify(ok=False,message='Chat inválido'),400
     with db_lock:
         c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global_v2 WHERE scope_key=? FOR UPDATE',(scope,)).fetchone()

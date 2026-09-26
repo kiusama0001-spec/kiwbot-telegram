@@ -4354,79 +4354,117 @@ def grant_rpg_exp(character_id, amount):
             conn.rollback(); conn.close(); raise
 
 
-HIDDEN_BLADE_ABILITY = {
-    "key":"hidden_blade", "emoji":"🗡️", "name":"Hidden Blade",
-    "power":1.180, "pen":0.35, "high_roll_bonus":0.12,
-    "special":True, "cooldown":3
+RPG_TECHNIQUE_CATALOG = {
+    "hidden_blade": {"key":"hidden_blade","emoji":"🗡️","name":"Hidden Blade","power":1.180,"pen":0.35,"high_roll_bonus":0.12,"special":True,"cooldown":3,"rarity":"raro","price":4200},
+    "golpe_impulso": {"key":"golpe_impulso","emoji":"💥","name":"Golpe de Impulso","power":1.020,"pen":0.08,"cooldown":0,"rarity":"comun","price":700},
+    "corte_lunar": {"key":"corte_lunar","emoji":"🌙","name":"Corte Lunar","power":1.100,"pen":0.18,"special":True,"cooldown":2,"rarity":"poco_comun","price":1500},
+    "ruptura_carmesi": {"key":"ruptura_carmesi","emoji":"🩸","name":"Ruptura Carmesí","power":1.220,"pen":0.28,"special":True,"cooldown":3,"rarity":"raro","price":3600},
+    "impacto_vacio": {"key":"impacto_vacio","emoji":"🌌","name":"Impacto del Vacío","power":1.360,"pen":0.38,"special":True,"cooldown":4,"rarity":"ultra_raro","price":7600},
+    "juicio_dragon": {"key":"juicio_dragon","emoji":"🐲","name":"Juicio del Dragón","power":1.520,"pen":0.45,"ultimate":True,"cooldown":5,"rarity":"legendario","price":14500},
+    "fin_del_reino": {"key":"fin_del_reino","emoji":"👑","name":"Fin del Reino","power":1.680,"pen":0.55,"ultimate":True,"cooldown":6,"rarity":"mitico","price":24000},
 }
+HIDDEN_BLADE_ABILITY = RPG_TECHNIQUE_CATALOG["hidden_blade"]
 
 def _ensure_special_techniques_table():
     with db_lock:
         conn=get_db()
         conn.execute("""CREATE TABLE IF NOT EXISTS rpg_special_techniques(
-            user_id BIGINT NOT NULL,
-            technique_key TEXT NOT NULL,
-            unlocked_at BIGINT NOT NULL,
-            source TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY(user_id,technique_key)
-        )""")
+            user_id BIGINT NOT NULL, technique_key TEXT NOT NULL, unlocked_at BIGINT NOT NULL, source TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(user_id,technique_key))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_equipped_techniques(
+            user_id BIGINT NOT NULL, slot BIGINT NOT NULL, technique_key TEXT NOT NULL, updated_at BIGINT NOT NULL,
+            PRIMARY KEY(user_id,slot))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_pve_technique_cooldowns(
+            chat_id BIGINT NOT NULL,user_id BIGINT NOT NULL,technique_key TEXT NOT NULL,remaining BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY(chat_id,user_id,technique_key))""")
         conn.commit(); conn.close()
 
 def has_special_technique(user_id,key):
     _ensure_special_techniques_table()
     with db_lock:
-        conn=get_db(); row=conn.execute(
-            "SELECT 1 FROM rpg_special_techniques WHERE user_id=? AND technique_key=?",
-            (int(user_id),str(key))).fetchone(); conn.close()
+        conn=get_db(); row=conn.execute("SELECT 1 FROM rpg_special_techniques WHERE user_id=? AND technique_key=?",(int(user_id),str(key))).fetchone(); conn.close()
     return bool(row)
 
 def unlock_special_technique(user_id,key,source="mission"):
+    if str(key) not in RPG_TECHNIQUE_CATALOG: return False
     _ensure_special_techniques_table()
     with db_lock:
-        conn=get_db()
-        row=conn.execute("""INSERT INTO rpg_special_techniques(user_id,technique_key,unlocked_at,source)
-                            VALUES(?,?,?,?) ON CONFLICT(user_id,technique_key) DO NOTHING
-                            RETURNING technique_key""",
-                         (int(user_id),str(key),int(time.time()),str(source))).fetchone()
-        conn.commit(); conn.close()
+        conn=get_db(); row=conn.execute("""INSERT INTO rpg_special_techniques(user_id,technique_key,unlocked_at,source) VALUES(?,?,?,?) ON CONFLICT(user_id,technique_key) DO NOTHING RETURNING technique_key""",(int(user_id),str(key),int(time.time()),str(source))).fetchone(); conn.commit(); conn.close()
     return bool(row)
 
-def _rpg_get_ability_for_user(user_id,class_name,key):
-    if str(key)=="hidden_blade":
-        if has_special_technique(user_id,"hidden_blade"):
-            return dict(HIDDEN_BLADE_ABILITY)
-        return None
-    return _rpg_get_ability(class_name,key)
+def _all_class_abilities(class_name):
+    return [dict(x) for x in RPG_ABILITIES.get(str(class_name or ''),RPG_ABILITIES['Guerrero'])]
 
-def _append_hidden_blade_button(kb,user_id,prefix,special_cd=0,context_id=None):
-    if not user_id or not has_special_technique(user_id,"hidden_blade"):
-        return kb
-    rows=list((kb or {}).get("inline_keyboard") or [])
-    text="🗡️ Hidden Blade" if int(special_cd)<=0 else f"⏳ Hidden Blade ({special_cd})"
-    if prefix=="rpg_attack": cb="rpg_attack:hidden_blade"
-    else: cb=f"{prefix}:{int(context_id)}:hidden_blade"
-    # Antes de inventario/defensa cuando sea posible.
-    pos=max(0,len(rows)-1)
-    rows.insert(pos,[{"text":text,"callback_data":cb}])
-    return {"inline_keyboard":rows}
+def _rpg_get_ability_for_user(user_id,class_name,key):
+    for a in _all_class_abilities(class_name):
+        if a['key']==str(key): return a
+    a=RPG_TECHNIQUE_CATALOG.get(str(key))
+    return dict(a) if a and has_special_technique(user_id,key) else None
+
+def _default_technique_keys(class_name):
+    return [a['key'] for a in _all_class_abilities(class_name)]
+
+def equipped_pve_abilities(user_id,class_name):
+    _ensure_special_techniques_table(); defaults=_default_technique_keys(class_name)
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT slot,technique_key FROM rpg_equipped_techniques WHERE user_id=? ORDER BY slot",(int(user_id),)).fetchall(); c.close()
+    chosen={int(r['slot']):str(r['technique_key']) for r in rows}
+    out=[]
+    for slot in range(1,5):
+        key=chosen.get(slot)
+        if not key and slot<=3: key=defaults[slot-1]
+        if not key and slot==4 and has_special_technique(user_id,'hidden_blade'): key='hidden_blade'
+        ab=_rpg_get_ability_for_user(user_id,class_name,key) if key else None
+        if ab: out.append((slot,ab))
+    return out
+
+def _pve_cooldowns(user_id,chat_id):
+    _ensure_special_techniques_table()
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT technique_key,remaining FROM rpg_pve_technique_cooldowns WHERE chat_id=? AND user_id=? AND remaining>0",(int(chat_id),int(user_id))).fetchall(); c.close()
+    return {str(r['technique_key']):int(r['remaining']) for r in rows}
+
+def _ability_power_text(a):
+    return f"DMG ×{float(a.get('power',1.0)):.2f}"
+
+def techniques_text_keyboard(user_id):
+    char=get_active_character(user_id)
+    if not char: return 'Necesitas un personaje activo.',None
+    equipped=equipped_pve_abilities(user_id,char['class_name']); eq={a['key']:slot for slot,a in equipped}
+    owned=_all_class_abilities(char['class_name'])
+    for key,a in RPG_TECHNIQUE_CATALOG.items():
+        if has_special_technique(user_id,key): owned.append(dict(a))
+    lines=['⚔️ TÉCNICAS PvE','', 'Tienes 4 huecos. Puedes reemplazar cualquier movimiento sin perderlo.','']
+    kb=[]
+    for a in owned:
+        slot=eq.get(a['key']); mark=f' · SLOT {slot}' if slot else ''
+        rare=RPG_RARITY_ICON.get(a.get('rarity','comun'),'⚪')
+        lines.append(f"{rare} {a['emoji']} {a['name']} · {_ability_power_text(a)}{mark}")
+        kb.append([{'text':f"⚙️ {a['name']}",'callback_data':f"tech_pick:{a['key']}"}])
+    return '\n'.join(lines),{'inline_keyboard':kb}
+
+def equip_technique(user_id,class_name,key,slot):
+    slot=int(slot)
+    if slot not in (1,2,3,4): return False,'Hueco inválido.'
+    if not _rpg_get_ability_for_user(user_id,class_name,key): return False,'No tienes desbloqueada esa técnica.'
+    _ensure_special_techniques_table()
+    with db_lock:
+        c=get_db(); c.execute("INSERT INTO rpg_equipped_techniques(user_id,slot,technique_key,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET technique_key=EXCLUDED.technique_key,updated_at=EXCLUDED.updated_at",(int(user_id),slot,str(key),int(time.time()))); c.commit(); c.close()
+    return True,f'⚔️ Técnica equipada en el hueco {slot}.'
 
 def rpg_abilities_for(class_name):
     return RPG_ABILITIES.get(str(class_name or ""), RPG_ABILITIES["Guerrero"])
 
 
-def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None):
-    a = rpg_abilities_for(class_name)
-    special_text = f"{a[1]['emoji']} {a[1]['name']}" if int(special_cd) <= 0 else f"⏳ {a[1]['name']} ({special_cd})"
-    ult_text = f"{a[2]['emoji']} {a[2]['name']}" if int(ultimate_cd) <= 0 else f"⏳ {a[2]['name']} ({ultimate_cd})"
-    kb={"inline_keyboard":[
-        [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"rpg_attack:{a[0]['key']}"},
-         {"text":special_text,"callback_data":f"rpg_attack:{a[1]['key']}"}],
-        [{"text":ult_text,"callback_data":f"rpg_attack:{a[2]['key']}"}],
-        [{"text":"🛡️ Defender","callback_data":"rpg_defend"},
-         {"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},
-         {"text":"🏃 Huir","callback_data":"rpg_flee"}]
-    ]}
-    return _append_hidden_blade_button(kb,user_id,"rpg_attack",special_cd)
+def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, chat_id=None):
+    abilities=equipped_pve_abilities(user_id,class_name) if user_id else [(i+1,a) for i,a in enumerate(rpg_abilities_for(class_name))]
+    cds=_pve_cooldowns(user_id,chat_id) if user_id and chat_id is not None else {}
+    rows=[]
+    for slot,a in abilities:
+        cd=int(cds.get(a['key'],0)); label=(f"⏳ {a['name']} ({cd})" if cd>0 else f"{a['emoji']} {a['name']} · {_ability_power_text(a)}")
+        rows.append([{'text':label,'callback_data':f"rpg_attack:{a['key']}"}])
+    rows.append([{'text':'🛡️ Defender','callback_data':'rpg_defend'},{'text':'🎒 Inventario','callback_data':'rpg_show_inventory'},{'text':'🏃 Huir','callback_data':'rpg_flee'}])
+    return {'inline_keyboard':rows}
 
 
 def _rpg_get_ability(class_name, key):
@@ -4621,14 +4659,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
         ability=_rpg_get_ability_for_user(user_id,char["class_name"],ability_key)
         if not ability:
             conn.rollback(); conn.close(); return True
-        if ability.get("special") and int(battle.get("special_cd") or 0)>0:
-            cd=int(battle["special_cd"]); conn.rollback(); conn.close()
-            send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
-            return True
-        if ability.get("ultimate") and int(battle.get("ultimate_cd") or 0)>0:
-            cd=int(battle["ultimate_cd"]); conn.rollback(); conn.close()
-            send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
-            return True
+        cdrow=conn.execute("SELECT remaining FROM rpg_pve_technique_cooldowns WHERE chat_id=? AND user_id=? AND technique_key=?",(int(chat_id),int(user_id),str(ability_key))).fetchone()
+        cd=int(cdrow['remaining']) if cdrow else 0
+        if cd>0:
+            conn.rollback(); conn.close(); send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}."); return True
         conn.rollback(); conn.close()
 
     # Telegram genera el valor del d6. El botón solo inicia la tirada.
@@ -4670,10 +4704,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
-            if ability.get("special"):
-                new_special_cd=int(ability.get("cooldown",2))
-            if ability.get("ultimate"):
-                new_cd=int(ability.get("cooldown",4))
+            conn.execute("UPDATE rpg_pve_technique_cooldowns SET remaining=GREATEST(0,remaining-1) WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+            own_cd=int(ability.get('cooldown',0) or 0)
+            if own_cd>0:
+                conn.execute("INSERT INTO rpg_pve_technique_cooldowns(chat_id,user_id,technique_key,remaining) VALUES(?,?,?,?) ON CONFLICT(chat_id,user_id,technique_key) DO UPDATE SET remaining=EXCLUDED.remaining",(int(chat_id),int(user_id),str(ability_key),own_cd))
 
             if enemy_hp<=0:
                 base=next((x for x in RPG_ENEMIES if x["key"]==battle["enemy_key"]),RPG_ENEMIES[0])
@@ -4689,6 +4723,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     reward_exp=max(1,int(round(reward_exp*1.30)))
                     reward_kw=max(1,int(round(reward_kw*1.20)))
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+                conn.execute("DELETE FROM rpg_pve_technique_cooldowns WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
                 mission_event(user_id,"pve_damage",damage)
@@ -4735,7 +4770,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                         with db_lock:
                             dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
                         e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
-                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
+                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id,chat_id))
                     else:
                         with db_lock:
                             dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
@@ -4793,7 +4828,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
                     f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
-                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id))
+                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id,chat_id))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -4812,10 +4847,12 @@ def rpg_defend_action(chat_id,user_id):
             hp=max(0,int(char["hp"])-damage)
             cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             special_cd=max(0,int(battle.get("special_cd") or 0)-1)
+            conn.execute("UPDATE rpg_pve_technique_cooldowns SET remaining=GREATEST(0,remaining-1) WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
             if hp<=0:
                 cdict=dict(char); cdict["hp"]=hp
                 lost,_=_rpg_apply_defeat(conn,cdict)
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
+                conn.execute("DELETE FROM rpg_pve_technique_cooldowns WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 3 minutos.")
             else:
@@ -4823,7 +4860,7 @@ def rpg_defend_action(chat_id,user_id):
                 conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,int(time.time()),int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 send_message(chat_id,f"🛡️ DEFENSA\n\nEl enemigo tira 🎲 {enemy_roll}.\nRecibes {damage} de daño (50% reducido).\n❤️ {char['name']}: {hp}/{eff['max_hp']}",
-                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id))
+                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id,chat_id))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -4845,7 +4882,7 @@ def rpg_inventory_text(user_id):
         conn.close()
     if not rows:
         return "🎒 INVENTARIO\n\nTodavía está vacío."
-    rarity={"comun":"⚪","poco_comun":"🟢","raro":"🔵","ultra_raro":"🟣","legendario":"🟡","reliquia":"👑"}
+    rarity={"comun":"⚪","poco_comun":"🟢","raro":"🔵","ultra_raro":"🟣","legendario":"🟡","mitico":"🔴","reliquia":"👑"}
     lines=["🎒 INVENTARIO",""]
     for r in rows:
         serial=f" #{r['serial_number']}" if r.get('serial_number') else ""
@@ -5230,7 +5267,7 @@ def equipment_text(user_id):
 
 RPG_RESET_PASSWORD = os.getenv("KIWRPG_RESET_PASSWORD", "").strip()
 _reset_sessions = {}
-RPG_RARITY_ICON = {"comun":"⚪","poco_comun":"🟢","raro":"🔵","ultra_raro":"🟣","legendario":"🟡","reliquia":"👑"}
+RPG_RARITY_ICON = {"comun":"⚪","poco_comun":"🟢","raro":"🔵","ultra_raro":"🟣","legendario":"🟡","mitico":"🔴","reliquia":"👑"}
 
 
 def current_rpg_world():
@@ -6227,6 +6264,8 @@ RPG_SHOP = {
     "capucha_viajero": {"price": 600, "label": "Capucha del Viajero", "desc": "Casco básico."},
     "guantes_viajero": {"price": 500, "label": "Guantes del Viajero", "desc": "Guantes básicos."},
     "botas_sendero": {"price": 500, "label": "Botas del Sendero", "desc": "Botas básicas."},
+    "golpe_impulso": {"price": 700, "label": "Técnica: Golpe de Impulso", "desc": "Desbloquea una técnica PvE común · DMG ×1.02."},
+    "corte_lunar": {"price": 1500, "label": "Técnica: Corte Lunar", "desc": "Desbloquea una técnica PvE poco común · DMG ×1.10."},
 }
 
 def rpg_shop_keyboard(user_id):
@@ -6236,7 +6275,7 @@ def rpg_shop_keyboard(user_id):
         conn=get_db(); items=conn.execute("SELECT item_key,item_type,equip_slot FROM rpg_items WHERE item_key = ANY(?)",(keys,)).fetchall() if keys else []; conn.close()
     by={str(x['item_key']):dict(x) for x in items}
     for key,cfg in RPG_SHOP.items():
-        icon=_inventory_item_icon(by.get(key,{})) if key in by else "🎒"
+        icon=(RPG_TECHNIQUE_CATALOG.get(key,{}).get("emoji") or (_inventory_item_icon(by.get(key,{})) if key in by else "🎒"))
         rows.append([{"text":f"{icon} {cfg['label']} · {cfg['price']:,} KW","callback_data":f"rpg_shop_item:{key}"}])
     rows.append([{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}])
     return balance,{"inline_keyboard":rows}
@@ -6244,6 +6283,12 @@ def rpg_shop_keyboard(user_id):
 def rpg_shop_item_text(user_id,key):
     cfg=RPG_SHOP.get(key)
     if not cfg: return None,None
+    if key in RPG_TECHNIQUE_CATALOG:
+        a=RPG_TECHNIQUE_CATALOG[key]; bal=get_kiwons(user_id); rare=RPG_RARITY_ICON.get(a.get('rarity'),'⚪')
+        owned=has_special_technique(user_id,key)
+        text=f"🏪 TIENDA RPG\n\n{rare} {a['emoji']} {a['name']}\n{cfg['desc']}\n\n⚔️ Potencia: {_ability_power_text(a)}\n⏳ Cooldown: {int(a.get('cooldown',0))} turnos\n\n💰 Precio: {cfg['price']:,} KW\n🪙 Tu saldo: {bal:,} KW"
+        kb=None if owned else {"inline_keyboard":[[{"text":f"🛒 Comprar · {cfg['price']:,} KW","callback_data":f"rpg_buy:{key}"}],[{"text":"◀️ Volver a la tienda","callback_data":"rpg_shop"}]]}
+        return (text+"\n\n✅ Ya la tienes desbloqueada." if owned else text),kb
     with db_lock:
         conn=get_db(); item=conn.execute("SELECT * FROM rpg_items WHERE item_key=?",(key,)).fetchone(); conn.close()
     if not item: return None,None
@@ -6264,8 +6309,14 @@ def buy_rpg_shop_item(user_id,key,chat_id=None):
     if not cfg: return False,"Ese objeto no está a la venta."
     if not char: return False,"Necesitas un personaje activo para comprar objetos RPG."
     price=int(cfg['price'])
+    if key in RPG_TECHNIQUE_CATALOG and has_special_technique(user_id,key): return False,"Ya tienes esa técnica desbloqueada."
     ok,balance,error=change_kiwons(user_id,-price,"rpg_shop_purchase",chat_id=chat_id,note=f"Compra {key}")
     if not ok: return False,f"🪙 No tienes suficientes Kiwons. Necesitas {price:,} KW."
+    if key in RPG_TECHNIQUE_CATALOG:
+        if unlock_special_technique(user_id,key,"tienda"):
+            return True,f"⚔️ Desbloqueaste {RPG_TECHNIQUE_CATALOG[key]['name']}.\n💸 -{price:,} KW\n🪙 Saldo: {balance:,} KW\nUsa /tecnicas para equiparla."
+        change_kiwons(user_id,price,"rpg_shop_refund",chat_id=chat_id,note=f"Reembolso {key}")
+        return False,"No pude desbloquear la técnica. La compra fue reembolsada."
     item=grant_rpg_item(user_id,int(char['id']),key,"tienda")
     if not item:
         change_kiwons(user_id,price,"rpg_shop_refund",chat_id=chat_id,note=f"Reembolso {key}")
@@ -7662,7 +7713,7 @@ def roll_dungeon_completion_loot(user_id, character_id, dungeon_id):
 
 RPG_MERCHANT_INTERVAL = 2 * 60 * 60
 RPG_MERCHANT_TTL = 20 * 60
-RPG_MERCHANT_RARITY_WEIGHTS = [("comun",38),("poco_comun",34),("raro",21),("ultra_raro",7)]
+RPG_MERCHANT_RARITY_WEIGHTS = [("comun",40),("poco_comun",32),("raro",19),("ultra_raro",7),("legendario",1.7),("mitico",0.3)]
 RPG_MERCHANT_PHRASES = [
     "¿Qué compran? ¿Qué venden?... perdón, vieja costumbre.",
     "No soy Xûr, pero también aparezco cuando me da la gana.",
@@ -7680,7 +7731,7 @@ def _merchant_private_url(merchant_id):
     return f"https://t.me/{username}?start=merchant_{int(merchant_id)}" if username else ""
 
 def _merchant_price(rarity,min_level=1):
-    base={"comun":550,"poco_comun":1200,"raro":2800,"ultra_raro":6000}.get(str(rarity),1200)
+    base={"comun":550,"poco_comun":1200,"raro":2800,"ultra_raro":6000,"legendario":14000,"mitico":24000}.get(str(rarity),1200)
     return int(base + max(0,int(min_level or 1)-1)*80)
 
 def _merchant_active(chat_id=None, now=None):
@@ -7708,7 +7759,7 @@ def merchant_private_text_keyboard(merchant_id, user_id=None):
         if int(o.get('def_bonus') or 0): stats.append(f"🛡️ +{int(o['def_bonus'])}")
         if int(o.get('hp_bonus') or 0): stats.append(f"❤️ +{int(o['hp_bonus'])}")
         compatible=True; reason=''
-        if char:
+        if char and str(d.get('item_type') or '')!='tecnica':
             compatible,reason=item_compatibility(d,char)
         lines += [f"{icon} {rare} {o['name']} — {int(o['price']):,} KW — {'❌ AGOTADO' if sold else '1/1'}",f"   🎭 {allowed} · 📈 Nv. {req}"+(f" · {' '.join(stats)}" if stats else '')]
         if char and not compatible: lines.append(f"   🔒 No compatible contigo: {reason}")
@@ -7727,7 +7778,7 @@ def merchant_confirm_text(user_id, offer_id):
     stats=f"⚔️ ATK +{int(o.get('atk_bonus') or 0)} · 🛡️ DEF +{int(o.get('def_bonus') or 0)} · ❤️ HP +{int(o.get('hp_bonus') or 0)}"
     text=f"🐪 MALKOR — CONFIRMAR COMPRA\n\n{icon} {rare} {o['name']}\n{o.get('description') or ''}\n\n🎭 Clases: {allowed}\n📈 Nivel requerido: {req}\n{stats}\n\n💰 Precio: {int(o['price']):,} KW\n🪙 Tu saldo: {get_kiwons(user_id):,} KW"
     if int(o['sold_by'] or 0)>0: return text+"\n\n❌ AGOTADO",None
-    if char:
+    if char and str(d.get('item_type') or '')!='tecnica':
         ok,reason=item_compatibility(d,char)
         if not ok: return text+f"\n\n🔒 No compatible contigo: {reason}",None
     return text,{"inline_keyboard":[[{"text":f"✅ Comprar · {int(o['price']):,} KW","callback_data":f"merchant_buy:{int(o['id'])}"},{"text":"❌ Cancelar","callback_data":f"merchant_back:{int(o['merchant_id'])}"}]]}
@@ -7740,9 +7791,11 @@ def spawn_merchant(chatrow, now=None, forced=False):
         if old and not forced:
             conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=?,updated_at=? WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
         if forced: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE chat_id=? AND status='active'",(chat_id,))
-        pool=conn.execute("SELECT item_key,name,rarity,equip_slot,min_level FROM rpg_items WHERE equip_slot IS NOT NULL AND equip_slot<>'' AND rarity IN ('comun','poco_comun','raro','ultra_raro')").fetchall()
+        for tk,a in RPG_TECHNIQUE_CATALOG.items():
+            conn.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level) VALUES(?,?,?,'tecnica',?,0,0,0,NULL,0,?,'','',1) ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,item_type='tecnica',description=EXCLUDED.description""",(tk,a['name'],a.get('rarity','comun'),f"Técnica PvE · {_ability_power_text(a)} · cooldown {int(a.get('cooldown',0))}",now))
+        pool=conn.execute("SELECT item_key,name,rarity,equip_slot,min_level,item_type FROM rpg_items WHERE ((equip_slot IS NOT NULL AND equip_slot<>'') OR item_type='tecnica') AND rarity IN ('comun','poco_comun','raro','ultra_raro','legendario','mitico')").fetchall()
         if len(pool)<6: conn.rollback(); conn.close(); return False
-        by={r:[] for r in ('comun','poco_comun','raro','ultra_raro')}
+        by={r:[] for r in ('comun','poco_comun','raro','ultra_raro','legendario','mitico')}
         for x in pool: by.get(x['rarity'],[]).append(dict(x))
         chosen=[]; used=set()
         for _ in range(6):
@@ -7772,7 +7825,7 @@ def merchant_buy(user_id, offer_id, chat_id=None):
     with db_lock:
         _c=get_db(); _check=_c.execute("SELECT i.* FROM rpg_merchant_offers o JOIN rpg_items i ON i.item_key=o.item_key WHERE o.id=?",(int(offer_id),)).fetchone(); _c.close()
     if not _check: return False,"Esa oferta ya no existe."
-    _ok,_reason=item_compatibility(dict(_check),char)
+    _ok,_reason=(True,'') if str(_check.get('item_type') or '')=='tecnica' else item_compatibility(dict(_check),char)
     if not _ok: return False,f"🔒 No puedes comprar esa pieza: {_reason}. Malkor no acepta devoluciones por mirar mal la etiqueta."
     with db_lock:
         conn=get_db()
@@ -7788,6 +7841,14 @@ def merchant_buy(user_id, offer_id, chat_id=None):
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_merchant_offers SET sold_by=0,sold_at=0 WHERE id=? AND sold_by=?",(int(offer_id),int(user_id))); conn.commit(); conn.close()
         return False,f"🪙 Te faltan Kiwons. Malkor te mira como a un NPC sin misión. Precio: {price:,} KW."
+    if str(reserved['item_key']) in RPG_TECHNIQUE_CATALOG:
+        if has_special_technique(user_id,reserved['item_key']):
+            change_kiwons(user_id,price,'merchant_refund',chat_id=chat_id,note='Reembolso técnica repetida')
+            with db_lock:
+                conn=get_db(); conn.execute("UPDATE rpg_merchant_offers SET sold_by=0,sold_at=0 WHERE id=? AND sold_by=?",(int(offer_id),int(user_id))); conn.commit(); conn.close()
+            return False,"Ya tienes esa técnica. Malkor no te cobrará dos veces por el mismo truco."
+        unlock_special_technique(user_id,reserved['item_key'],f"malkor:{reserved['merchant_id']}")
+        return True,f"✅ Técnica {reserved['name']} desbloqueada.\n🪙 -{price:,} KW\nUsa /tecnicas para equiparla."
     item=grant_rpg_item(user_id,int(char['id']),reserved['item_key'],f"malkor:{reserved['merchant_id']}")
     if not item:
         change_kiwons(user_id,price,'merchant_refund',chat_id=chat_id,note='Reembolso Malkor')
@@ -9017,7 +9078,7 @@ def handle_rpg_callback(query):
         except Exception: return True
         ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
         char=get_active_character(uid)
-        kb=rpg_battle_keyboard(char["class_name"],0,0,uid) if ok and char else None
+        kb=rpg_battle_keyboard(char["class_name"],0,0,uid,chat_id) if ok and char else None
         send_message(chat_id,msg2,reply_markup=kb)
         return True
     if data.startswith("rpg_help_revive:"):
@@ -9041,7 +9102,7 @@ def handle_rpg_callback(query):
             send_message(chat_id,msg2); return True
         char=get_active_character(uid)
         battle=get_rpg_battle(chat_id,uid)
-        kb=rpg_battle_keyboard(char["class_name"],0,0,uid) if char else None
+        kb=rpg_battle_keyboard(char["class_name"],0,0,uid,chat_id) if char else None
         asset_key=rpg_enemy_asset_key(battle["enemy_key"],battle.get("encounter_rarity","normal")) if battle else ""
         sent=send_rpg_image(chat_id,asset_key,msg2,reply_markup=kb) if asset_key else None
         if not sent: send_message(chat_id,msg2,reply_markup=kb)
@@ -9185,6 +9246,14 @@ def handle_rpg_callback(query):
         ok,msg2=pvp_surrender(int(data.split(":",1)[1]),uid)
         if not ok: send_message(chat_id,msg2)
         return True
+    if data.startswith("tech_pick:"):
+        key=data.split(":",1)[1]; char=get_active_character(uid)
+        if not char or not _rpg_get_ability_for_user(uid,char['class_name'],key): send_message(chat_id,"No tienes esa técnica."); return True
+        a=_rpg_get_ability_for_user(uid,char['class_name'],key); kb={"inline_keyboard":[[{"text":f"Hueco {i}","callback_data":f"tech_slot:{key}:{i}"} for i in (1,2)],[{"text":f"Hueco {i}","callback_data":f"tech_slot:{key}:{i}"} for i in (3,4)]]}
+        send_message(chat_id,f"⚙️ {a['emoji']} {a['name']} · {_ability_power_text(a)}\n\n¿En qué hueco quieres equiparla?",reply_markup=kb); return True
+    if data.startswith("tech_slot:"):
+        _,key,slot=data.split(":",2); char=get_active_character(uid); ok,msg2=equip_technique(uid,char['class_name'] if char else '',key,int(slot)); txt,kb=techniques_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+
     if data.startswith("rpg_attack:"):
         result=resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
         _delete_old_combat_card(chat_id,msg)
@@ -10059,7 +10128,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command in ("/comandos", "/ayudarpg"):
         uid=message.get("from",{}).get("id")
         txt=("🎮 COMANDOS KIWRPG\n\n"
-             "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo · /kiwons — Kiwons\n"
+             "🧙 /rpg · /kiwrpg — Abrir KiwRPG\n👤 /personaje · /pj — Personaje activo\n📋 /perfil — Perfil\n⚔️ /tecnicas — Equipar/reemplazar tus 4 movimientos PvE\n💍 /casar @usuario — Proponer matrimonio\n💞 /pareja — Ver tu pareja\n🎒 /inventariopareja — Ver inventario de ambos\n🤝 /compartiritem ID — Pasar un objeto a tu pareja\n🥀 /divorcio @usuario — Terminar el matrimonio\n💰 /saldo · /kiwons — Kiwons\n"
              "🎒 /inventario · /inv — Inventario\n🛡️ /equipo · /equipamiento — Equipo\n🔨 /forja · /forge · /forjador · /mejorar — Forja y mejoras +15\n🏪 /tienda · /shop — Tienda\n"
              "🐾 /mascota · /mascotas · /pets — Mascotas\n🎰 /gacha — Gacha\n🧱 /materiales · /mats — Materiales\n\n"
              "⚔️ COMBATE\n📜 /misiones · /tablon · /misionesrpg — 10 misiones simultáneas\n⚡ /eventorpg · /misionactual — Misión Relámpago activa\n👾 /encuentro · /combatir — PvE\n🏰 /mazmorra — Mazmorra activa\n"
@@ -10437,7 +10506,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if ok:
             char=get_active_character(user.get("id"))
             battle=get_rpg_battle(chat_id, user.get("id"))
-            kb=rpg_battle_keyboard(char["class_name"],0,0,user.get("id"))
+            kb=rpg_battle_keyboard(char["class_name"],0,0,user.get("id"),chat_id)
             asset_key=rpg_enemy_asset_key(
                 battle["enemy_key"],
                 battle.get("encounter_rarity","normal")
@@ -10664,6 +10733,9 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,"No pude abrir el creador ahora mismo. Revisa la configuración de la Mini App."); return True
         send_message(chat_id,"🧙 CREA TU PERSONAJE\n\nTu aventura en KiwRPG está a punto de comenzar.\n\nElige tu clase, revisa sus estadísticas y crea al personaje que te representará en este mundo.\n\n👇 Haz clic aquí para comenzar la creación de tu personaje.",reply_markup=kb)
         return True
+
+    if command in ("/tecnicas","/movimientos","/skills"):
+        user=message.get("from",{}); ensure_player(user); txt,kb=techniques_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
 
     if command == "/dbstatus":
         user = message.get("from", {})

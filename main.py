@@ -631,6 +631,11 @@ def init_db():
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1")
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_merchant_at BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_minigame_at BIGINT NOT NULL DEFAULT 0")
+        # Boss automático independiente. Commit previo evita acumular locks de init_db
+        # antes de pedir el lock de ALTER durante un deploy de Render.
+        conn.commit()
+        cur.execute("ALTER TABLE rpg_auto_chats ADD COLUMN IF NOT EXISTS next_boss_at BIGINT NOT NULL DEFAULT 0")
+        conn.commit()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_quick_missions (
                 id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT,
@@ -701,19 +706,6 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dungeons_chat_status ON rpg_dungeons(chat_id,status,expires_at)")
-
-        # Estas migraciones necesitan AccessExclusiveLock en PostgreSQL.  No las
-        # ejecutamos arrastrando todos los locks adquiridos durante init_db():
-        # durante un deploy el proceso anterior de Render puede seguir atendiendo
-        # consultas y eso puede formar un deadlock entre ambas instancias.
-        # Confirmar aquí deja esta migración en una transacción corta: puede
-        # esperar a que el proceso viejo libere rpg_dungeons, pero no mantiene
-        # locks de otras tablas mientras espera.
-        conn.commit()
-        cur.execute("ALTER TABLE rpg_dungeons ADD COLUMN IF NOT EXISTS boss_id BIGINT NOT NULL DEFAULT 0")
-        cur.execute("ALTER TABLE rpg_dungeons ADD COLUMN IF NOT EXISTS treasure_awarded BIGINT NOT NULL DEFAULT 0")
-        conn.commit()
-
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_dungeon_runs (
                 dungeon_id BIGINT NOT NULL, user_id BIGINT NOT NULL, room BIGINT NOT NULL DEFAULT 1,
@@ -787,8 +779,8 @@ def init_db():
                        VALUES('anillo_bodas','Anillo de Bodas','raro','boda','Un pequeño símbolo para una gran promesa. No concede poder en combate: guarda la intención de elegir a alguien para compartir el camino, las victorias y hasta las derrotas. Sirve para pedirle matrimonio a otro aventurero. Cuando dos caminos deciden avanzar juntos, el anillo guarda la fecha en que comenzó su historia.',0,0,0,NULL,'','',1,?)
                        ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description""",(int(time.time()),))
         cur.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,image_file_id,animation_file_id,tradeable,created_at,equip_slot,allowed_classes,min_level)
-                       VALUES('espada_gato','Espada del Gato Perdido','raro','arma','Forjada para quienes no dejaron atrás a ninguna pequeña criatura. En la empuñadura hay cinco huellas: una por cada gato que encontró el camino a casa.',3,1,5,NULL,'','',1,?,'arma','Guerrero,Pícaro,Paladín,The Cleaner',5)
-                       ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes=EXCLUDED.allowed_classes,min_level=EXCLUDED.min_level""",(int(time.time()),))
+                       VALUES('espada_gato','Espada del Gato Perdido','legendario','arma','Forjada para quienes completaron cinco desafíos de dibujo. En la empuñadura hay cinco huellas; cualquier clase puede blandirla.',24,4,40,NULL,'','',1,?,'arma','',1)
+                       ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes=EXCLUDED.allowed_classes,min_level=EXCLUDED.min_level""",(int(time.time()),))
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_hall_of_fame (
@@ -1087,24 +1079,6 @@ def init_db():
                   equip_slot=excluded.equip_slot,allowed_classes=excluded.allowed_classes,min_level=excluded.min_level
             """,(key,name,rarity,itype,desc,atk,defn,hp,now_seed,slot,'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',minlvl))
 
-        # KiwRPG — Reliquias supremas de Mazmorra Cooperativa. 0.2% del Tesoro del Boss.
-        # Son deliberadamente superiores al Arsenal Mítico de la Taberna y existe 1 copia mundial de cada una.
-        dungeon_relics = [
-            ('drel_excalibur','👑 Excalibur','reliquia','arma','La espada del rey. Reliquia suprema recuperada de una Mazmorra Cooperativa.',55,10,100,1,0,'arma','Guerrero',1),
-            ('drel_masamune','👑 Masamune','reliquia','arma','Una hoja legendaria de precisión imposible. Reliquia suprema de Mazmorra.',60,5,70,1,0,'arma','Pícaro',1),
-            ('drel_gungnir','👑 Gungnir','reliquia','arma','La lanza que nunca pierde su objetivo. Reliquia suprema de Mazmorra.',58,6,80,1,0,'arma','Arquero',1),
-            ('drel_mjolnir','👑 Mjölnir','reliquia','arma','El martillo del trueno. Poder brutal acompañado de una defensa excepcional.',52,14,120,1,0,'arma','Paladín',1),
-            ('drel_kusanagi','👑 Kusanagi','reliquia','arma','La espada de la tormenta. Una reliquia arcana de enorme poder.',59,6,75,1,0,'arma','Mago',1),
-            ('drel_durandal','👑 Durandal','reliquia','arma','Una espada indestructible reservada para quien sobreviva a lo imposible.',64,10,110,1,0,'arma','The Cleaner',1),
-        ]
-        for key,name,rarity,itype,desc,atk,defn,hp,limit,trade,slot,allowed,minlvl in dungeon_relics:
-            cur.execute("""INSERT INTO rpg_items
-                (item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(item_key) DO UPDATE SET name=excluded.name,rarity=excluded.rarity,item_type=excluded.item_type,description=excluded.description,
-                atk_bonus=excluded.atk_bonus,def_bonus=excluded.def_bonus,hp_bonus=excluded.hp_bonus,max_global_copies=excluded.max_global_copies,tradeable=excluded.tradeable,equip_slot=excluded.equip_slot,allowed_classes=excluded.allowed_classes,min_level=excluded.min_level
-            """,(key,name,rarity,itype,desc,atk,defn,hp,limit,trade,now_seed,slot,allowed,minlvl))
-
         forge_items = [
             ('hoja_ceniza_reforzada','Hoja de Ceniza Reforzada','raro','arma','Una hoja rehecha con hierro y colmillos de ceniza.',4,1,0,None,1,'arma','Guerrero,Pícaro,The Cleaner',5),
             ('coraza_guardian','Coraza del Guardián','raro','armadura','Cuero, hierro y cristal unidos para resistir golpes de Boss.',0,4,18,None,1,'armadura','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',5),
@@ -1213,7 +1187,6 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_boss_active ON rpg_boss_instances(chat_id,status,expires_at)")
-        cur.execute("ALTER TABLE rpg_boss_instances ADD COLUMN IF NOT EXISTS dungeon_id BIGINT NOT NULL DEFAULT 0")
         # KiwRPG V6.2.3 — cada Boss solo puede usar 3 guardias en toda su aparición.
         cur.execute("ALTER TABLE rpg_boss_instances ADD COLUMN IF NOT EXISTS defends_used BIGINT NOT NULL DEFAULT 0")
         cur.execute("""
@@ -4909,24 +4882,26 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     if dungeon_room<RPG_DUNGEON_ROOMS:
                         nr=dungeon_room+1
                         with db_lock:
-                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id)));
-                            _pn=dc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); dc.commit(); dc.close()
+                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
                         e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
-                        if ok2:
-                            send_message(chat_id,f"🚪 Sala {dungeon_room} superada por {_pvp_name(user_id)}.\n👥 Expedición actual: {int(_pn['n'] if _pn else 1)} aventureros\n\nOtros todavía pueden incorporarse.\n\n{msg2}",reply_markup=_dungeon_join_keyboard(dungeon_id))
+                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
                     else:
-                        # El primer aventurero que termina el recorrido abre la puerta final para TODO el grupo.
                         with db_lock:
-                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
-                        okb,bmsg,dboss=_spawn_dungeon_final_boss(chat_id,dungeon_id)
-                        if okb and dboss:
-                            # El descubridor entra automáticamente; los demás miembros usan el botón compartido.
-                            boss_join(chat_id,user_id,int(dboss['id']))
+                            dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
+                            if first: dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id)))
+                            dc.commit(); dc.close()
+                        if first:
                             with db_lock:
-                                _pc=get_db(); _pn=_pc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); _pc.commit(); _pc.close()
-                            send_message(chat_id,f"🔒 LAS PUERTAS SE HAN CERRADO\n\n{_pvp_name(user_id)} abrió la cámara final. Ya no pueden incorporarse nuevos aventureros.\n👥 Expedición: {int(_pn['n'] if _pn else 1)}\n\n👹 BOSS FINAL — {dboss['name']}\n❤️ {int(dboss['hp']):,}/{int(dboss['max_hp']):,} HP\n\nLos miembros de la expedición pueden entrar al combate.",reply_markup={"inline_keyboard":[[{"text":"⚔️ ENFRENTAR AL BOSS FINAL","callback_data":f"boss_join:{int(dboss['id'])}"}],[{"text":"🔄 Ver Boss","callback_data":f"boss_refresh:{int(dboss['id'])}"}]]})
-                        elif not okb:
-                            send_message(chat_id,bmsg)
+                                _pc=get_db(); _pn=_pc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); _pc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=? AND user_id=?",(RPG_DUNGEON_ROOMS,dungeon_id,int(user_id))); _pc.commit(); _pc.close()
+                            _party=max(1,int(_pn['n'] if _pn else 1)); _coop=1.0+min(0.40,0.10*(_party-1)); _kw=int(round(RPG_DUNGEON_FINAL_KW*_coop)); _xp=int(round(RPG_DUNGEON_FINAL_EXP*_coop))
+                            change_kiwons(user_id,_kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada"); grant_rpg_exp(char["id"],_xp)
+                            chest=roll_dungeon_completion_loot(user_id,int(char["id"]),dungeon_id)
+                            chest_txt=(f"\n🎁 Cofre final: {RPG_RARITY_ICON.get(chest['rarity'],'⚪')} {chest['name']}" if chest else "")
+                            essence_qty=random.randint(2,4); essence_got=0
+                            for _ in range(essence_qty):
+                                if grant_rpg_item(user_id,int(char["id"]),"esencia_tecnica",f"mazmorra:{dungeon_id}:final"): essence_got+=1
+                            essence_txt=f"\n💠 Esencia de Técnica ×{essence_got}" if essence_got else ""
+                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 Expedición: {_party} aventureros · bonus de equipo +{int((_coop-1)*100)}%\n🪙 Bono final: +{_kw} KW\n⭐ Bono final: +{_xp} EXP{chest_txt}{essence_txt}")
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -6548,11 +6523,7 @@ def _boss_active(chat_id):
     with db_lock:
         conn=get_db(); row=conn.execute("SELECT * FROM rpg_boss_instances WHERE chat_id=? AND status='active' ORDER BY id DESC LIMIT 1",(int(chat_id),)).fetchone()
         if row and int(row['expires_at'])<=now:
-            conn.execute("UPDATE rpg_boss_instances SET status='expired' WHERE id=?",(int(row['id']),))
-            # Un Boss final expirado no puede dejar la mazmorra bloqueando el mundo para siempre.
-            if int(row.get('dungeon_id') or 0)>0:
-                conn.execute("UPDATE rpg_dungeons SET status='expired' WHERE id=? AND status='boss'",(int(row['dungeon_id']),))
-            conn.commit(); row=None
+            conn.execute("UPDATE rpg_boss_instances SET status='expired' WHERE id=?",(int(row['id']),)); conn.commit(); row=None
         conn.close()
     return dict(row) if row else None
 
@@ -7173,29 +7144,17 @@ def _boss_keyboard(b,user_id):
 
 def spawn_boss(chat_id,key=None):
     if _boss_active(chat_id): return False,"Ya hay un Boss activo en este chat."
-    # Una expedición abierta reserva su cámara final: no dejamos que un Boss externo bloquee el final.
-    try:
-        with db_lock:
-            _dc=get_db(); _reserved=_dc.execute("SELECT 1 FROM rpg_dungeons WHERE chat_id=? AND status IN ('active','closed','boss') LIMIT 1",(int(chat_id),)).fetchone(); _dc.close()
-        if _reserved: return False,"Hay una Mazmorra Cooperativa en curso. Su Boss final tiene prioridad."
-    except NameError:
-        pass
-    if not key: key=random.choice(list(RPG_BOSSES))
+    if not key: key=random.choice([k for k in RPG_BOSSES if k != "will_trial"])
     key=str(key).lower().strip(); cfg=RPG_BOSSES.get(key)
     if not cfg: return False,"Boss desconocido. Disponibles: " + ", ".join(RPG_BOSSES.keys()) + "."
     now=int(time.time())
     with db_lock:
-        conn=get_db(); r=conn.execute("INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",(int(chat_id),key,cfg['name'],cfg['level'],cfg['hp'],cfg['hp'],cfg['atk'],cfg['defense'],now,now+cfg['hours']*3600)).fetchone(); conn.commit(); conn.close()
+        conn=get_db(); r=conn.execute("INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",(int(chat_id),key,cfg['name'],cfg['level'],cfg['hp'],cfg['hp'],cfg['atk'],cfg['defense'],now,now+15*60)).fetchone(); conn.commit(); conn.close()
     b=dict(r); return True,b
 
 def boss_join(chat_id,user_id,boss_id):
     b=_boss_active(chat_id)
     if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya no está disponible."
-    dungeon_id=int(b.get('dungeon_id') or 0)
-    if dungeon_id>0:
-        with db_lock:
-            _c=get_db(); _m=_c.execute("SELECT 1 FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(dungeon_id,int(user_id))).fetchone(); _c.close()
-        if not _m: return False,"🔒 Las puertas ya se cerraron. Solo la expedición que entró durante el recorrido puede enfrentar al Boss final."
     if _boss_participant(boss_id,user_id): return True,"Ya estás participando."
     char=get_active_character(user_id)
     if not char: return False,"Necesitas un personaje activo para entrar."
@@ -7204,7 +7163,7 @@ def boss_join(chat_id,user_id,boss_id):
         conn=get_db(); conn.execute("INSERT INTO rpg_boss_participants(boss_id,user_id,character_id,hp,max_hp,joined_at) VALUES(?,?,?,?,?,?) ON CONFLICT(boss_id,user_id) DO NOTHING",(int(boss_id),int(user_id),int(char['id']),int(eff['max_hp']),int(eff['max_hp']),int(time.time()))); conn.commit(); conn.close()
     return True,f"⚔️ {_pvp_name(user_id)} entró al combate contra {b['name']}."
 
-BOSS_RECOVERY_SECONDS = 180
+BOSS_RECOVERY_SECONDS = 0
 
 def boss_rejoin(chat_id,user_id,boss_id):
     b=_boss_active(chat_id)
@@ -7347,35 +7306,19 @@ def _boss_reward_all(b):
             if exists: conn.close(); continue
             conn.execute("INSERT INTO rpg_boss_rewards(boss_id,user_id,kw,exp,rewarded_at) VALUES(?,?,?,?,?)",(int(b['id']),uid,kw,exp,int(time.time()))); conn.commit(); conn.close()
         change_kiwons(uid,kw,'boss_reward',note=f"Boss {b['name']}"); grant_rpg_exp(int(p['character_id']),exp)
-        if int(b.get('dungeon_id') or 0)>0:
-            # Recompensa individual de Mazmorra: todos los que realmente golpearon al Boss reciben cofre + Esencias.
-            loot=[]
-            chest=roll_dungeon_completion_loot(uid,int(p['character_id']),int(b['dungeon_id']))
-            if chest: loot.append((chest,1))
-            essence_qty=random.randint(2,4); essence_got=0
-            for _ in range(essence_qty):
-                if grant_rpg_item(uid,int(p['character_id']),'esencia_tecnica',f"mazmorra:{int(b['dungeon_id'])}:final"): essence_got+=1
+        loot=_boss_grant_loot(b,p)
+        if loot:
+            parts=[]
+            for item,qty in loot:
+                icon=RPG_RARITY_ICON.get(item.get("rarity"),"⚪")
+                parts.append(f"{icon} {item.get('name','Objeto')} ×{qty}")
             try:
-                lines=[f"🎁 RECOMPENSA DE MAZMORRA — {b['name']}","",f"🪙 +{kw:,} KW · ⭐ +{exp:,} EXP"]
-                if chest: lines.append(f"{RPG_RARITY_ICON.get(chest.get('rarity'),'⚪')} Cofre: {chest.get('name','Objeto')}")
-                if essence_got: lines.append(f"💠 Esencia de Técnica ×{essence_got}")
-                send_private_message(uid,"\n".join(lines))
+                send_private_message(uid,
+                    f"🎁 BOTÍN DE BOSS — {b['name']}\n\n"+
+                    "\n".join(parts)+
+                    "\n\n🔥 Estos materiales pueden usarse en la Forja.")
             except Exception as exc:
-                print(f"[DUNGEON DROP] DM falló user={uid} dungeon={b.get('dungeon_id')}: {exc}")
-        else:
-            loot=_boss_grant_loot(b,p)
-            if loot:
-                parts=[]
-                for item,qty in loot:
-                    icon=RPG_RARITY_ICON.get(item.get("rarity"),"⚪")
-                    parts.append(f"{icon} {item.get('name','Objeto')} ×{qty}")
-                try:
-                    send_private_message(uid,
-                        f"🎁 BOTÍN DE BOSS — {b['name']}\n\n"+
-                        "\n".join(parts)+
-                        "\n\n🔥 Estos materiales pueden usarse en la Forja.")
-                except Exception as exc:
-                    print(f"[BOSS DROP] DM falló user={uid} boss={b.get('boss_key')}: {exc}")
+                print(f"[BOSS DROP] DM falló user={uid} boss={b.get('boss_key')}: {exc}")
     return len(rows)
 
 def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
@@ -7480,16 +7423,6 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
                 conn=get_db(); dead=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(boss_id),)).fetchone(); conn.close()
             dead=dict(dead); n=_boss_reward_all(dead)
             extra=''
-            if int(dead.get('dungeon_id') or 0)>0:
-                try:
-                    prize=_dungeon_special_treasure(dead)
-                    if prize:
-                        _winner,_desc=prize
-                        extra+=(f"\n\n🎁 TESORO DEL BOSS\n🎲 Entre los participantes válidos, el destino eligió a {str(_winner['display_name'])}.\n{_desc}")
-                    with db_lock:
-                        _dc=get_db(); _dc.execute("UPDATE rpg_dungeons SET status='completed' WHERE id=?",(int(dead['dungeon_id']),)); _dc.execute("UPDATE rpg_dungeon_party_members SET completed=1 WHERE dungeon_id=?",(int(dead['dungeon_id']),)); _dc.commit(); _dc.close()
-                except Exception:
-                    logger.exception("Error entregando Tesoro del Boss de mazmorra")
             if str(dead.get('boss_key') or '')=='will_trial':
                 with db_lock:
                     _c=get_db(); _ps=_c.execute("SELECT user_id FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(boss_id),)).fetchall(); _c.close()
@@ -7547,7 +7480,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if key=='vlad' and choice=='special' and damage>0:
             ai_text+=f"\n🩸 Vlad roba {max(1,int(round(damage*.22)))} HP."
         if php<=0:
-            ai_text+=f"\n💀 {_pvp_name(user_id)} cayó, pero el Boss sigue disponible para el grupo.\n⏳ Recuperación: 5m 00s."
+            ai_text+=f"\n💀 {_pvp_name(user_id)} cayó, pero el Boss sigue disponible para el grupo.\n♻️ Puedes volver al combate inmediatamente."
             cleanup_combat_dice(chat_id,user_id)
     b=_boss_active(chat_id) or b
     send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b,user_id),reply_markup=_boss_keyboard(b,user_id)); return True,''
@@ -7559,6 +7492,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
 # =========================================================
 RPG_AUTO_ENCOUNTER_INTERVAL = 3 * 60
 RPG_AUTO_ENCOUNTER_TTL = 2 * 60 + 40
+RPG_AUTO_BOSS_INTERVAL = 30 * 60
 # =========================================================
 # KIWRPG V9 — CLANES + EVENTOS MENSUALES + WORLD BOSS
 # =========================================================
@@ -7867,8 +7801,6 @@ def clan_members_text(clan_id):
     out+='\n'.join(('👑 ' if r['role']=='leader' else '⚔️ ')+str(r['display_name']) for r in rows)
     return out
 
-RPG_RARITY_ICON.setdefault('reliquia','👑')
-
 RPG_DUNGEON_INTERVAL = 60 * 60
 RPG_DUNGEON_TTL = 20 * 60
 RPG_DUNGEON_ROOMS = 3
@@ -7882,93 +7814,6 @@ def roll_dungeon_completion_loot(user_id, character_id, dungeon_id):
     rarity = 'comun' if x < 0.38 else ('poco_comun' if x < 0.78 else ('raro' if x < 0.97 else 'ultra_raro'))
     pool=RPG_DUNGEON_LOOT_POOLS[rarity]
     return grant_rpg_item(user_id,character_id,random.choice(pool),f"mazmorra:{int(dungeon_id)}:cofre")
-
-RPG_DUNGEON_RELIC_BY_CLASS = {
-    "Guerrero":"drel_excalibur", "Mago":"drel_kusanagi", "Pícaro":"drel_masamune",
-    "Paladín":"drel_mjolnir", "Arquero":"drel_gungnir", "The Cleaner":"drel_durandal",
-}
-
-def _dungeon_join_keyboard(dungeon_id):
-    return {"inline_keyboard":[[{"text":"⚔️ UNIRME A LA EXPEDICIÓN","callback_data":f"rpg_dungeon_enter:{int(dungeon_id)}"}]]}
-
-def _spawn_dungeon_final_boss(chat_id,dungeon_id):
-    """Cierra la entrada y crea exactamente un Boss compartido para la expedición."""
-    now=int(time.time())
-    with db_lock:
-        conn=get_db()
-        try:
-            d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? AND chat_id=? FOR UPDATE",(int(dungeon_id),int(chat_id))).fetchone()
-            if not d: conn.rollback(); conn.close(); return False,"La mazmorra ya no existe.",None
-            if int(d.get('boss_id') or 0)>0:
-                b=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(d['boss_id']),)).fetchone(); conn.rollback(); conn.close()
-                return True,"El Boss final ya despertó.",dict(b) if b else None
-            if d['status'] not in ('active','closed'): conn.rollback(); conn.close(); return False,"Esta expedición ya terminó.",None
-            other=conn.execute("SELECT id FROM rpg_boss_instances WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(int(chat_id),now)).fetchone()
-            if other: conn.rollback(); conn.close(); return False,"👹 Hay otro Boss activo en el reino. La puerta final no puede abrirse todavía.",None
-            party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone()
-            n=max(1,int(party['n'] if party else 1))
-            key=random.choice([k for k in RPG_BOSSES if k!='will_trial']); cfg=RPG_BOSSES[key]
-            scale=1.0+min(1.25,0.22*max(0,n-1))
-            hp=max(int(cfg['hp']),int(round(cfg['hp']*scale)))
-            b=conn.execute("""INSERT INTO rpg_boss_instances(chat_id,boss_key,name,level,max_hp,hp,atk,defense,spawned_at,expires_at,dungeon_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING *""",
-                (int(chat_id),key,cfg['name'],cfg['level'],hp,hp,cfg['atk'],cfg['defense'],now,now+max(2,int(cfg['hours']))*3600,int(dungeon_id))).fetchone()
-            bid=int(b['id'])
-            conn.execute("UPDATE rpg_dungeons SET status='boss',boss_id=? WHERE id=?",(bid,int(dungeon_id)))
-            conn.commit(); conn.close(); return True,"Boss final creado.",dict(b)
-        except Exception:
-            conn.rollback(); conn.close(); raise
-
-def _dungeon_special_treasure(b):
-    """Un único premio adicional para un participante real. Idempotente por dungeon.treasure_awarded."""
-    dungeon_id=int(b.get('dungeon_id') or 0)
-    if dungeon_id<=0: return None
-    with db_lock:
-        conn=get_db()
-        try:
-            d=conn.execute("SELECT treasure_awarded FROM rpg_dungeons WHERE id=? FOR UPDATE",(dungeon_id,)).fetchone()
-            if not d or int(d.get('treasure_awarded') or 0): conn.rollback(); conn.close(); return None
-            ps=conn.execute("""SELECT p.user_id,p.character_id,c.class_name,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name
-                FROM rpg_boss_participants p JOIN rpg_characters c ON c.id=p.character_id
-                LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? AND p.damage>0 ORDER BY p.user_id""",(int(b['id']),)).fetchall()
-            if not ps: conn.rollback(); conn.close(); return None
-            winner=dict(random.choice(ps)); conn.execute("UPDATE rpg_dungeons SET treasure_awarded=1 WHERE id=?",(dungeon_id,)); conn.commit(); conn.close()
-        except Exception:
-            conn.rollback(); conn.close(); raise
-    x=random.random(); uid=int(winner['user_id']); cid=int(winner['character_id'])
-    if x < .45:
-        kw=random.randint(30000,60000); ess=random.randint(3,5); change_kiwons(uid,kw,'dungeon_treasure',note=f'Tesoro mazmorra {dungeon_id}')
-        got=sum(1 for _ in range(ess) if grant_rpg_item(uid,cid,'esencia_tecnica',f'mazmorra:{dungeon_id}:tesoro'))
-        desc=f"💰 Cofre abundante — {kw:,} KW + 💠 Esencia ×{got}"
-    elif x < .73:
-        kw=random.randint(20000,40000); ess=random.randint(6,10); change_kiwons(uid,kw,'dungeon_treasure',note=f'Tesoro mazmorra {dungeon_id}')
-        got=sum(1 for _ in range(ess) if grant_rpg_item(uid,cid,'esencia_tecnica',f'mazmorra:{dungeon_id}:tesoro'))
-        desc=f"💎 Material raro — {kw:,} KW + 💠 Esencia ×{got}"
-    elif x < .90:
-        # En KiwRPG la categoría púrpura de equipo es ultra_raro; es el escalón épico del loot.
-        item=grant_rpg_item(uid,cid,random.choice(RPG_DUNGEON_LOOT_POOLS['ultra_raro']),f'mazmorra:{dungeon_id}:epico')
-        desc=f"🟣 Equipo Épico — {item['name']}" if item else "🟣 Equipo Épico — el stock mundial impidió la entrega"
-    elif x < .98:
-        # El 8% legendario entrega un objeto cuya rareza real en rpg_items es legendario.
-        legendary_pool=['espada_eclipse','reliquia_azath','cinturon_best_bout','arma_omega']
-        item=grant_rpg_item(uid,cid,random.choice(legendary_pool),f'mazmorra:{dungeon_id}:legendario')
-        desc=f"🟡 Equipo Legendario — {item['name']}" if item else "🟡 Equipo Legendario — el stock mundial impidió la entrega"
-    elif x < .998:
-        # Mítico de clase: asegura primero que el Arsenal Mítico exista incluso si nadie abrió /taberna aún.
-        _ensure_tavern_db()
-        key=(TAVERN_MYTHIC_WEAPONS.get(str(winner['class_name'])) or (None,))[0]
-        item=grant_rpg_item(uid,cid,key,f'mazmorra:{dungeon_id}:mitico') if key else None
-        desc=f"🌟 Equipo Mítico — {item['name']}" if item else "🌟 Premio Mítico — no quedaba una pieza compatible en el mundo"
-    else:
-        key=RPG_DUNGEON_RELIC_BY_CLASS.get(str(winner['class_name']))
-        item=grant_rpg_item(uid,cid,key,f'mazmorra:{dungeon_id}:reliquia') if key else None
-        if item: desc=f"👑 RELIQUIA — {item['name']}"
-        else:
-            # Una reliquia es única mundialmente: si ya existe, el 0.2% se convierte en una compensación extraordinaria.
-            change_kiwons(uid,100000,'dungeon_relic_fallback',note=f'Reliquia agotada mazmorra {dungeon_id}')
-            got=sum(1 for _ in range(15) if grant_rpg_item(uid,cid,'esencia_tecnica',f'mazmorra:{dungeon_id}:reliquia_fallback'))
-            desc=f"👑 RELIQUIA ya descubierta en este mundo — compensación: 100,000 KW + 💠 Esencia ×{got}"
-    return winner,desc
 
 RPG_MERCHANT_INTERVAL = 2 * 60 * 60
 RPG_MERCHANT_TTL = 20 * 60
@@ -8380,6 +8225,26 @@ def _quick_keyboard(m):
         return {"inline_keyboard":[[{"text":"🎨 Abrir lienzo","callback_data":f"qm:{mid}:draw:open"}]]}
     return None
 
+def _quick_draw_surprise(uid,char,chat_id,mission_id):
+    """Premio sorpresa tras conseguir la Espada del Gato. Ligero y sin tablas nuevas."""
+    roll=random.random()
+    if roll < .35:
+        amount=random.randrange(1500,5001,250)
+        change_kiwons(uid,amount,'quick_draw_bonus',chat_id=int(chat_id),note='Premio aleatorio de dibujo')
+        return f"🪙 Premio sorpresa: +{amount:,} KW"
+    if roll < .65:
+        amount=random.randrange(150,401,25)
+        grant_rpg_exp(int(char['id']),amount)
+        return f"✨ Premio sorpresa: +{amount:,} EXP"
+    if roll < .90:
+        qty=random.randint(1,3); got=0
+        for _ in range(qty):
+            if grant_rpg_item(uid,int(char['id']),'esencia_tecnica',f"dibujo_random:{int(mission_id)}"): got+=1
+        return f"💠 Premio sorpresa: Esencia de Técnica ×{got}"
+    got=grant_rpg_item(uid,int(char['id']),'pocion_mayor',f"dibujo_random:{int(mission_id)}")
+    return f"🧪 Premio sorpresa: {got['name'] if got else 'Poción Mayor'}"
+
+
 def _quick_reward(m,user_id):
     uid=int(user_id); kw=int(m['reward_kw'] or 0); exp=int(m['reward_exp'] or 0); item=str(m['reward_item'] or '')
     if kw: change_kiwons(uid,kw,'quick_mission',chat_id=int(m['chat_id']),note=f"Misión relámpago {m['title']}")
@@ -8389,20 +8254,39 @@ def _quick_reward(m,user_id):
     if item and char:
         got=grant_rpg_item(uid,int(char['id']),item,f"mision_relampago:{int(m['id'])}")
         if got: item_msg=f"\n💍 Premio especial: {got['name']}\n✨ No es poder ni estadísticas: es una promesa esperando a la persona correcta."
-    if str(m.get('mission_key') or '')=='gatos_perdidos' or str(m.get('mission_type') or '')=='draw':
+
+    # La Espada del Gato depende exclusivamente de dibujos COMPLETADOS.
+    # El quinto dibujo reserva el premio dentro de la misma transacción para
+    # impedir duplicados incluso si dos entregas llegan casi simultáneamente.
+    if str(m.get('mission_type') or '')=='draw':
+        award_sword=False
         with db_lock:
-            conn=get_db(); row=conn.execute("SELECT rescues,sword_claimed FROM rpg_cat_rescues WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
-            rescues=int(row['rescues'] or 0) if row else 0; claimed=int(row['sword_claimed'] or 0) if row else 0
+            conn=get_db()
+            row=conn.execute("SELECT rescues,sword_claimed FROM rpg_cat_rescues WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            rescues=int(row['rescues'] or 0) if row else 0
+            claimed=int(row['sword_claimed'] or 0) if row else 0
             rescues+=1
-            conn.execute("""INSERT INTO rpg_cat_rescues(user_id,rescues,sword_claimed,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET rescues=EXCLUDED.rescues,sword_claimed=EXCLUDED.sword_claimed,updated_at=EXCLUDED.updated_at""",(uid,rescues,claimed,int(time.time())))
+            award_sword=bool(rescues>=5 and not claimed and char)
+            new_claimed=1 if award_sword else claimed
+            conn.execute("""INSERT INTO rpg_cat_rescues(user_id,rescues,sword_claimed,updated_at) VALUES(?,?,?,?)
+                ON CONFLICT(user_id) DO UPDATE SET rescues=EXCLUDED.rescues,sword_claimed=EXCLUDED.sword_claimed,updated_at=EXCLUDED.updated_at""",
+                (uid,rescues,new_claimed,int(time.time())))
             conn.commit(); conn.close()
-        item_msg+=f"\n🐾 Progreso Espada del Gato Perdido: {min(rescues,5)}/5"
-        if rescues>=5 and not claimed and char:
-            got=grant_rpg_item(uid,int(char['id']),'espada_gato','cinco_gatos_rescatados')
+        item_msg+=f"\n🐾 Dibujos completados: {min(rescues,5)}/5"
+        if award_sword:
+            got=grant_rpg_item(uid,int(char['id']),'espada_gato','cinco_dibujos_completados')
             if got:
+                item_msg+=(f"\n\n🐱⚔️ CINCO DIBUJOS COMPLETADOS\n"
+                           f"Has recibido: {got['name']}\n"
+                           f"⚔️ +24 ATK · 🛡️ +4 DEF · ❤️ +40 HP · Todas las clases")
+            else:
+                # Si el inventario falla por una causa externa, permite reintentar
+                # en el siguiente dibujo en lugar de perder el premio para siempre.
                 with db_lock:
-                    conn=get_db(); conn.execute("UPDATE rpg_cat_rescues SET sword_claimed=1,updated_at=? WHERE user_id=?",(int(time.time()),uid)); conn.commit(); conn.close()
-                item_msg+=f"\n\n🐱⚔️ CINCO VIDAS DEVUELTAS A CASA\nLas cinco huellas de la empuñadura comienzan a brillar.\nHas recibido: {got['name']}"
+                    conn=get_db(); conn.execute("UPDATE rpg_cat_rescues SET sword_claimed=0,updated_at=? WHERE user_id=?",(int(time.time()),uid)); conn.commit(); conn.close()
+                item_msg+="\n⚠️ La Espada del Gato quedó pendiente; se reintentará en tu próximo dibujo."
+        elif rescues>5 and claimed and char:
+            item_msg+="\n"+_quick_draw_surprise(uid,char,int(m['chat_id']),int(m['id']))
     return f"🪙 +{kw:,} KW"+(f" · ✨ +{exp:,} EXP" if char and exp else '')+item_msg
 
 def _quick_finish(m,user_id):
@@ -8492,6 +8376,16 @@ def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
         recent_keys={str(r['mission_key']) for r in recent_rows}
         candidates=[m for m in RPG_QUICK_MISSIONS if str(m['key']) not in recent_keys]
         if not candidates: candidates=list(RPG_QUICK_MISSIONS)
+        # Dibujo es el formato principal: ~72% de preferencia y nunca dos automáticas
+        # no-dibujo consecutivas. Los comandos forzados conservan la misión pedida.
+        if not forced_key:
+            last_type=conn.execute("SELECT mission_type FROM rpg_quick_missions WHERE chat_id=? ORDER BY id DESC LIMIT 1",(chat_id,)).fetchone()
+            prefer_draw=(last_type and str(last_type.get('mission_type') or '')!='draw') or random.random()<0.72
+            if prefer_draw:
+                draw_candidates=[m for m in candidates if str(m.get('type') or '')=='draw']
+                if not draw_candidates:
+                    draw_candidates=[m for m in RPG_QUICK_MISSIONS if str(m.get('type') or '')=='draw' and str(m['key']) not in recent_keys]
+                if draw_candidates: candidates=draw_candidates
         if forced_key:
             picked=next((x for x in RPG_QUICK_MISSIONS if str(x['key'])==str(forced_key)),None)
             if not picked:
@@ -8558,6 +8452,7 @@ def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
                       now+RPG_AUTO_ENCOUNTER_INTERVAL,now+RPG_DUNGEON_INTERVAL,now))
         conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=CASE WHEN next_merchant_at<=0 THEN ? ELSE next_merchant_at END WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,int(chat_id)))
         conn.execute("UPDATE rpg_auto_chats SET next_minigame_at=CASE WHEN next_minigame_at<=0 THEN ? ELSE next_minigame_at END WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,int(chat_id)))
+        conn.execute("UPDATE rpg_auto_chats SET next_boss_at=CASE WHEN next_boss_at<=0 THEN ? ELSE next_boss_at END WHERE chat_id=?",(now+RPG_AUTO_BOSS_INTERVAL,int(chat_id)))
         conn.commit(); conn.close()
 
 def set_rpg_notification_chat(chat_id, chat_type, message_thread_id=None):
@@ -8610,13 +8505,10 @@ def _auto_spawn_one(chatrow, now=None):
     now=int(now or time.time())
     chat_id=int(chatrow["chat_id"])
     topic=chatrow.get("message_thread_id")
-    # La mazmorra tiene prioridad sobre los monstruos automáticos.
+    # Los monstruos del mundo son independientes de mazmorras, Bosses y misiones.
+    # Su único bloqueo es que todavía exista otro encuentro pendiente.
     with db_lock:
         conn=get_db()
-        dungeon=conn.execute("""SELECT id FROM rpg_dungeons WHERE chat_id=? AND status IN ('active','closed','boss') LIMIT 1""",(chat_id,)).fetchone()
-        if dungeon:
-            conn.execute("UPDATE rpg_auto_chats SET next_spawn_at=?,updated_at=? WHERE chat_id=?",(now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id))
-            conn.commit(); conn.close(); return False
         pending=conn.execute("""SELECT id FROM rpg_auto_encounters
              WHERE chat_id=? AND status='pending' AND expires_at>? LIMIT 1""",(chat_id,now)).fetchone()
         if pending:
@@ -8658,28 +8550,17 @@ def _active_dungeon(chat_id, now=None):
 
 def _spawn_dungeon(chatrow, now=None):
     now=int(now or time.time()); chat_id=int(chatrow["chat_id"]); topic=chatrow.get("message_thread_id"); d=random.choice(RPG_DUNGEONS)
-    # No abrimos otra expedición mientras un Boss (incluido el final de otra mazmorra) siga activo.
-    if _boss_active(chat_id):
-        with db_lock:
-            _c=get_db(); _c.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now,chat_id)); _c.commit(); _c.close()
-        return False
     with db_lock:
         conn=get_db()
-        active=conn.execute("SELECT id FROM rpg_dungeons WHERE chat_id=? AND status IN ('active','closed','boss') LIMIT 1",(chat_id,)).fetchone()
+        active=conn.execute("SELECT id FROM rpg_dungeons WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
         if active:
             conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
-        pending=conn.execute("SELECT message_id FROM rpg_auto_encounters WHERE chat_id=? AND status='pending'",(chat_id,)).fetchall()
-        old_ids=[int(x.get("message_id") or 0) for x in pending if int(x.get("message_id") or 0)>0]
-        conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE chat_id=? AND status='pending'",(chat_id,))
         row=conn.execute("INSERT INTO rpg_dungeons(chat_id,message_thread_id,dungeon_key,dungeon_name,status,message_id,spawned_at,expires_at) VALUES(?,?,?,?,'active',0,?,?) RETURNING id",(chat_id,int(topic) if topic is not None else None,d["key"],d["name"],now,now+RPG_DUNGEON_TTL)).fetchone()
-        did=int(row["id"]); conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,next_spawn_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now+RPG_AUTO_ENCOUNTER_INTERVAL,now,chat_id)); conn.commit(); conn.close()
-    for mid in old_ids:
-        try: delete_message(chat_id,mid)
-        except Exception: pass
+        did=int(row["id"]); conn.execute("UPDATE rpg_auto_chats SET next_dungeon_at=?,updated_at=? WHERE chat_id=?",(now+RPG_DUNGEON_INTERVAL,now,chat_id)); conn.commit(); conn.close()
     old=get_current_message_thread_id()
     try:
         set_current_message_thread_id(topic)
-        sent=send_message(chat_id,f"🏰 MAZMORRA COOPERATIVA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas antes del Boss · ⏳ 20 minutos para incorporarse\n\n👥 La expedición permanece abierta durante el recorrido. Otros aventureros pueden unirse en el camino.\n🔒 Cuando se abra la puerta del Boss final ya no podrá entrar nadie más.\n🎁 Al derrotarlo habrá recompensa para los participantes y UN Tesoro del Boss sorteado entre quienes realmente peleen.",reply_markup=_dungeon_join_keyboard(did))
+        sent=send_message(chat_id,f"🏰 MAZMORRA ALEATORIA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\nCada aventurero puede hacer su propia expedición.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{did}"}]]})
     finally: set_current_message_thread_id(old)
     mid=int((((sent or {}).get("result") or {}).get("message_id") or 0)) if isinstance(sent,dict) else 0
     with db_lock:
@@ -8688,25 +8569,10 @@ def _spawn_dungeon(chatrow, now=None):
 
 def enter_dungeon(chat_id,user_id,dungeon_id):
     now=int(time.time())
-    # Validamos antes de registrar membresía para no crear participantes fantasma
-    # que luego inflen el escalado del Boss final.
-    char=get_active_character(user_id)
-    if not char:
-        return False,"Necesitas un personaje activo. Usa /crear_personaje."
-    char=_rpg_auto_recover_if_ready(char)
-    if int(char.get("hp") or 0)<=0:
-        remaining=max(1,int((int(char.get("defeated_until") or 0)-time.time()+59)//60))
-        return False,f"💀 {char['name']} está recuperándose. Podrás volver a entrar en aproximadamente {remaining} min."
     with db_lock:
         conn=get_db(); d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(int(dungeon_id),)).fetchone()
-        if not d or int(d["chat_id"])!=int(chat_id):
-            conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya no está disponible."
-        member=conn.execute("SELECT 1 FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(int(dungeon_id),int(user_id))).fetchone()
-        join_open=(d["status"]=='active' and int(d["expires_at"])>now)
-        # Al cerrar la ventana nadie nuevo entra, pero un miembro existente sí puede reanudar
-        # su recorrido si Render reinició o perdió el mensaje entre dos salas.
-        if not join_open and not (d["status"]=='closed' and member):
-            conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró nuevas incorporaciones."
+        if not d or int(d["chat_id"])!=int(chat_id) or d["status"]!='active' or int(d["expires_at"])<=now:
+            conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró."
         battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
         if battle:
             # Entrar a una mazmorra es idempotente: si este mismo botón ya creó
@@ -8758,11 +8624,7 @@ def rpg_auto_world_tick(now=None):
         for r in expired:
             conn.execute("UPDATE rpg_auto_encounters SET status='expired' WHERE id=?",(int(r["id"]),))
         expired_dungeons=conn.execute("SELECT * FROM rpg_dungeons WHERE status='active' AND expires_at<=?",(now,)).fetchall()
-        for d in expired_dungeons:
-            # La ventana de incorporación terminó. Si alguien ya entró, la expedición
-            # sigue viva pero queda cerrada a nuevos miembros hasta llegar al Boss.
-            party=conn.execute("SELECT 1 FROM rpg_dungeon_party_members WHERE dungeon_id=? LIMIT 1",(int(d["id"]),)).fetchone()
-            conn.execute("UPDATE rpg_dungeons SET status=? WHERE id=?",('closed' if party else 'expired',int(d["id"])))
+        for d in expired_dungeons: conn.execute("UPDATE rpg_dungeons SET status='expired' WHERE id=?",(int(d["id"]),))
         expired_merchants=conn.execute("SELECT * FROM rpg_merchants WHERE status='active' AND expires_at<=?",(now,)).fetchall()
         for m in expired_merchants: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE id=?",(int(m['id']),))
         expired_quick=conn.execute("SELECT * FROM rpg_quick_missions WHERE status='active' AND expires_at<=?",(now,)).fetchall()
@@ -8770,6 +8632,7 @@ def rpg_auto_world_tick(now=None):
         quick_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_minigame_at<=?",(now,)).fetchall()
         merchant_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_merchant_at<=?",(now,)).fetchall()
         dungeon_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_dungeon_at<=?",(now,)).fetchall()
+        boss_due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_boss_at<=?",(now,)).fetchall()
         due=conn.execute("SELECT * FROM rpg_auto_chats WHERE enabled=1 AND next_spawn_at<=?",(now,)).fetchall()
         conn.commit(); conn.close()
     for rr in expired:
@@ -8808,13 +8671,29 @@ def rpg_auto_world_tick(now=None):
             finally:
                 set_current_message_thread_id(_old_topic)
     except Exception: logger.exception("Error sincronizando eventos mensuales")
-    dungeon_due_chats=set()
+    # Boss normal cooperativo cada 30 minutos. Los Bosses Mundiales pertenecen solo a eventos. Si el anterior sigue vivo, no se duplica:
+    # simplemente se programa la siguiente comprobación media hora después.
+    for rr in boss_due:
+        chat_id=int(rr['chat_id']); topic=rr.get('message_thread_id')
+        try:
+            with db_lock:
+                _bc=get_db(); _bc.execute("UPDATE rpg_auto_chats SET next_boss_at=?,updated_at=? WHERE chat_id=?",(now+RPG_AUTO_BOSS_INTERVAL,now,chat_id)); _bc.commit(); _bc.close()
+            if not _boss_active(chat_id):
+                ok,b=spawn_boss(chat_id)
+                if ok:
+                    old_topic=get_current_message_thread_id()
+                    try:
+                        set_current_message_thread_id(topic)
+                        txt="👹 BOSS — ¡HA APARECIDO!\n\n"+_boss_card(b,None)
+                        kb={"inline_keyboard":[[{"text":"⚔️ ENTRAR AL COMBATE","callback_data":f"boss_join:{int(b['id'])}"}],[{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{int(b['id'])}"}]]}
+                        sent=send_rpg_image(chat_id,rpg_boss_asset_key(b.get('boss_key')),txt,reply_markup=kb)
+                        if not sent: send_message(chat_id,txt,reply_markup=kb)
+                    finally: set_current_message_thread_id(old_topic)
+        except Exception: logger.exception("Error creando Boss automático en chat %s",chat_id)
     for rr in dungeon_due:
-        dungeon_due_chats.add(int(rr["chat_id"]))
         try: _spawn_dungeon(dict(rr),now)
         except Exception: logger.exception("Error creando mazmorra automática en chat %s",rr["chat_id"])
     for rr in due:
-        if int(rr["chat_id"]) in dungeon_due_chats: continue
         try: _auto_spawn_one(dict(rr),now)
         except Exception: logger.exception("Error creando encuentro automático en chat %s",rr["chat_id"])
 
@@ -9418,18 +9297,22 @@ def _tavern_apply_effect(user_id,won,exp,payout,bet):
     eff=_tavern_effect(user_id); exp=int(exp); payout=int(payout); extra_loss=0; label=""
     if not eff: return exp,payout,extra_loss,label
     typ=str(eff["effect_type"]); mag=int(eff["magnitude"])
-    if typ=="kw" and won: payout=int(round(payout*(1+mag/100)))
+    # La apuesta devuelta nunca se bonifica ni se penaliza: las bebidas solo
+    # modifican la GANANCIA sobre la apuesta. Así 20K apostados siguen siendo
+    # 20K recuperados al ganar; el efecto actúa únicamente sobre el premio.
+    profit=max(0,int(payout)-int(bet)) if won else 0
+    if typ=="kw" and won: profit=int(round(profit*(1+mag/100))); payout=int(bet)+profit
     elif typ=="exp": exp=int(round(exp*(1+mag/100)))
     elif typ=="both":
         exp=int(round(exp*(1+mag/100)))
-        if won: payout=int(round(payout*(1+mag/100)))
+        if won: profit=int(round(profit*(1+mag/100))); payout=int(bet)+profit
     elif typ=="risk":
-        if won: payout=int(round(payout*1.25))
+        if won: profit=int(round(profit*1.25)); payout=int(bet)+profit
         else: extra_loss=max(1,int(round(int(bet)*0.10)))
-    elif typ=="lucky" and won: payout=int(round(payout*1.20))
+    elif typ=="lucky" and won: profit=int(round(profit*1.20)); payout=int(bet)+profit
     elif typ=="resaca":
         exp=max(1,int(round(exp*0.90)))
-        if won: payout=int(round(payout*0.90))
+        if won: profit=int(round(profit*0.90)); payout=int(bet)+profit
     label=f"\n🍹 {eff.get('drink_key','Bebida')} · {int(eff['games_left'])-1} partidas restantes"
     with db_lock:
         conn=get_db(); left=max(0,int(eff["games_left"])-1)
@@ -9526,7 +9409,8 @@ def _tavern_finish(user_id,chat_id,game,won,exp,payout,detail,streak=0):
     result="🏆 Victoria" if won else "💀 La casa gana"
     if won and bet>0:
         effective_mult=(float(payout)/float(bet)) if payout else 0.0
-        money=(f"💵 Premio: {bet:,} × {effective_mult:.2f} = {payout:,} KW\n"
+        money=(f"🤝 Tú apuestas {bet:,} KW · Tabernero apuesta {bet:,} KW\n"
+               f"💵 Premio total: {bet:,} × {effective_mult:.2f} = {payout:,} KW\n"
                f"🪙 Ganancia neta: {'+' if net>=0 else ''}{net:,} KW")
     else:
         money=f"🪙 Pérdida neta: {net:,} KW"
@@ -9557,14 +9441,14 @@ def _tavern_start_game(user_id,chat_id,game,bet):
         base.update(player=random.randint(1,6)+random.randint(1,6),dealer=random.randint(11,15)); _tavern_set(user_id,base)
         return f"🎲 DADOS DEL TAHÚR\n🪙 Apuesta: {bet:,} KW\n\nTus dos dados suman: {base['player']}\nEl tabernero sonríe demasiado.\n\nPuedes plantarte o tirar otro dado. Si pasas de 15, pierdes.",{"inline_keyboard":[[{"text":"🎲 Tirar otro","callback_data":"tavern:dice_hit"},{"text":"✋ Plantarme","callback_data":"tavern:dice_stand"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
     if game=="cards":
-        base.update(card=random.randint(2,12),streak=0); _tavern_set(user_id,base)
+        base.update(card=7,streak=0); _tavern_set(user_id,base)
         return f"🃏 CARTA MAYOR\n🪙 Apuesta: {bet:,} KW\n\nCarta actual: {base['card']}\n¿La siguiente será mayor o menor?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
     if game=="cups":
         base.update(prize=random.randint(0,2)); _tavern_set(user_id,base); _tavern_native_dice(chat_id,"🎰")
         return f"🥃 TRES VASOS\n🪙 Apuesta: {bet:,} KW\n\nEl tabernero esconde la ficha. La máquina de la esquina hace ruido para distraerte...\n\n¿Dónde quedó?",{"inline_keyboard":[[{"text":"🥃 1","callback_data":"tavern:cup_0"},{"text":"🥃 2","callback_data":"tavern:cup_1"},{"text":"🥃 3","callback_data":"tavern:cup_2"}]]}
     if game=="darts":
         base.update(throws=0,score=0); _tavern_set(user_id,base)
-        return f"🎯 DARDOS DEL DRAGÓN\n🪙 Apuesta: {bet:,} KW\n\nTienes 3 tiros. Aquí sí usamos el 🎯 animado de Telegram.",{"inline_keyboard":[[{"text":"🎯 Lanzar","callback_data":"tavern:dart_throw"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
+        return f"🎯 DARDOS DEL DRAGÓN\n🪙 Apuesta: {bet:,} KW · el Tabernero pone otros {bet:,} KW\n\n📜 CÓMO GANAR\nTienes 3 lanzamientos. Necesitas llegar a 30 puntos o más.\n🎯 Cada dardo suma según el resultado de Telegram.\n🏆 30 puntos = victoria básica ×2; una puntuación mayor puede aumentar el premio.\n\nMarcador: 0/30 · Tiros: 0/3",{"inline_keyboard":[[{"text":"🎯 Lanzar","callback_data":"tavern:dart_throw"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
     if game=="coin":
         base.update(streak=0); _tavern_set(user_id,base)
         return f"🪙 MONEDA DEL TABERNERO\n🪙 Apuesta: {bet:,} KW\n\nNo hay racha máxima. Sigue hasta que te retires... o la casa te quite la sonrisa.",{"inline_keyboard":[[{"text":"🦅 Cara","callback_data":"tavern:coin_h"},{"text":"👑 Cruz","callback_data":"tavern:coin_t"}],[{"text":"🍻 Abandonar apuesta","callback_data":"tavern:forfeit"}]]}
@@ -9717,7 +9601,7 @@ def tavern_callback(user_id,chat_id,data):
     if action=="claim" and len(parts)>=3: return _tavern_claim_mission(user_id,chat_id,parts[2])
     if not get_active_character(user_id): return "🍻 Necesitas un personaje activo antes de jugar.",tavern_home_keyboard()
     if action=="game" and len(parts)>=3:
-        game=parts[2]; return f"{_tavern_game_name(game)}\n\nElige cuánto quieres apostar. Si pierdes, la apuesta se queda en la barra.",_tavern_bet_keyboard(game)
+        game=parts[2]; return f"{_tavern_game_name(game)}\n\nElige cuánto quieres apostar. El Tabernero pone la misma cantidad.\nSi ganas una apuesta básica, recuperas la tuya y te llevas la suya: ×2 total. Los resultados especiales y las rachas pueden pagar más.",_tavern_bet_keyboard(game)
     if action=="start" and len(parts)>=4:
         try: bet=int(parts[3])
         except: bet=0
@@ -9734,7 +9618,7 @@ def tavern_callback(user_id,chat_id,data):
             roll=random.randint(1,6); g['player']+=roll
             if g['player']>15: return _tavern_finish(user_id,chat_id,"dice",False,5,0,f"Sacaste {roll}. Total {g['player']}: te pasaste de 15.")
             _tavern_set(user_id,g); return f"🎲 Sacaste {roll}.\nTu total: {g['player']}\n\n¿Otra vez o te plantas?",{"inline_keyboard":[[{"text":"🎲 Tirar otro","callback_data":"tavern:dice_hit"},{"text":"✋ Plantarme","callback_data":"tavern:dice_stand"}]]}
-        won=int(g['player'])>=int(g['dealer']); payout=int(round(g['bet']*1.45)) if won else 0
+        won=int(g['player'])>=int(g['dealer']); payout=int(round(g['bet']*2.00)) if won else 0
         return _tavern_finish(user_id,chat_id,"dice",won,30 if won else 6,payout,f"Tú: {g['player']} · Tabernero: {g['dealer']}.")
 
     if action in ("card_hi","card_lo","card_cash"):
@@ -9743,11 +9627,11 @@ def tavern_callback(user_id,chat_id,data):
         st=int(g.get('streak',0))
         if action=="card_cash":
             if st<=0: return "Necesitas acertar al menos una carta antes de cobrar.",tavern_home_keyboard()
-            mult=min(8.0,1.0+0.50*st); return _tavern_finish(user_id,chat_id,"cards",True,15+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
+            mult=min(8.0,1.50+0.50*st); mult=max(2.0,mult); return _tavern_finish(user_id,chat_id,"cards",True,15+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
         old=int(g['card']); new=random.randint(2,12); hi=action=="card_hi"; won=(new>old if hi else new<old) and new!=old
         if not won: return _tavern_finish(user_id,chat_id,"cards",False,5,0,f"Era {old} y salió {new}. La racha terminó.",st)
-        g['card']=new; g['streak']=st+1; _tavern_set(user_id,g); mult=min(8.0,1.0+0.50*g['streak'])
-        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n\nNo hay máximo de racha. ¿Sigues o cobras?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"💰 Cobrar","callback_data":"tavern:card_cash"}]]}
+        g['card']=7; g['streak']=st+1; _tavern_set(user_id,g); mult=max(2.0,min(8.0,1.50+0.50*g['streak']))
+        return f"🃏 ¡ACIERTO! {old} → {new}\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n\nLa siguiente ronda vuelve a carta 7 para que la apuesta siga siendo justa. ¿Sigues o cobras?",{"inline_keyboard":[[{"text":"⬆️ Mayor","callback_data":"tavern:card_hi"},{"text":"⬇️ Menor","callback_data":"tavern:card_lo"}],[{"text":"💰 Cobrar","callback_data":"tavern:card_cash"}]]}
 
     if action.startswith("cup_"):
         g=_tavern_get(user_id)
@@ -9763,10 +9647,12 @@ def tavern_callback(user_id,chat_id,data):
         val=_tavern_native_dice(chat_id,"🎯") or random.randint(1,6); pts={1:4,2:7,3:10,4:13,5:17,6:25}.get(val,7)
         g['score']+=pts; g['throws']+=1
         if g['throws']>=3:
-            score=int(g['score']); won=score>=35
-            mult=0 if not won else min(2.0,1.05+(score-35)*0.030); payout=int(round(g['bet']*mult)) if won else 0
-            return _tavern_finish(user_id,chat_id,"darts",won,max(5,min(55,score)),payout,f"Último dardo: {pts}. Marcador final: {score}." )
-        _tavern_set(user_id,g); return f"🎯 +{pts} puntos\nMarcador: {g['score']} · Tiros: {g['throws']}/3",{"inline_keyboard":[[{"text":"🎯 Lanzar otro","callback_data":"tavern:dart_throw"}]]}
+            score=int(g['score']); won=score>=30
+            mult=0 if not won else min(3.0,2.0+(score-30)*0.025); payout=int(round(g['bet']*mult)) if won else 0
+            detail=(f"Último dardo: +{pts}. Marcador final: {score}/30. "
+                    + (f"Superaste la meta por {score-30} puntos." if won else f"Te faltaron {30-score} puntos para ganar."))
+            return _tavern_finish(user_id,chat_id,"darts",won,max(5,min(55,score)),payout,detail )
+        _tavern_set(user_id,g); missing=max(0,30-int(g['score'])); return f"🎯 Dardo {g['throws']}/3: +{pts} puntos\n📊 Marcador: {g['score']}/30\n🔥 Te faltan {missing} puntos para vencer al Tabernero.",{"inline_keyboard":[[{"text":"🎯 Lanzar otro","callback_data":"tavern:dart_throw"}]]}
 
     if action in ("coin_h","coin_t","coin_cash"):
         g=_tavern_get(user_id)
@@ -9774,10 +9660,10 @@ def tavern_callback(user_id,chat_id,data):
         st=int(g.get('streak',0))
         if action=="coin_cash":
             if st<=0: return "Necesitas un acierto antes de cobrar.",tavern_home_keyboard()
-            mult=min(8.0,1.0+0.60*st); return _tavern_finish(user_id,chat_id,"coin",True,12+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
+            mult=min(8.0,1.40+0.60*st); mult=max(2.0,mult); return _tavern_finish(user_id,chat_id,"coin",True,12+st*8,int(round(g['bet']*mult)),f"Te retiraste con racha ×{st} y multiplicador ×{mult:.2f}.",st)
         result=random.choice(("h","t")); pick=action[-1]
         if pick!=result: return _tavern_finish(user_id,chat_id,"coin",False,5,0,f"Salió {'Cara' if result=='h' else 'Cruz'}. Tu racha ×{st} terminó.",st)
-        g['streak']=st+1; _tavern_set(user_id,g); mult=min(8.0,1.0+0.60*g['streak'])
+        g['streak']=st+1; _tavern_set(user_id,g); mult=max(2.0,min(8.0,1.40+0.60*g['streak']))
         return f"🪙 ¡ACIERTO! Salió {'Cara' if result=='h' else 'Cruz'}.\n🔥 Racha ×{g['streak']} · Premio actual ×{mult:.2f}\n\nPuedes seguir indefinidamente; el premio sí tiene tope ×8 para no destruir la economía.",{"inline_keyboard":[[{"text":"🦅 Cara","callback_data":"tavern:coin_h"},{"text":"👑 Cruz","callback_data":"tavern:coin_t"}],[{"text":"💰 Cobrar","callback_data":"tavern:coin_cash"}]]}
 
     return "El tabernero no entendió esa jugada.",tavern_home_keyboard()
@@ -11305,7 +11191,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not d:
             send_message(chat_id,"🏰 No hay una mazmorra abierta ahora mismo. Aparece una aproximadamente cada hora."); return True
         left=max(1,int((int(d["expires_at"])-time.time()+59)//60))
-        send_message(chat_id,f"🏰 {d['dungeon_name']}\n🚪 {RPG_DUNGEON_ROOMS} salas antes del Boss · ⏳ quedan ~{left} min para incorporarse\n👥 Puedes unirte mientras la puerta final siga abierta.",reply_markup=_dungeon_join_keyboard(int(d['id']))); return True
+        send_message(chat_id,f"🏰 {d['dungeon_name']}\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ quedan ~{left} min",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{int(d['id'])}"}]]}); return True
 
     if command == "/testmazmorra":
         if not is_owner(message.get("from",{}).get("id")):

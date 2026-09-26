@@ -708,6 +708,12 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dungeons_chat_status ON rpg_dungeons(chat_id,status,expires_at)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_dungeon_rooms (
+            dungeon_id BIGINT NOT NULL, room BIGINT NOT NULL, enemy_key TEXT NOT NULL, enemy_name TEXT NOT NULL,
+            enemy_hp BIGINT NOT NULL, enemy_max_hp BIGINT NOT NULL, enemy_atk BIGINT NOT NULL, enemy_def BIGINT NOT NULL,
+            party_size BIGINT NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+            PRIMARY KEY(dungeon_id,room)
+        )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_dungeon_runs (
                 dungeon_id BIGINT NOT NULL, user_id BIGINT NOT NULL, room BIGINT NOT NULL DEFAULT 1,
@@ -4974,8 +4980,23 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 conn.rollback(); conn.close(); return True
             ability=_rpg_get_ability_for_user(user_id,char["class_name"],ability_key)
             eff=effective_character_stats(char)
-            enemy_hp=int(battle["enemy_hp"])
-            enemy_def=int(battle["enemy_def"])
+            dungeon_id=int(battle.get("dungeon_event_id") or 0)
+            dungeon_room=int(battle.get("dungeon_room") or 0)
+            shared_room=None
+            if dungeon_id>0 and dungeon_room>0:
+                shared_room=_dungeon_room_state(conn,dungeon_id,dungeon_room,int(char.get('level') or 1),True)
+                if not shared_room or shared_room.get('status')!='active' or int(shared_room.get('enemy_hp') or 0)<=0:
+                    conn.rollback(); conn.close()
+                    send_message(chat_id,"🚪 Esa sala ya fue superada por tu expedición. Usa /mazmorra para continuar.")
+                    return True
+                # La fila de sala es la autoridad. Las copias por jugador solo guardan cooldown/estado personal.
+                enemy_hp=int(shared_room['enemy_hp'])
+                enemy_def=int(shared_room['enemy_def'])
+                battle['enemy_name']=shared_room['enemy_name']; battle['enemy_key']=shared_room['enemy_key']
+                battle['enemy_max_hp']=int(shared_room['enemy_max_hp']); battle['enemy_atk']=int(shared_room['enemy_atk']); battle['enemy_def']=enemy_def
+            else:
+                enemy_hp=int(battle["enemy_hp"])
+                enemy_def=int(battle["enemy_def"])
             damage=0
             heal=0
             if roll != 1:
@@ -4992,6 +5013,11 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 if ability.get("heal_pct"):
                     heal=max(1,int(round(eff["max_hp"]*float(ability["heal_pct"])*RPG_DICE_MULT[roll])))
             enemy_hp=max(0,enemy_hp-damage)
+            if shared_room is not None:
+                conn.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=?,updated_at=? WHERE dungeon_id=? AND room=?",(enemy_hp,int(time.time()),dungeon_id,dungeon_room))
+                # Refleja la misma barra en todas las copias de combate de esa sala.
+                conn.execute("UPDATE rpg_battles SET enemy_hp=?,enemy_name=?,enemy_key=?,enemy_max_hp=?,enemy_atk=?,enemy_def=?,updated_at=? WHERE dungeon_event_id=? AND dungeon_room=?",
+                             (enemy_hp,shared_room['enemy_name'],shared_room['enemy_key'],int(shared_room['enemy_max_hp']),int(shared_room['enemy_atk']),int(shared_room['enemy_def']),int(time.time()),dungeon_id,dungeon_room))
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
@@ -5051,29 +5077,40 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 except Exception: logger.exception("Error entregando drop de temporada")
                 dungeon_id=int(battle.get("dungeon_event_id") or 0); dungeon_room=int(battle.get("dungeon_room") or 0)
                 if dungeon_id>0:
-                    try:
-                        with db_lock:
-                            _dc=get_db(); _dc.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=? AND user_id=?",(dungeon_room,dungeon_id,int(user_id))); _dc.commit(); _dc.close()
-                    except Exception: logger.exception("No pude actualizar progreso cooperativo de mazmorra")
-                    if dungeon_room<RPG_DUNGEON_ROOMS:
-                        nr=dungeon_room+1
-                        with db_lock:
-                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
-                        e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
-                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
-                    else:
-                        with db_lock:
-                            dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
-                            if first: dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id)))
+                    # Una victoria limpia la sala PARA TODO EL GRUPO, no solo para quien dio el último golpe.
+                    with db_lock:
+                        dc=get_db()
+                        dc.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=0,status='cleared',updated_at=? WHERE dungeon_id=? AND room=?",(int(time.time()),dungeon_id,dungeon_room))
+                        dc.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=?",(dungeon_room,dungeon_id))
+                        members=dc.execute("SELECT user_id FROM rpg_dungeon_party_members WHERE dungeon_id=? ORDER BY joined_at",(dungeon_id,)).fetchall()
+                        if dungeon_room<RPG_DUNGEON_ROOMS:
+                            nr=dungeon_room+1
+                            dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND completed=0",(nr,int(time.time()),dungeon_id))
+                            # Nivel medio del grupo para crear un único rival compartido de la siguiente sala.
+                            lv=dc.execute("SELECT COALESCE(AVG(c.level),1) v FROM rpg_dungeon_party_members m JOIN characters c ON c.user_id=m.user_id AND c.is_active=1 WHERE m.dungeon_id=?",(dungeon_id,)).fetchone()
+                            rr=_dungeon_room_state(dc,dungeon_id,nr,int(float((lv or {}).get('v') or 1)),True)
+                            for m in members:
+                                ch=dc.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1",(int(m['user_id']),)).fetchone()
+                                if ch and int(ch.get('hp') or 0)>0:
+                                    _sync_dungeon_battle_from_room(dc,chat_id,int(m['user_id']),int(ch['id']),rr)
+                                else:
+                                    dc.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=? AND dungeon_event_id=?",(int(chat_id),int(m['user_id']),dungeon_id))
                             dc.commit(); dc.close()
-                        if first:
-                            with db_lock:
-                                _pc=get_db(); _pn=_pc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); _pc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=? AND user_id=?",(RPG_DUNGEON_ROOMS,dungeon_id,int(user_id))); _pc.commit(); _pc.close()
-                            _party=max(1,int(_pn['n'] if _pn else 1)); _coop=1.0+min(1.00,0.10*(_party-1)); _kw=int(round(RPG_DUNGEON_FINAL_KW*_coop)); _xp=int(round(RPG_DUNGEON_FINAL_EXP*_coop))
-                            change_kiwons(user_id,_kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada"); grant_rpg_exp(char["id"],_xp)
-                            chest=roll_dungeon_completion_loot(user_id,int(char["id"]),dungeon_id)
-                            chest_txt=(f"\n🎁 Cofre final: {RPG_RARITY_ICON.get(chest['rarity'],'⚪')} {chest['name']}" if chest else "")
-                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 Expedición: {_party} aventureros · bonus de equipo +{int((_coop-1)*100)}%\n🪙 Bono final: +{_kw} KW\n⭐ Bono final: +{_xp} EXP{chest_txt}")
+                            send_message(chat_id,f"🚪 ¡SALA {dungeon_room} SUPERADA EN EQUIPO!\n👥 El daño de toda la expedición contó sobre el mismo enemigo.\n➡️ Todos avanzan a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n⚔️ {rr['enemy_name']}\n❤️ HP compartido: {int(rr['enemy_hp'])}/{int(rr['enemy_max_hp'])}")
+                        else:
+                            dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=?",(int(time.time()),dungeon_id))
+                            dc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,dungeon_id))
+                            dc.execute("DELETE FROM rpg_battles WHERE chat_id=? AND dungeon_event_id=?",(int(chat_id),dungeon_id))
+                            dc.commit(); dc.close()
+                            party=max(1,len(members)); coop=1.0+min(1.00,0.10*(party-1)); kw=int(round(RPG_DUNGEON_FINAL_KW*coop)); xp=int(round(RPG_DUNGEON_FINAL_EXP*coop))
+                            rewarded=[]
+                            for m in members:
+                                muid=int(m['user_id']); mch=get_active_character(muid)
+                                if not mch: continue
+                                change_kiwons(muid,kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada")
+                                grant_rpg_exp(int(mch['id']),xp); chest=roll_dungeon_completion_loot(muid,int(mch['id']),dungeon_id)
+                                rewarded.append(str(mch['name']))
+                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 {party} aventureros llegaron al final juntos.\n🪙 +{kw} KW y ⭐ +{xp} EXP para cada integrante.\n🎁 Cada integrante recibe su propio cofre final.")
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -8902,6 +8939,62 @@ def _spawn_dungeon(chatrow, now=None):
         conn=get_db(); conn.execute("UPDATE rpg_dungeons SET message_id=?,status=? WHERE id=?",(mid,'active' if mid else 'send_failed',did)); conn.commit(); conn.close()
     return bool(mid)
 
+def _dungeon_room_state(conn, dungeon_id, room, level_hint=1, create=True):
+    """Estado ÚNICO del enemigo de una sala cooperativa.
+    Todos los aventureros de la expedición atacan esta misma fila/HP.
+    Debe llamarse dentro de una transacción protegida por db_lock.
+    """
+    dungeon_id=int(dungeon_id); room=int(room); now=int(time.time())
+    row=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,room)).fetchone()
+    party_row=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone()
+    party=max(1,int((party_row or {}).get('n') or 1))
+    if row:
+        # Si alguien se une tarde, la sala sigue siendo compartida y escala una sola vez
+        # por nuevo integrante; conserva el porcentaje de daño que el grupo ya causó.
+        old_party=max(1,int(row.get('party_size') or 1))
+        if row.get('status')=='active' and party>old_party:
+            old_max=max(1,int(row['enemy_max_hp'])); old_hp=max(0,int(row['enemy_hp']))
+            ratio=old_hp/old_max
+            hp_factor=(1.0+0.55*(party-1))/(1.0+0.55*(old_party-1))
+            atk_factor=(1.0+0.08*(party-1))/(1.0+0.08*(old_party-1))
+            new_max=max(old_max,int(round(old_max*hp_factor)))
+            new_hp=max(0,min(new_max,int(round(new_max*ratio))))
+            new_atk=max(1,int(round(int(row['enemy_atk'])*atk_factor)))
+            conn.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=?,enemy_max_hp=?,enemy_atk=?,party_size=?,updated_at=? WHERE dungeon_id=? AND room=?",
+                         (new_hp,new_max,new_atk,party,now,dungeon_id,room))
+            conn.execute("UPDATE rpg_battles SET enemy_hp=?,enemy_max_hp=?,enemy_atk=?,updated_at=? WHERE dungeon_event_id=? AND dungeon_room=?",
+                         (new_hp,new_max,new_atk,now,dungeon_id,room))
+            row=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,room)).fetchone()
+        return row
+    if not create:
+        return None
+    base=random.SystemRandom().choice(RPG_ENEMIES)
+    # Mazmorra > encuentro normal. Más jugadores = más vida y algo más de ataque.
+    depth=1.22 + 0.055*max(0,room-1)
+    party_hp=1.0 + 0.55*max(0,party-1)
+    party_atk=1.0 + 0.08*max(0,party-1)
+    scale=max(0,int(level_hint)-1)
+    hp=max(1,int(round((base['hp']+scale*10)*depth*party_hp)))
+    atk=max(1,int(round((base['atk']+scale*2)*depth*party_atk)))
+    defense=max(0,int(round((base['def']+scale)*depth)))
+    name=f"{base['name']} · Sala {room}"
+    conn.execute("""INSERT INTO rpg_dungeon_rooms
+        (dungeon_id,room,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,party_size,status,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,'active',?,?) ON CONFLICT(dungeon_id,room) DO NOTHING""",
+        (dungeon_id,room,base['key'],name,hp,hp,atk,defense,party,now,now))
+    return conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,room)).fetchone()
+
+def _sync_dungeon_battle_from_room(conn, chat_id, user_id, character_id, roomrow):
+    now=int(time.time())
+    conn.execute("""INSERT INTO rpg_battles
+        (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id,dungeon_event_id,dungeon_room)
+        VALUES(?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'','normal',0,0,?,?)
+        ON CONFLICT(chat_id,user_id) DO UPDATE SET character_id=excluded.character_id,enemy_key=excluded.enemy_key,
+        enemy_name=excluded.enemy_name,enemy_hp=excluded.enemy_hp,enemy_max_hp=excluded.enemy_max_hp,
+        enemy_atk=excluded.enemy_atk,enemy_def=excluded.enemy_def,state='choosing_action',updated_at=excluded.updated_at,
+        dungeon_event_id=excluded.dungeon_event_id,dungeon_room=excluded.dungeon_room""",
+        (int(chat_id),int(user_id),int(character_id),roomrow['enemy_key'],roomrow['enemy_name'],int(roomrow['enemy_hp']),int(roomrow['enemy_max_hp']),int(roomrow['enemy_atk']),int(roomrow['enemy_def']),now,now,int(roomrow['dungeon_id']),int(roomrow['room'])))
+
 def enter_dungeon(chat_id,user_id,dungeon_id):
     now=int(time.time())
     with db_lock:
@@ -8927,9 +9020,18 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
         if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
         if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
         conn.execute("INSERT INTO rpg_dungeon_party_members(dungeon_id,user_id,joined_at,room_cleared,completed) VALUES(?,?,?,0,0) ON CONFLICT(dungeon_id,user_id) DO NOTHING",(int(dungeon_id),int(user_id),now))
-        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone(); conn.commit(); conn.close()
-    enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=enemy["key"],dungeon_event_id=dungeon_id,dungeon_room=room)
-    return (True,f"🏰 {name}\n👥 Expedición cooperativa: {int(party['n'])} aventureros\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
+        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone()
+        char=conn.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1 FOR UPDATE",(int(user_id),)).fetchone()
+        if not char:
+            conn.rollback(); conn.close(); return False,"Necesitas un personaje activo. Usa /crear_personaje."
+        rr=_dungeon_room_state(conn,dungeon_id,room,int(char.get('level') or 1),True)
+        _sync_dungeon_battle_from_room(conn,chat_id,user_id,int(char['id']),rr)
+        conn.commit(); conn.close()
+    eff=effective_character_stats(char)
+    msg=(f"⚔️ {rr['enemy_name']}\n❤️ ENEMIGO COMPARTIDO: {int(rr['enemy_hp'])}/{int(rr['enemy_max_hp'])} HP\n"
+         f"❤️ {char['name']}: {int(char['hp'])}/{eff['max_hp']} HP\n\n"
+         "Todos los miembros de la expedición golpean a ESTE MISMO enemigo. El daño de cualquiera reduce la misma barra de vida.")
+    return True,f"🏰 {name}\n👥 Expedición cooperativa: {int(party['n'])} aventureros\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}"
 
 def spawn_will_epic_event(chatrow, now=None):
     chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
@@ -14040,6 +14142,12 @@ def tavern_page():
 /* cat canvas */#catCanvas{display:block;width:100%;aspect-ratio:1.55;background:#15271d;touch-action:none}.catstage{position:relative}.stick{position:absolute;width:94px;height:94px;border-radius:50%;background:#0007;border:1px solid #ffffff35;display:none;pointer-events:none}.stick i{position:absolute;width:40px;height:40px;left:27px;top:27px;border-radius:50%;background:linear-gradient(#d8b36a,#765021)}
 .relicCard{position:relative;overflow:hidden;border:1px solid #d3a64b;background:radial-gradient(circle at 50% -25%,#ffe49b2e,transparent 38%),linear-gradient(145deg,#2c1d0e,#0b0d12 58%,#201308);box-shadow:0 0 0 1px #6c481c inset,0 12px 30px #000b,0 0 24px #d8a44118}.relicCard:before{content:"RELIQUIA LIMITADA";display:block;margin:-12px -12px 11px;padding:7px 10px;text-align:center;font:800 10px Georgia,serif;letter-spacing:.24em;color:#f8dda0;background:linear-gradient(90deg,#3b230b,#9c6a25,#3b230b);border-bottom:1px solid #d9ad59}.relicCard:after{content:"";position:absolute;inset:-80% -30%;background:linear-gradient(105deg,transparent 44%,#fff4c51a 49%,#fff7d536 50%,#fff4c51a 51%,transparent 56%);transform:translateX(-55%);animation:relicShine 4.8s ease-in-out infinite;pointer-events:none}.relicCard>b{display:block;font:900 22px Georgia,serif;color:#ffe09a;text-shadow:0 0 16px #e0a53b55}.relicStats{position:relative;z-index:1;margin:10px 0;padding:10px;border-radius:10px;border:1px solid #725021;background:#07090dbd;color:#d9c59b;font-size:12px;line-height:1.6}.relicStats b{color:#ffd778;letter-spacing:.05em}.relicCard .primary{position:relative;z-index:2;box-shadow:0 0 18px #dca74435,inset 0 1px #fff3}.relicCard .primary:not(:disabled){animation:relicPulse 2.2s ease-in-out infinite}.relicCard button:disabled{filter:grayscale(.65);opacity:.55}.relicDivider{grid-column:1/-1;padding:16px 4px 5px;text-align:center;font:900 13px Georgia,serif;letter-spacing:.2em;color:#e7c16f;text-shadow:0 0 14px #c88b32}.relicDivider small{display:block;margin-top:5px;font:500 11px system-ui;letter-spacing:.04em;color:#93836b}@keyframes relicShine{0%,60%{transform:translateX(-70%)}82%,100%{transform:translateX(70%)}}@keyframes relicPulse{50%{box-shadow:0 0 28px #e4b85b66,inset 0 1px #fff4}}
 .rewardcard{padding:12px;border:1px solid #3d3425;border-radius:14px;background:linear-gradient(145deg,#18140e,#0b0d11);margin:8px 0}.rewardcard.ready{border-color:#b98a3d;box-shadow:0 0 18px #d6a64b18}.rewardcard b{color:#efcc7b}.rankrow{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid #282c35;padding:8px 0}.drink{display:flex;justify-content:space-between;align-items:center;gap:8px}.toast{position:sticky;bottom:8px;z-index:50;background:#21170d;border:1px solid #8b632b;padding:12px;border-radius:12px;text-align:center;display:none}@media(max-width:640px){.grid{grid-template-columns:1fr}.app{padding:9px}.hero{padding:16px}.roulette-stage{min-height:200px}.btn,.nav button{min-height:46px}}@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+
+/* ===== KIW CASINO EXPERIENCE v2: lobby -> juego a pantalla completa ===== */
+body.game-open{overflow:hidden;background:#030406}.game-card{position:relative;transition:transform .2s ease,border-color .2s ease}.game-launch{width:100%;margin-top:10px;min-height:48px;border:1px solid #d7ad58;background:linear-gradient(180deg,#b67b2c,#5b3511);color:#fff4d4;border-radius:12px;font-weight:950;letter-spacing:.08em;box-shadow:0 8px 24px #0008,inset 0 1px #fff5}.game-launch:active{transform:scale(.985)}
+.game-card.focused{position:fixed!important;z-index:1000;inset:0!important;width:100vw!important;height:100dvh!important;max-width:none!important;margin:0!important;border:0!important;border-radius:0!important;padding:clamp(12px,2vw,28px)!important;overflow:auto!important;background:radial-gradient(circle at 50% -10%,#3a2412 0,#11141b 34%,#05070a 78%)!important;box-shadow:none!important}.game-card.focused>h3{font:900 clamp(25px,5vw,44px) Georgia,serif;text-align:center;color:#f6d681;letter-spacing:.05em;text-shadow:0 3px 18px #000}.game-card.focused>.explain{text-align:center;max-width:760px;margin:0 auto 10px;font-size:14px}.game-card.focused .stage{max-width:1050px;margin:12px auto;min-height:min(56dvh,620px);border-radius:22px}.game-card.focused .result,.game-card.focused>.choices,.game-card.focused>.bet,.game-card.focused>.numchoices,.game-card.focused>.roulette-bets,.game-card.focused>#dicechoices{max-width:920px;margin-left:auto;margin-right:auto}.game-card.focused .game-launch{display:none}.game-back{position:sticky;top:0;z-index:30;border:1px solid #b98a3e;background:#0b0d11e8;color:#f6d681;border-radius:999px;padding:10px 15px;font-weight:900;backdrop-filter:blur(10px);box-shadow:0 6px 20px #0008}.game-card.focused.slot-focus .slot-machine{min-height:min(60dvh,650px);display:flex;flex-direction:column;justify-content:center;background:radial-gradient(circle at 50% 10%,#7b371d,#2b0c13 38%,#10070a 75%);border:5px solid #d7a43e;box-shadow:0 0 0 5px #4e260e,0 0 55px #c8872440,inset 0 0 80px #000}.game-card.focused .slot-top{font-size:clamp(18px,4vw,34px);color:#ffe083;text-shadow:0 0 18px #ffb32c;letter-spacing:.12em}.game-card.focused .reel-window{gap:12px;padding:16px;border:5px solid #201006;background:linear-gradient(#090909,#23130a,#090909);box-shadow:inset 0 0 35px #000,0 0 24px #f1bd4c22}.game-card.focused .reel{height:clamp(180px,38dvh,390px);border:4px solid #c6974a;background:linear-gradient(#fff4cf,#f7e7b5 45%,#fff9e9 50%,#e2c986);box-shadow:inset 0 0 35px #5b351955}.game-card.focused .sigil{width:clamp(100px,18vw,190px);height:clamp(100px,18vw,190px)}.game-card.focused .payline{height:4px;box-shadow:0 0 18px #ffe063,0 0 35px #ff9f22;margin:-20dvh 8px 20dvh}.game-card.focused.roulette-focus .roulette-stage{min-height:min(62dvh,690px);background:radial-gradient(ellipse,#15523d 0,#082d22 55%,#03140f);border:5px solid #7d5728}.game-card.focused .wheel{width:min(72vw,560px);height:min(72vw,560px);border-width:18px;box-shadow:0 0 0 9px #3a210b,0 20px 55px #000c,inset 0 0 0 48px #d6b36a}.game-card.focused .wheel:after{inset:29%;box-shadow:0 0 0 8px #281708}.game-card.focused .ball{width:16px;height:16px;top:10px;transform-origin:0 calc(min(36vw,280px) - 18px)}.wheel-label{position:absolute;left:50%;top:50%;width:25px;height:25px;margin:-12px;display:grid;place-items:center;font:bold 10px Georgia;color:#fff;text-shadow:0 1px 3px #000;transform:rotate(var(--a)) translateY(calc(-1 * min(30vw,232px))) rotate(calc(-1 * var(--a)));z-index:3;pointer-events:none}.game-card.focused.blackjack-focus .table{min-height:min(57dvh,620px);border:10px solid #6c3d17;border-radius:50% 50% 22px 22px;padding:28px;background:radial-gradient(ellipse at 50% 30%,#0d805a,#06432f 60%,#03271d);box-shadow:inset 0 0 0 4px #b98842,inset 0 0 65px #001b13,0 25px 55px #000b}.game-card.focused .hand{min-height:145px;justify-content:center}.game-card.focused .playing-card{width:clamp(70px,12vw,110px);height:clamp(102px,17vw,158px)}.game-card.focused .playing-card .rank{font-size:25px}.game-card.focused .playing-card .suit{font-size:48px}.game-card.focused.flight-focus .flight-stage,.game-card.focused.cat-focus .catstage{min-height:calc(100dvh - 235px);max-width:none}.game-card.focused #flightCanvas,.game-card.focused #catCanvas{width:100%;height:calc(100dvh - 235px);aspect-ratio:auto}.game-card.focused.memory-focus .memory-pad{max-width:min(75vw,620px);height:min(62dvh,620px)}.game-card.focused.memory-focus .mem{height:auto}.game-card.focused.chess-focus .chess-wrap{max-width:min(78dvh,780px)}.game-card.focused.cups-focus .cups-stage,.game-card.focused.dice-focus .dice-stage,.game-card.focused.highcard-focus .versus{min-height:min(58dvh,600px)}
+/* Reliquias físicas: armas sobre estante */.relic-display{height:210px;margin:10px 0 14px;position:relative;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 88%,#d9a34b33,transparent 45%),linear-gradient(180deg,#090a0d,#160e07);border:1px solid #5e3d17;border-radius:14px;overflow:hidden}.relic-display:before{content:"";position:absolute;left:7%;right:7%;bottom:25px;height:17px;background:linear-gradient(#b88742,#54300f);border-radius:4px;box-shadow:0 10px 18px #000}.weapon{position:relative;width:170px;height:170px;filter:drop-shadow(0 10px 8px #000) drop-shadow(0 0 10px #e3b55b55);transform:rotate(-35deg)}.weapon.sword:before{content:"";position:absolute;left:78px;top:5px;width:16px;height:118px;background:linear-gradient(90deg,#747b86,#f8f3d9 45%,#a9afb7 60%,#4c535e);clip-path:polygon(50% 0,100% 12%,82% 100%,18% 100%,0 12%)}.weapon.sword:after{content:"";position:absolute;left:44px;top:116px;width:84px;height:12px;background:linear-gradient(#f0c765,#7d4d13);border-radius:7px;box-shadow:36px 24px 0 -2px #6f3e16}.weapon.staff{transform:rotate(-18deg)}.weapon.staff:before{content:"";position:absolute;left:79px;top:24px;width:13px;height:137px;background:linear-gradient(90deg,#3a1d0d,#b17b36,#45220e);border-radius:8px}.weapon.staff:after{content:"";position:absolute;left:53px;top:0;width:64px;height:64px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#e9ffff,#54d5ff 25%,#4162e8 58%,#291469 75%);box-shadow:0 0 28px #61dfff}.weapon.bow{transform:rotate(-18deg)}.weapon.bow:before{content:"";position:absolute;left:45px;top:8px;width:78px;height:150px;border:9px solid #d7a84c;border-left-color:transparent;border-radius:50%;box-shadow:inset -4px 0 #6d3f14}.weapon.bow:after{content:"";position:absolute;left:53px;top:14px;width:2px;height:143px;background:#e7dfc6;transform:rotate(-15deg);transform-origin:center}.weapon.katana:before{content:"";position:absolute;left:80px;top:4px;width:10px;height:125px;background:linear-gradient(90deg,#929aa2,#fff 45%,#777f87);border-radius:80% 0 0 0;transform:skewX(-6deg)}.weapon.katana:after{content:"";position:absolute;left:51px;top:124px;width:70px;height:9px;background:#c79a38;border-radius:50%;box-shadow:31px 24px 0 1px #251710}.relic-stock{position:absolute;right:10px;top:10px;padding:5px 8px;border:1px solid #b98b3d;border-radius:999px;background:#090a0dcc;color:#ffd87d;font-size:11px;font-weight:900}
+@media(max-width:640px){.game-card.focused{padding:9px!important}.game-card.focused .stage{min-height:50dvh}.game-card.focused .wheel{width:min(88vw,500px);height:min(88vw,500px)}.wheel-label{display:none}.game-back{font-size:13px}.relic-display{height:175px}.weapon{transform:scale(.86) rotate(-35deg)}}
 </style></head><body><main class="app"><section class="hero"><div class="brand">TABERNA DE MALKOR</div><div class="muted">Sala privada de juegos · Kiwons</div><div class="balance" id="bal">— KW</div><div id="effect" class="muted"></div></section><nav class="nav"><button class="on" data-p="casino">Casino</button><button data-p="arcade">Arcade</button><button data-p="bar">Barra</button><button data-p="shop">Tienda</button><button data-p="rewards">Recompensas</button><button data-p="rank">Rankings</button></nav>
 <section id="casino" class="panel on"><div class="grid">
 <div class="card"><h3>KiwSlot</h3><p class="explain">Tres figuras iguales activan premio. La huella es el gran premio.</p><input class="bet" id="slotbet" type="number" value="500" min="100" max="10000"><div class="stage slot-machine" id="slotMachine"><div class="slot-top">MALKOR GRAND HALL</div><div class="reel-window" id="reels"><div class="reel"><div class="reel-symbol"><i class="sigil gem"></i></div></div><div class="reel"><div class="reel-symbol"><i class="sigil crown"></i></div></div><div class="reel"><div class="reel-symbol"><i class="sigil fish"></i></div></div></div><div class="payline"></div></div><button class="btn primary" id="slotgo">GIRAR CARRETES</button><div class="result" id="slotres"></div></div>
@@ -14082,8 +14190,17 @@ $('catjoin').onclick=async()=>{const j=await api('/rpg/api/tavern/cat',{action:'
 function renderChess(j){if(j)chessGame=j;if(!chessGame)return;chessLegal=chessGame.legal||[];const bd=$('chessBoard');bd.innerHTML='';for(let i=0;i<64;i++){const q=document.createElement('button'),p=chessGame.board[i]||'';q.className='chess-sq '+((((i%8)+Math.floor(i/8))%2)?'dark':'light')+(p&&p===p.toLowerCase()?' blackpiece':'');if(i===chessSel)q.classList.add('sel');const lm=chessLegal.filter(m=>m[0]===chessSel&&m[1]===i);if(lm.length)q.classList.add(p?'capture':'move');q.textContent=chessGlyph[p]||'';q.onclick=()=>chessTap(i);bd.appendChild(q)}let txt=chessGame.status==='waiting'?'Buscando rival…':chessGame.status==='active'?(chessGame.turn==='w'?'Turno: blancas':'Turno: negras'):(chessGame.winner==='draw'?'Tablas':(chessGame.winner===chessGame.side?'Victoria':(chessGame.mode==='pvp'?'Derrota':'Malkor gana')));$('chessStatus').textContent=txt;$('chessRes').textContent=chessGame.status==='waiting'?'Matchmaking global · el tablero se abrirá cuando entre otro jugador.':chessGame.status==='active'?(chessGame.mode==='pvp'?('PVP ELO · juegas con '+(chessGame.side==='w'?'blancas':'negras')+' · movimientos legales: '+chessLegal.length):'Nivel '+String(chessGame.cpu_level||'').toUpperCase()+' · movimientos legales: '+chessLegal.length):txt;}
 async function chessTap(i){if(!chessGame||chessGame.status!=='active'||chessGame.turn!==chessGame.side)return;const own=(chessGame.board[i]||'');const isOwn=own&&(chessGame.side==='w'?own===own.toUpperCase():own===own.toLowerCase());if(chessSel===null){if(isOwn&&chessLegal.some(m=>m[0]===i)){chessSel=i;renderChess();}return}const opts=chessLegal.filter(m=>m[0]===chessSel&&m[1]===i);if(!opts.length){chessSel=isOwn?i:null;renderChess();return}let promotion=opts[0][2]||'q';if(opts.some(m=>m[2])){const x=(prompt('Promoción: Q, R, B o N','Q')||'Q').toLowerCase();promotion='qrbn'.includes(x)?x:'q'}const from=chessSel;chessSel=null;$('chessStatus').textContent='Malkor está pensando…';$('chessBoard').classList.add('thinking');const j=await api('/rpg/api/tavern/chess',{action:'move',game_id:chessGame.game_id,from,to:i,promotion});$('chessBoard').classList.remove('thinking');if(j.ok){renderChess(j);if(j.status!=='active')haptic(j.winner===j.side?'heavy':'medium')}else{$('chessRes').textContent=j.message||'Movimiento rechazado';renderChess()}}
 document.querySelectorAll('.chessNew').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const j=await api('/rpg/api/tavern/chess',{action:'start_cpu',level:b.dataset.lv});if(j.ok){chessSel=null;renderChess(j);toast('Partida contra Malkor iniciada')}}finally{b.disabled=false}});$('chessPvp').onclick=async()=>{const b=$('chessPvp');b.disabled=true;try{const j=await api('/rpg/api/tavern/chess',{action:'start_pvp'});if(j.ok){chessSel=null;renderChess(j);toast(j.status==='waiting'?'Buscando rival…':'Rival encontrado.')}}finally{b.disabled=false}};setInterval(async()=>{if(document.hidden||!chessGame||chessGame.mode!=='pvp'||!['waiting','active'].includes(chessGame.status))return;const j=await api('/rpg/api/tavern/chess',{action:'state',game_id:chessGame.game_id});if(j.ok){const was=chessGame.status;renderChess(j);if(was==='waiting'&&j.status==='active')toast('Rival encontrado. Comienza la partida.')}},1800);
-async function loadShop(){const j=await api('/rpg/api/tavern/shop',{action:'state'});if(!j.ok)return;const arr=j.items||[],normal=arr.filter(a=>a.kind!=='relic'),relics=arr.filter(a=>a.kind==='relic');$('shopItems').innerHTML=[...normal,{divider:true},...relics].map(a=>{if(a.divider)return `<div class="relicDivider">CÁMARA DE RELIQUIAS<small>Solo existen dos ejemplares globales de cada arma · 1,000,000 KW</small></div>`;const relic=a.kind==='relic';const info=relic?`<div class="relicStats">JURAMENTO DE CLASE · ${a.class_name}<br>ATK +${a.atk} · DEF +${a.defense} · HP +${a.hp}<br><b>STOCK GLOBAL ${a.stock}/${a.global_stock}</b>${a.quantity?' · EJEMPLAR EN TU INVENTARIO':a.compatible?' · COMPATIBLE':' · OTRA CLASE'}</div>`:'';const disabled=(a.quantity&&!a.repeatable)||(relic&&(!a.compatible||a.stock<=0));return `<div class="rewardcard ${relic?'relicCard':''}"><b>${relic?'✦ ':''}${a.name}</b><div class="explain">${a.kind.toUpperCase()} · ${Number(a.price).toLocaleString()} KW${a.quantity?' · Tienes '+a.quantity:''}</div>${info}<div class="choices"><button class="btn shopBuy ${relic?'primary':''}" data-k="${a.key}" ${disabled?'disabled':''}>${relic?(a.stock<=0?'AGOTADA':'RECLAMAR RELIQUIA'):'COMPRAR'}</button>${a.kind==='chest'&&a.quantity?`<button class="btn primary shopOpen" data-k="${a.key}">ABRIR</button>`:''}</div></div>`}).join('');document.querySelectorAll('.shopBuy').forEach(b=>b.onclick=()=>shopAct('buy',b.dataset.k,b));document.querySelectorAll('.shopOpen').forEach(b=>b.onclick=()=>shopAct('open',b.dataset.k,b))}async function shopAct(action,key,btn){btn.disabled=true;const j=await api('/rpg/api/tavern/shop',{action,key});$('shopRes').textContent=j.message||'';if(j.ok){haptic('heavy');loadShop()}else btn.disabled=false}
+function relicVisual(a){const n=String(a.name||'').toLowerCase();let t=n.includes('merl')?'staff':n.includes('gandiva')?'bow':(n.includes('kusanagi')||n.includes('masamune'))?'katana':'sword';return `<div class="relic-display"><div class="weapon ${t}"></div><div class="relic-stock">${Number(a.stock||0)}/${Number(a.global_stock||2)} EN EL MUNDO</div></div>`}async function loadShop(){const j=await api('/rpg/api/tavern/shop',{action:'state'});if(!j.ok)return;const arr=j.items||[],normal=arr.filter(a=>a.kind!=='relic'),relics=arr.filter(a=>a.kind==='relic');$('shopItems').innerHTML=[...normal,{divider:true},...relics].map(a=>{if(a.divider)return `<div class="relicDivider">CÁMARA DE RELIQUIAS<small>Solo existen dos ejemplares globales de cada arma · 1,000,000 KW</small></div>`;const relic=a.kind==='relic';const info=relic?`<div class="relicStats">JURAMENTO DE CLASE · ${a.class_name}<br>ATK +${a.atk} · DEF +${a.defense} · HP +${a.hp}<br><b>STOCK GLOBAL ${a.stock}/${a.global_stock}</b>${a.quantity?' · EJEMPLAR EN TU INVENTARIO':a.compatible?' · COMPATIBLE':' · OTRA CLASE'}</div>`:'';const disabled=(a.quantity&&!a.repeatable)||(relic&&(!a.compatible||a.stock<=0));return `<div class="rewardcard ${relic?'relicCard':''}"><b>${relic?'✦ ':''}${a.name}</b><div class="explain">${a.kind.toUpperCase()} · ${Number(a.price).toLocaleString()} KW${a.quantity?' · Tienes '+a.quantity:''}</div>${relic?relicVisual(a):''}${info}<div class="choices"><button class="btn shopBuy ${relic?'primary':''}" data-k="${a.key}" ${disabled?'disabled':''}>${relic?(a.stock<=0?'AGOTADA':'RECLAMAR RELIQUIA'):'COMPRAR'}</button>${a.kind==='chest'&&a.quantity?`<button class="btn primary shopOpen" data-k="${a.key}">ABRIR</button>`:''}</div></div>`}).join('');document.querySelectorAll('.shopBuy').forEach(b=>b.onclick=()=>shopAct('buy',b.dataset.k,b));document.querySelectorAll('.shopOpen').forEach(b=>b.onclick=()=>shopAct('open',b.dataset.k,b))}async function shopAct(action,key,btn){btn.disabled=true;const j=await api('/rpg/api/tavern/shop',{action,key});$('shopRes').textContent=j.message||'';if(j.ok){haptic('heavy');loadShop()}else btn.disabled=false}
 async function loadRewards(){const j=await api('/rpg/api/tavern/rewards',{action:'state'});if(!j.ok)return;$('dailyInfo').textContent=j.daily.available?('Cofre disponible · racha actual '+Number(j.daily.streak||0)):'Ya reclamado hoy · racha '+Number(j.daily.streak||0);$('dailyClaim').disabled=!j.daily.available;$('achievements').innerHTML=(j.achievements||[]).map(a=>`<div class="rewardcard ${a.unlocked&&!a.claimed?'ready':''}"><b>${a.name}</b><div class="explain">${a.description}</div><div>${Number(a.reward).toLocaleString()} KW · ${a.claimed?'Cobrado':a.unlocked?`<button class="btn achClaim" data-k="${a.key}">RECLAMAR</button>`:'Bloqueado'}</div></div>`).join('');document.querySelectorAll('.achClaim').forEach(b=>b.onclick=async()=>{b.disabled=true;const z=await api('/rpg/api/tavern/rewards',{action:'claim',key:b.dataset.k});if(z.ok){toast('Logro cobrado: +'+Number(z.reward).toLocaleString()+' KW');haptic('medium');loadRewards()}else b.disabled=false})}$('dailyClaim').onclick=async()=>{const b=$('dailyClaim');b.disabled=true;const j=await api('/rpg/api/tavern/rewards',{action:'daily'});if(j.ok){toast('Cofre diario: +'+Number(j.reward).toLocaleString()+' KW · racha '+j.streak);haptic('medium');state()}loadRewards()};
+
+// ===== Lobby real: cada juego entra a su propia pantalla =====
+const GAME_TITLES={KiwSlot:'slot-focus',Blackjack:'blackjack-focus',Ruleta:'roulette-focus','Las tres copas':'cups-focus',Dados:'dice-focus','Carta Mayor':'highcard-focus','El Vuelo de Malkor':'flight-focus','Memoria de Malkor':'memory-focus','CAT.IO':'cat-focus','Ajedrez de Malkor':'chess-focus'};
+let activeGame=null;
+function closeGame(){if(!activeGame)return;activeGame.classList.remove('focused');document.body.classList.remove('game-open');activeGame.querySelector('.game-back')?.remove();activeGame=null;window.scrollTo({top:0,behavior:'instant'});}
+function openGame(card,kind){if(activeGame)closeGame();activeGame=card;card.classList.add('focused',kind);document.body.classList.add('game-open');const back=document.createElement('button');back.className='game-back';back.textContent='← VOLVER A LA TABERNA';back.onclick=closeGame;card.insertBefore(back,card.firstChild);card.scrollTop=0;tg?.HapticFeedback?.impactOccurred('light');}
+document.querySelectorAll('#casino .card,#arcade .card').forEach(card=>{const title=card.querySelector('h3')?.textContent?.trim();const kind=GAME_TITLES[title];if(!kind)return;card.classList.add('game-card',kind);const b=document.createElement('button');b.className='game-launch';b.textContent='JUGAR · '+title.toUpperCase();b.onclick=()=>openGame(card,kind);card.appendChild(b);});
+// Números reales alrededor de la ruleta europea (decoración visual; el servidor decide el resultado)
+(()=>{const w=$('wheel');if(!w||w.querySelector('.wheel-label'))return;const order=[0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];order.forEach((n,i)=>{const e=document.createElement('i');e.className='wheel-label';e.textContent=n;e.style.setProperty('--a',(i*360/order.length)+'deg');w.appendChild(e)});})();
 loadCatCatalog();
 if(!init)toast('Abre la Taberna desde KiwBot en Telegram.');state();
 </script></body></html>

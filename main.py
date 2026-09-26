@@ -4355,13 +4355,39 @@ def grant_rpg_exp(character_id, amount):
 
 
 RPG_TECHNIQUE_CATALOG = {
-    "hidden_blade": {"key":"hidden_blade","emoji":"🗡️","name":"Hidden Blade","power":1.180,"pen":0.35,"high_roll_bonus":0.12,"special":True,"cooldown":3,"rarity":"raro","price":4200},
-    "golpe_impulso": {"key":"golpe_impulso","emoji":"💥","name":"Golpe de Impulso","power":1.020,"pen":0.08,"cooldown":0,"rarity":"comun","price":700},
-    "corte_lunar": {"key":"corte_lunar","emoji":"🌙","name":"Corte Lunar","power":1.100,"pen":0.18,"special":True,"cooldown":2,"rarity":"poco_comun","price":1500},
-    "ruptura_carmesi": {"key":"ruptura_carmesi","emoji":"🩸","name":"Ruptura Carmesí","power":1.220,"pen":0.28,"special":True,"cooldown":3,"rarity":"raro","price":3600},
-    "impacto_vacio": {"key":"impacto_vacio","emoji":"🌌","name":"Impacto del Vacío","power":1.360,"pen":0.38,"special":True,"cooldown":4,"rarity":"ultra_raro","price":7600},
-    "juicio_dragon": {"key":"juicio_dragon","emoji":"🐲","name":"Juicio del Dragón","power":1.520,"pen":0.45,"ultimate":True,"cooldown":5,"rarity":"legendario","price":14500},
-    "fin_del_reino": {"key":"fin_del_reino","emoji":"👑","name":"Fin del Reino","power":1.680,"pen":0.55,"ultimate":True,"cooldown":6,"rarity":"mitico","price":24000},
+    # Recompensa exclusiva de la misión de Will Ospreay. No aparece en tiendas.
+    "hidden_blade": {"key":"hidden_blade","emoji":"🗡️","name":"Hidden Blade","power":1.180,"pen":0.35,"high_roll_bonus":0.12,"special":True,"cooldown":3,"rarity":"raro","price":4200,"shop":False,"merchant":False},
+
+    # COMUNES — baratos y frecuentes.
+    "golpe_impulso": {"key":"golpe_impulso","emoji":"💥","name":"Golpe de Impulso","power":1.020,"pen":0.08,"cooldown":0,"rarity":"comun","price":700,"shop":True,"merchant":True},
+    "corte_veloz": {"key":"corte_veloz","emoji":"⚡","name":"Corte Veloz","power":1.040,"pen":0.10,"cooldown":1,"rarity":"comun","price":800,"shop":True,"merchant":True},
+    "martillazo": {"key":"martillazo","emoji":"🔨","name":"Martillazo","power":1.060,"pen":0.12,"cooldown":1,"rarity":"comun","price":900,"shop":True,"merchant":True},
+    "flecha_certera": {"key":"flecha_certera","emoji":"🏹","name":"Flecha Certera","power":1.070,"pen":0.14,"cooldown":1,"rarity":"comun","price":1000,"shop":True,"merchant":True},
+    "onda_arcana": {"key":"onda_arcana","emoji":"🔮","name":"Onda Arcana","power":1.080,"pen":0.15,"cooldown":1,"rarity":"comun","price":1100,"shop":True,"merchant":True},
+
+    # POCO COMUNES — siguen siendo alcanzables, pero ya exigen elegir mejor los huecos.
+    "corte_lunar": {"key":"corte_lunar","emoji":"🌙","name":"Corte Lunar","power":1.100,"pen":0.18,"special":True,"cooldown":2,"rarity":"poco_comun","price":1500,"shop":True,"merchant":True},
+    "colmillo_lobo": {"key":"colmillo_lobo","emoji":"🐺","name":"Colmillo del Lobo","power":1.130,"pen":0.20,"special":True,"cooldown":2,"rarity":"poco_comun","price":1800,"shop":True,"merchant":True},
+    "lanza_tormenta": {"key":"lanza_tormenta","emoji":"🌩️","name":"Lanza de Tormenta","power":1.150,"pen":0.22,"special":True,"cooldown":2,"rarity":"poco_comun","price":2100,"shop":True,"merchant":True},
+    "puño_titan": {"key":"puño_titan","emoji":"👊","name":"Puño del Titán","power":1.170,"pen":0.24,"special":True,"cooldown":2,"rarity":"poco_comun","price":2400,"shop":True,"merchant":True},
+
+    # RARAS.
+    "ruptura_carmesi": {"key":"ruptura_carmesi","emoji":"🩸","name":"Ruptura Carmesí","power":1.220,"pen":0.28,"special":True,"cooldown":3,"rarity":"raro","price":3600,"shop":False,"merchant":True},
+    "eclipse_negro": {"key":"eclipse_negro","emoji":"🌑","name":"Eclipse Negro","power":1.250,"pen":0.30,"special":True,"cooldown":3,"rarity":"raro","price":4100,"shop":False,"merchant":True},
+    "danza_cuervos": {"key":"danza_cuervos","emoji":"🐦‍⬛","name":"Danza de Cuervos","power":1.280,"pen":0.32,"special":True,"cooldown":3,"rarity":"raro","price":4600,"shop":False,"merchant":True},
+
+    # ULTRA RARAS.
+    "impacto_vacio": {"key":"impacto_vacio","emoji":"🌌","name":"Impacto del Vacío","power":1.360,"pen":0.38,"special":True,"cooldown":4,"rarity":"ultra_raro","price":7600,"shop":False,"merchant":True},
+    "furia_fenix": {"key":"furia_fenix","emoji":"🔥","name":"Furia del Fénix","power":1.400,"pen":0.40,"special":True,"cooldown":4,"rarity":"ultra_raro","price":8500,"shop":False,"merchant":True},
+    "abismo_estelar": {"key":"abismo_estelar","emoji":"☄️","name":"Abismo Estelar","power":1.440,"pen":0.42,"special":True,"cooldown":4,"rarity":"ultra_raro","price":9500,"shop":False,"merchant":True},
+
+    # LEGENDARIAS — extremadamente poco frecuentes en Malkor.
+    "juicio_dragon": {"key":"juicio_dragon","emoji":"🐲","name":"Juicio del Dragón","power":1.520,"pen":0.45,"ultimate":True,"cooldown":5,"rarity":"legendario","price":14500,"shop":False,"merchant":True},
+    "espada_valquiria": {"key":"espada_valquiria","emoji":"🪽","name":"Espada de la Valquiria","power":1.560,"pen":0.48,"ultimate":True,"cooldown":5,"rarity":"legendario","price":16500,"shop":False,"merchant":True},
+    "ira_dios_caido": {"key":"ira_dios_caido","emoji":"⚜️","name":"Ira del Dios Caído","power":1.600,"pen":0.50,"ultimate":True,"cooldown":5,"rarity":"legendario","price":18500,"shop":False,"merchant":True},
+
+    # MÍTICA — el premio gordo de una aparición de Malkor.
+    "fin_del_reino": {"key":"fin_del_reino","emoji":"👑","name":"Fin del Reino","power":1.680,"pen":0.55,"ultimate":True,"cooldown":6,"rarity":"mitico","price":24000,"shop":False,"merchant":True},
 }
 HIDDEN_BLADE_ABILITY = RPG_TECHNIQUE_CATALOG["hidden_blade"]
 
@@ -6265,7 +6291,14 @@ RPG_SHOP = {
     "guantes_viajero": {"price": 500, "label": "Guantes del Viajero", "desc": "Guantes básicos."},
     "botas_sendero": {"price": 500, "label": "Botas del Sendero", "desc": "Botas básicas."},
     "golpe_impulso": {"price": 700, "label": "Técnica: Golpe de Impulso", "desc": "Desbloquea una técnica PvE común · DMG ×1.02."},
+    "corte_veloz": {"price": 800, "label": "Técnica: Corte Veloz", "desc": "Desbloquea una técnica PvE común · DMG ×1.04."},
+    "martillazo": {"price": 900, "label": "Técnica: Martillazo", "desc": "Desbloquea una técnica PvE común · DMG ×1.06."},
+    "flecha_certera": {"price": 1000, "label": "Técnica: Flecha Certera", "desc": "Desbloquea una técnica PvE común · DMG ×1.07."},
+    "onda_arcana": {"price": 1100, "label": "Técnica: Onda Arcana", "desc": "Desbloquea una técnica PvE común · DMG ×1.08."},
     "corte_lunar": {"price": 1500, "label": "Técnica: Corte Lunar", "desc": "Desbloquea una técnica PvE poco común · DMG ×1.10."},
+    "colmillo_lobo": {"price": 1800, "label": "Técnica: Colmillo del Lobo", "desc": "Desbloquea una técnica PvE poco común · DMG ×1.13."},
+    "lanza_tormenta": {"price": 2100, "label": "Técnica: Lanza de Tormenta", "desc": "Desbloquea una técnica PvE poco común · DMG ×1.15."},
+    "puño_titan": {"price": 2400, "label": "Técnica: Puño del Titán", "desc": "Desbloquea una técnica PvE poco común · DMG ×1.17."},
 }
 
 def rpg_shop_keyboard(user_id):
@@ -7792,6 +7825,8 @@ def spawn_merchant(chatrow, now=None, forced=False):
             conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=?,updated_at=? WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,now,chat_id)); conn.commit(); conn.close(); return False
         if forced: conn.execute("UPDATE rpg_merchants SET status='expired' WHERE chat_id=? AND status='active'",(chat_id,))
         for tk,a in RPG_TECHNIQUE_CATALOG.items():
+            if not a.get("merchant",True):
+                continue
             conn.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level) VALUES(?,?,?,'tecnica',?,0,0,0,NULL,0,?,'','',1) ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,item_type='tecnica',description=EXCLUDED.description""",(tk,a['name'],a.get('rarity','comun'),f"Técnica PvE · {_ability_power_text(a)} · cooldown {int(a.get('cooldown',0))}",now))
         pool=conn.execute("SELECT item_key,name,rarity,equip_slot,min_level,item_type FROM rpg_items WHERE ((equip_slot IS NOT NULL AND equip_slot<>'') OR item_type='tecnica') AND rarity IN ('comun','poco_comun','raro','ultra_raro','legendario','mitico')").fetchall()
         if len(pool)<6: conn.rollback(); conn.close(); return False
@@ -7803,7 +7838,10 @@ def spawn_merchant(chatrow, now=None, forced=False):
             rs=[x[0] for x in available]; ws=[x[1] for x in available]; rarity=random.choices(rs,weights=ws,k=1)[0]
             cand=[x for x in by[rarity] if x['item_key'] not in used]; it=random.choice(cand); chosen.append(it); used.add(it['item_key'])
         m=conn.execute("INSERT INTO rpg_merchants(chat_id,message_thread_id,status,message_id,spawned_at,expires_at) VALUES(?,?,'active',0,?,?) RETURNING id",(chat_id,int(topic) if topic is not None else None,now,now+RPG_MERCHANT_TTL)).fetchone(); mid=int(m['id'])
-        for it in chosen: conn.execute("INSERT INTO rpg_merchant_offers(merchant_id,item_key,price,sold_by,sold_at) VALUES(?,?,?,0,0)",(mid,it['item_key'],_merchant_price(it['rarity'],it['min_level'])))
+        for it in chosen:
+            tech=RPG_TECHNIQUE_CATALOG.get(str(it['item_key']))
+            price=int(tech.get('price')) if tech else _merchant_price(it['rarity'],it['min_level'])
+            conn.execute("INSERT INTO rpg_merchant_offers(merchant_id,item_key,price,sold_by,sold_at) VALUES(?,?,?,0,0)",(mid,it['item_key'],price))
         conn.execute("UPDATE rpg_auto_chats SET next_merchant_at=?,updated_at=? WHERE chat_id=?",(now+RPG_MERCHANT_INTERVAL,now,chat_id)); conn.commit(); conn.close()
     url=_merchant_private_url(mid); kb={"inline_keyboard":[[{"text":"🛒 Visitar a Malkor en privado","url":url}]]} if url else None
     oldtopic=get_current_message_thread_id()

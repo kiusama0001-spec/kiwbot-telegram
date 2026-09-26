@@ -4514,6 +4514,43 @@ def chronicles_firsts_text():
     for r in rows: lines.append(f"✦ {r['display_name']} — {r['detail']}")
     return "\n".join(lines)
 
+# Protección de acciones de Crónicas/Boss contra doble clic concurrente.
+# Render procesa callbacks en varios hilos; un botón puede llegar dos veces antes
+# de que Telegram alcance a retirar/editar la tarjeta.
+_chron_exp_action_locks = {}
+_chron_exp_action_locks_guard = RLock()
+_boss_action_locks = {}
+_boss_action_locks_guard = RLock()
+_boss_consumed_cards = {}
+_boss_consumed_cards_guard = RLock()
+
+def _boss_claim_card(chat_id, message_id, user_id):
+    if not message_id:
+        return True
+    key=(int(chat_id),int(message_id),int(user_id)); now=time.monotonic()
+    with _boss_consumed_cards_guard:
+        # Limpieza acotada: las tarjetas viejas dejan de importar después de una hora.
+        if len(_boss_consumed_cards)>2000:
+            for k,t in list(_boss_consumed_cards.items()):
+                if now-t>3600: _boss_consumed_cards.pop(k,None)
+        if key in _boss_consumed_cards:
+            return False
+        _boss_consumed_cards[key]=now
+        return True
+
+def _boss_release_card(chat_id, message_id, user_id):
+    if not message_id: return
+    with _boss_consumed_cards_guard:
+        _boss_consumed_cards.pop((int(chat_id),int(message_id),int(user_id)),None)
+
+def _user_action_lock(registry, guard, *parts):
+    key=tuple(int(x) for x in parts)
+    with guard:
+        lock=registry.get(key)
+        if lock is None:
+            lock=threading.Lock(); registry[key]=lock
+    return lock
+
 # =========================================================
 # CRÓNICAS — FASE II: EXPEDICIONES
 # Persistentes, privadas por usuario, callbacks con nonce e idempotencia de cobro.
@@ -4558,7 +4595,8 @@ def _chron_exp_cb(r, action): return f"cex:go:{int(r['nonce'])}:{action}"
 def chron_exp_render(r, scene=None):
     zone=CHRON_EXP_ZONES.get(str(r['zone_key']),CHRON_EXP_ZONES['ash'])[0]
     pending=str(r.get('pending_type') or '')
-    txt=(f"🗺️ EXPEDICIÓN — {zone}\n\n📍 Profundidad: {int(r['depth'])}/{int(r['max_depth'])}\n"
+    owner=_pvp_name(int(r['user_id']))
+    txt=(f"🗺️ EXPEDICIÓN — {zone}\n🧭 Explorador: {owner}\n\n📍 Profundidad: {int(r['depth'])}/{int(r['max_depth'])}\n"
          f"❤️ Estado: {'Estable' if int(r['hp_state'])>=3 else 'Tocado' if int(r['hp_state'])==2 else 'En peligro'}\n"
          f"🎒 Hallazgos: {int(r['findings'])}\n💰 Bolsa: {int(r['reward_kw']):,} KW · 💠 {int(r['reward_essence'])} esencia\n")
     if scene: txt+="\n"+scene
@@ -4580,7 +4618,7 @@ def chron_exp_keyboard(r):
     else: rows=[[b("🔦 Avanzar","advance"),b("↩️ Regresar","retreat")]]
     return {"inline_keyboard":rows}
 
-def chron_exp_start(user_id, chat_id, thread_id, zone):
+def _chron_exp_start_impl(user_id, chat_id, thread_id, zone):
     if zone not in CHRON_EXP_ZONES or not chron_exp_unlocked(user_id,zone): return False,"🔒 Esa ruta todavía no existe para ti.",None
     now=int(time.time()); mx=CHRON_EXP_ZONES[zone][2]
     with db_lock:
@@ -4592,6 +4630,12 @@ def chron_exp_start(user_id, chat_id, thread_id, zone):
                 VALUES(?,?,?,?,0,?,3,0,'','','',0,0,'active',1,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,thread_id=EXCLUDED.thread_id,zone_key=EXCLUDED.zone_key,depth=0,max_depth=EXCLUDED.max_depth,hp_state=3,findings=0,pending_type='',pending_code='',pending_data='',reward_kw=0,reward_essence=0,status='active',nonce=rpg_chronicle_expeditions.nonce+1,started_at=EXCLUDED.started_at,updated_at=EXCLUDED.updated_at""",
                 (int(user_id),int(chat_id),int(thread_id or 0),zone,int(mx),now,now)); c.commit(); row=_chron_exp_row(user_id,False,c); c.close(); return True,"",row
         except Exception: c.rollback(); c.close(); raise
+
+def chron_exp_start(user_id, chat_id, thread_id, zone):
+    # Una sola creación por usuario incluso si pulsa dos veces casi simultáneamente.
+    lock=_user_action_lock(_chron_exp_action_locks,_chron_exp_action_locks_guard,user_id)
+    with lock:
+        return _chron_exp_start_impl(user_id,chat_id,thread_id,zone)
 
 def _chron_exp_new_scene(row, rng=random):
     typ=rng.choice(CHRON_EXP_EVENTS); code=''
@@ -4623,7 +4667,7 @@ def _chron_exp_pay_rewards(user_id,kw,essence,chat_id):
             for _ in range(int(essence)):
                 grant_rpg_item(user_id,int(char['id']),'esencia_tecnica',source='cronicas_expedicion')
 
-def chron_exp_act(user_id,nonce,action,rng=random):
+def _chron_exp_act_impl(user_id,nonce,action,rng=random):
     uid=int(user_id); now=int(time.time()); payout=(0,0); final=None
     with db_lock:
         c=get_db()
@@ -4701,6 +4745,12 @@ def chron_exp_act(user_id,nonce,action,rng=random):
             with db_lock:
                 c=get_db(); c.execute("INSERT INTO rpg_chronicle_zone_unlocks(user_id,zone_key,unlocked_at) VALUES(?,?,?) ON CONFLICT(user_id,zone_key) DO NOTHING",(uid,final[1],now)); c.commit(); c.close()
     return True,scene,nr,None
+
+def chron_exp_act(user_id,nonce,action,rng=random):
+    # Serializa decisiones del mismo usuario. El segundo callback verá el nonce ya consumido.
+    lock=_user_action_lock(_chron_exp_action_locks,_chron_exp_action_locks_guard,user_id)
+    with lock:
+        return _chron_exp_act_impl(user_id,nonce,action,rng)
 
 def chron_exp_status(user_id):
     r=_chron_exp_row(user_id)
@@ -7887,6 +7937,16 @@ def _boss_reward_all(b):
     return len(rows)
 
 def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
+    # El dado y el daño forman una sola acción lógica. Evita dos ataques por doble clic.
+    lock=_user_action_lock(_boss_action_locks,_boss_action_locks_guard,boss_id,user_id)
+    if not lock.acquire(blocking=False):
+        return False,"⏳ Tu acción anterior todavía se está resolviendo."
+    try:
+        return _boss_action_impl(chat_id,user_id,boss_id,ability_key=ability_key,defend=defend)
+    finally:
+        lock.release()
+
+def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
     b=_boss_active(chat_id)
     if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya terminó o expiró."
     p=_boss_participant(boss_id,user_id)
@@ -10277,6 +10337,16 @@ def tavern_callback(user_id,chat_id,data):
 
     return "El tabernero no entendió esa jugada.",tavern_home_keyboard()
 
+def _chron_exp_edit_card(chat_id, message, text, reply_markup=None):
+    mid=int((message or {}).get("message_id") or 0)
+    if mid:
+        payload={"chat_id":int(chat_id),"message_id":mid,"text":str(text)}
+        if reply_markup is not None: payload["reply_markup"]=reply_markup
+        res=telegram("editMessageText",payload)
+        if isinstance(res,dict) and res.get("ok"):
+            return res
+    return send_message(chat_id,text,reply_markup=reply_markup)
+
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
@@ -10288,13 +10358,14 @@ def handle_rpg_callback(query):
             if data.startswith("cex:start:"):
                 zone=data.split(":",2)[2]; ok,note,row=chron_exp_start(uid,chat_id,thread_id,zone)
                 if not ok: send_message(chat_id,note); return True
-                send_message(chat_id,chron_exp_render(row,"🚪 Das el primer paso. Aún puedes regresar... por ahora."),reply_markup=chron_exp_keyboard(row)); return True
+                _chron_exp_edit_card(chat_id,msg,chron_exp_render(row,"🚪 Das el primer paso. Aún puedes regresar... por ahora."),chron_exp_keyboard(row)); return True
             if data.startswith("cex:go:"):
                 _,_,nonce,action=data.split(":",3); ok,note,row,payout=chron_exp_act(uid,int(nonce),action)
                 if payout:
-                    _chron_exp_pay_rewards(uid,payout[0],payout[1],payout[2]); send_message(chat_id,note,reply_markup=chron_exp_zone_keyboard(uid)); return True
-                if not ok: send_message(chat_id,note); return True
-                send_message(chat_id,chron_exp_render(row,note),reply_markup=chron_exp_keyboard(row)); return True
+                    _chron_exp_pay_rewards(uid,payout[0],payout[1],payout[2]); _chron_exp_edit_card(chat_id,msg,note,chron_exp_zone_keyboard(uid)); return True
+                if not ok:
+                    telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":note,"show_alert":False}); return True
+                _chron_exp_edit_card(chat_id,msg,chron_exp_render(row,note),chron_exp_keyboard(row)); return True
         except Exception:
             logger.exception("Error en Expediciones de Crónicas")
             send_message(chat_id,"🗺️ La ruta se volvió inestable. Tu progreso quedó guardado; abre /expedicion otra vez."); return True
@@ -10535,8 +10606,12 @@ def handle_rpg_callback(query):
         _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("boss_atk:"):
-        _,bid,key=data.split(":",2); ok,msg2=boss_action(chat_id,uid,int(bid),ability_key=key)
-        if not ok: send_message(chat_id,msg2)
+        _,bid,key=data.split(":",2); mid=int(msg.get("message_id") or 0)
+        if not _boss_claim_card(chat_id,mid,uid):
+            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"⏳ Ese ataque ya fue enviado.","show_alert":False}); return True
+        ok,msg2=boss_action(chat_id,uid,int(bid),ability_key=key)
+        if not ok:
+            _boss_release_card(chat_id,mid,uid); send_message(chat_id,msg2)
         else: _delete_old_combat_card(chat_id,msg)
         return True
     if data.startswith("pvp_accept:"):

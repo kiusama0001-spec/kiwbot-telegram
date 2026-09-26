@@ -577,6 +577,7 @@ def init_db():
         cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS defeated_until BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS ultimate_cd BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS special_cd BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS hidden_blade_cd BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS defending BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_battles ADD COLUMN IF NOT EXISTS last_action TEXT DEFAULT ''")
         # KiwRPG V5.1: rareza y contador mundial de encuentros.
@@ -4419,6 +4420,15 @@ def technique_level(user_id,key):
             (int(user_id),str(key))).fetchone(); conn.close()
     return max(1,min(RPG_TECHNIQUE_MAX_LEVEL,int(row['level']) if row else 1))
 
+def technique_levels_for_user(user_id):
+    """Carga todos los niveles de técnicas del usuario en una sola consulta."""
+    _ensure_technique_levels_table()
+    with db_lock:
+        conn=get_db(); rows=conn.execute(
+            "SELECT technique_key,level FROM rpg_technique_levels WHERE user_id=?",
+            (int(user_id),)).fetchall(); conn.close()
+    return {str(r['technique_key']): max(1,min(RPG_TECHNIQUE_MAX_LEVEL,int(r['level']))) for r in rows}
+
 def _technique_owned(user_id,class_name,key):
     if str(key)=="hidden_blade":
         return has_special_technique(user_id,"hidden_blade")
@@ -4480,11 +4490,12 @@ def techniques_text_keyboard(user_id):
     abilities=[dict(a) for a in rpg_abilities_for(char['class_name'])]
     if has_special_technique(user_id,'hidden_blade'): abilities.append(dict(HIDDEN_BLADE_ABILITY))
     essence=_technique_material_count(user_id)
+    levels=technique_levels_for_user(user_id)
     lines=[f"⚔️ TÉCNICAS — {char['name']}",f"💠 Esencias de Técnica: {essence}","",
            "Mejora el daño hasta Nv.20. El cooldown nunca cambia.",""]
     kb=[]
     for a in abilities:
-        lvl=technique_level(user_id,a['key']); bonus=(lvl-1)*RPG_TECHNIQUE_POWER_PER_LEVEL*100
+        lvl=levels.get(str(a['key']),1); bonus=(lvl-1)*RPG_TECHNIQUE_POWER_PER_LEVEL*100
         cd=int(a.get('cooldown') or 0); cd_txt=f" · ⏳ CD {cd}" if cd else ""
         if lvl>=RPG_TECHNIQUE_MAX_LEVEL:
             lines.append(f"{a['emoji']} {a['name']} — Nv.20 MAX · +{bonus:.1f}% daño{cd_txt}")
@@ -4510,14 +4521,17 @@ def _rpg_get_ability_for_user(user_id,class_name,key):
     ability['power']=float(ability['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
     return ability
 
-def _append_hidden_blade_button(kb,user_id,prefix,special_cd=0,context_id=None):
+def _append_hidden_blade_button(kb,user_id,prefix,hidden_cd=0,context_id=None,levels=None):
     if not user_id or not has_special_technique(user_id,"hidden_blade"):
         return kb
     rows=list((kb or {}).get("inline_keyboard") or [])
-    text="🗡️ Hidden Blade" if int(special_cd)<=0 else f"⏳ Hidden Blade ({special_cd})"
+    levels=levels or technique_levels_for_user(user_id)
+    lvl=levels.get("hidden_blade",1)
+    power=float(HIDDEN_BLADE_ABILITY['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+    text=(f"🗡️ Hidden Blade · Nv.{lvl} · DMG ×{power:.2f}" if int(hidden_cd)<=0
+          else f"⏳ Hidden Blade ({hidden_cd}) · Nv.{lvl} · DMG ×{power:.2f}")
     if prefix=="rpg_attack": cb="rpg_attack:hidden_blade"
     else: cb=f"{prefix}:{int(context_id)}:hidden_blade"
-    # Antes de inventario/defensa cuando sea posible.
     pos=max(0,len(rows)-1)
     rows.insert(pos,[{"text":text,"callback_data":cb}])
     return {"inline_keyboard":rows}
@@ -4526,20 +4540,23 @@ def rpg_abilities_for(class_name):
     return RPG_ABILITIES.get(str(class_name or ""), RPG_ABILITIES["Guerrero"])
 
 
-def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None):
+def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, hidden_cd=0):
     a = rpg_abilities_for(class_name)
-    special_text = f"{a[1]['emoji']} {a[1]['name']}" if int(special_cd) <= 0 else f"⏳ {a[1]['name']} ({special_cd})"
-    ult_text = f"{a[2]['emoji']} {a[2]['name']}" if int(ultimate_cd) <= 0 else f"⏳ {a[2]['name']} ({ultimate_cd})"
+    levels=technique_levels_for_user(user_id) if user_id else {}
+    def label(ab, cd=0):
+        lvl=levels.get(str(ab['key']),1)
+        power=float(ab['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+        base=f"{ab['emoji']} {ab['name']} · Nv.{lvl} · DMG ×{power:.2f}"
+        return base if int(cd)<=0 else f"⏳ {ab['name']} ({cd}) · Nv.{lvl} · DMG ×{power:.2f}"
     kb={"inline_keyboard":[
-        [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"rpg_attack:{a[0]['key']}"},
-         {"text":special_text,"callback_data":f"rpg_attack:{a[1]['key']}"}],
-        [{"text":ult_text,"callback_data":f"rpg_attack:{a[2]['key']}"}],
+        [{"text":label(a[0]),"callback_data":f"rpg_attack:{a[0]['key']}"},
+         {"text":label(a[1],special_cd),"callback_data":f"rpg_attack:{a[1]['key']}"}],
+        [{"text":label(a[2],ultimate_cd),"callback_data":f"rpg_attack:{a[2]['key']}"}],
         [{"text":"🛡️ Defender","callback_data":"rpg_defend"},
          {"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},
          {"text":"🏃 Huir","callback_data":"rpg_flee"}]
     ]}
-    return _append_hidden_blade_button(kb,user_id,"rpg_attack",special_cd)
-
+    return _append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
 
 def _rpg_get_ability(class_name, key):
     for a in rpg_abilities_for(class_name):
@@ -4613,15 +4630,15 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
         conn = get_db()
         conn.execute("""
             INSERT INTO rpg_battles
-            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id,dungeon_event_id,dungeon_room)
-            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,'',?,?,?,?,?)
+            (chat_id,user_id,character_id,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,state,started_at,updated_at,ultimate_cd,special_cd,hidden_blade_cd,defending,last_action,encounter_rarity,encounter_number,auto_spawn_id,dungeon_event_id,dungeon_room)
+            VALUES (?,?,?,?,?,?,?,?,?,'choosing_action',?,?,0,0,0,0,'',?,?,?,?,?)
             ON CONFLICT(chat_id,user_id) DO UPDATE SET
                 character_id=excluded.character_id, enemy_key=excluded.enemy_key,
                 enemy_name=excluded.enemy_name, enemy_hp=excluded.enemy_hp,
                 enemy_max_hp=excluded.enemy_max_hp, enemy_atk=excluded.enemy_atk,
                 enemy_def=excluded.enemy_def, state='choosing_action',
                 started_at=excluded.started_at, updated_at=excluded.updated_at,
-                ultimate_cd=0, special_cd=0, defending=0, last_action='',
+                ultimate_cd=0, special_cd=0, hidden_blade_cd=0, defending=0, last_action='',
                 encounter_rarity=excluded.encounter_rarity, encounter_number=excluded.encounter_number,
                 auto_spawn_id=excluded.auto_spawn_id, dungeon_event_id=excluded.dungeon_event_id, dungeon_room=excluded.dungeon_room
         """, (int(chat_id),int(user_id),int(char["id"]),base["key"],enemy_name,enemy_hp,enemy_hp,enemy_atk,enemy_def,now,now,rarity,encounter_number,int(auto_spawn_id or 0),int(dungeon_event_id or 0),int(dungeon_room or 0)))
@@ -4733,7 +4750,11 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
         ability=_rpg_get_ability_for_user(user_id,char["class_name"],ability_key)
         if not ability:
             conn.rollback(); conn.close(); return True
-        if ability.get("special") and int(battle.get("special_cd") or 0)>0:
+        if ability_key=="hidden_blade" and int(battle.get("hidden_blade_cd") or 0)>0:
+            cd=int(battle["hidden_blade_cd"]); conn.rollback(); conn.close()
+            send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
+            return True
+        if ability_key!="hidden_blade" and ability.get("special") and int(battle.get("special_cd") or 0)>0:
             cd=int(battle["special_cd"]); conn.rollback(); conn.close()
             send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
             return True
@@ -4782,7 +4803,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
-            if ability.get("special"):
+            new_hidden_cd=max(0,int(battle.get("hidden_blade_cd") or 0)-1)
+            if ability_key=="hidden_blade":
+                new_hidden_cd=int(ability.get("cooldown",3))
+            elif ability.get("special"):
                 new_special_cd=int(ability.get("cooldown",2))
             if ability.get("ultimate"):
                 new_cd=int(ability.get("cooldown",4))
@@ -4893,9 +4917,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(char_hp,int(time.time()),int(char["id"])))
-                conn.execute("""UPDATE rpg_battles SET enemy_hp=?,ultimate_cd=?,special_cd=?,last_action=?,state='choosing_action',updated_at=?
+                conn.execute("""UPDATE rpg_battles SET enemy_hp=?,ultimate_cd=?,special_cd=?,hidden_blade_cd=?,last_action=?,state='choosing_action',updated_at=?
                                 WHERE chat_id=? AND user_id=?""",
-                             (enemy_hp,new_cd,new_special_cd,ability_key,int(time.time()),int(chat_id),int(user_id)))
+                             (enemy_hp,new_cd,new_special_cd,new_hidden_cd,ability_key,int(time.time()),int(chat_id),int(user_id)))
             conn.commit(); conn.close()
 
             fail="❌ ¡FALLÓ!\n" if roll==1 else ("💥 ¡CRÍTICO!\n" if roll==6 else "")
@@ -4917,7 +4941,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
                     f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
-                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id))
+                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id,new_hidden_cd))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -4936,6 +4960,7 @@ def rpg_defend_action(chat_id,user_id):
             hp=max(0,int(char["hp"])-damage)
             cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             special_cd=max(0,int(battle.get("special_cd") or 0)-1)
+            hidden_cd=max(0,int(battle.get("hidden_blade_cd") or 0)-1)
             if hp<=0:
                 cdict=dict(char); cdict["hp"]=hp
                 lost,_=_rpg_apply_defeat(conn,cdict)
@@ -4944,10 +4969,10 @@ def rpg_defend_action(chat_id,user_id):
                 send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 3 minutos.")
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(hp,int(time.time()),int(char["id"])))
-                conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,int(time.time()),int(chat_id),int(user_id)))
+                conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,hidden_blade_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,hidden_cd,int(time.time()),int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 send_message(chat_id,f"🛡️ DEFENSA\n\nEl enemigo tira 🎲 {enemy_roll}.\nRecibes {damage} de daño (50% reducido).\n❤️ {char['name']}: {hp}/{eff['max_hp']}",
-                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id))
+                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id,hidden_cd))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise

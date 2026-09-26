@@ -1193,7 +1193,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS rpg_boss_participants (
                 boss_id BIGINT NOT NULL, user_id BIGINT NOT NULL, character_id BIGINT NOT NULL,
                 hp BIGINT NOT NULL, max_hp BIGINT NOT NULL, damage BIGINT NOT NULL DEFAULT 0,
-                special_cd BIGINT NOT NULL DEFAULT 0, ultimate_cd BIGINT NOT NULL DEFAULT 0,
+                special_cd BIGINT NOT NULL DEFAULT 0, ultimate_cd BIGINT NOT NULL DEFAULT 0, hidden_blade_cd BIGINT NOT NULL DEFAULT 0,
                 defending BIGINT NOT NULL DEFAULT 0, defends_used BIGINT NOT NULL DEFAULT 0,
                 joined_at BIGINT NOT NULL, last_action_at BIGINT NOT NULL DEFAULT 0, defeated BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY(boss_id,user_id)
@@ -1201,6 +1201,7 @@ def init_db():
         """)
         # KiwRPG V5.9 — recuperación individual en Bosses.
         cur.execute("ALTER TABLE rpg_boss_participants ADD COLUMN IF NOT EXISTS defeated_until BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_boss_participants ADD COLUMN IF NOT EXISTS hidden_blade_cd BIGINT NOT NULL DEFAULT 0")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_boss_rewards (
@@ -1230,10 +1231,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS rpg_omega_runs (
                 event_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
                 run_started_at BIGINT NOT NULL DEFAULT 0, turns_used BIGINT NOT NULL DEFAULT 0,
-                special_cd BIGINT NOT NULL DEFAULT 0, ultimate_cd BIGINT NOT NULL DEFAULT 0,
+                special_cd BIGINT NOT NULL DEFAULT 0, ultimate_cd BIGINT NOT NULL DEFAULT 0, hidden_blade_cd BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY(event_id,user_id)
             )
         """)
+        cur.execute("ALTER TABLE rpg_omega_runs ADD COLUMN IF NOT EXISTS hidden_blade_cd BIGINT NOT NULL DEFAULT 0")
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_omega_rewards (
                 event_id BIGINT NOT NULL, user_id BIGINT NOT NULL, place BIGINT NOT NULL,
@@ -1301,6 +1304,54 @@ def init_db():
             )
         """)
         cur.execute("ALTER TABLE rpg_pets_owned ADD COLUMN IF NOT EXISTS level BIGINT NOT NULL DEFAULT 1")
+
+        # KiwBot RPG: Crónicas — Fase I. DDL aislado para no alargar la transacción principal.
+        conn.commit()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicles_settings (
+                setting_key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', updated_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_bestiary (
+                user_id BIGINT NOT NULL, enemy_key TEXT NOT NULL, sightings BIGINT NOT NULL DEFAULT 0,
+                defeats BIGINT NOT NULL DEFAULT 0, max_rarity TEXT NOT NULL DEFAULT 'normal',
+                first_seen_at BIGINT NOT NULL, last_seen_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id, enemy_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_achievements (
+                user_id BIGINT NOT NULL, achievement_key TEXT NOT NULL, unlocked_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id, achievement_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_titles (
+                user_id BIGINT NOT NULL, title_key TEXT NOT NULL, unlocked_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id, title_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_profile (
+                user_id BIGINT PRIMARY KEY, equipped_title TEXT NOT NULL DEFAULT '', updated_at BIGINT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_firsts (
+                first_key TEXT PRIMARY KEY, user_id BIGINT NOT NULL, display_name TEXT NOT NULL DEFAULT '',
+                discovered_at BIGINT NOT NULL, detail TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_key_items (
+                user_id BIGINT NOT NULL, item_key TEXT NOT NULL, quantity BIGINT NOT NULL DEFAULT 1,
+                discovered_at BIGINT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(user_id, item_key)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_bestiary_user ON rpg_bestiary(user_id, defeats DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_firsts_time ON rpg_chronicle_firsts(discovered_at ASC)")
 
         conn.commit()
         conn.close()
@@ -4214,6 +4265,228 @@ RPG_ENEMIES = [
     {"key":"bestia_eclipse","name":"Bestia del Eclipse","hp":84,"atk":16,"def":8,"exp":41,"kw":32},
 ]
 
+# =========================================================
+# KIWBOT RPG: CRÓNICAS — FASE I
+# Bestiario, logros/títulos, Sala de los Primeros y objetos clave.
+# Capa aditiva: no altera fórmulas de combate, economía ni recompensas existentes.
+# =========================================================
+
+CHRONICLES_RARITY_RANK = {"normal":0,"uncommon":1,"rare":2,"ultra":3,"legendary":4}
+CHRONICLES_RARITY_LABEL = {"normal":"Normal","uncommon":"Poco común","rare":"Raro","ultra":"Ultra raro","legendary":"Legendario"}
+CHRONICLES_ACHIEVEMENTS = {
+    "first_blood": ("🩸 Primer Rastro", "Derrota tu primer monstruo.", "cazador_novato", "Cazador Novato"),
+    "hunter_10": ("⚔️ Diez Caídos", "Derrota 10 monstruos.", "cazador_ceniza", "Cazador de Ceniza"),
+    "hunter_50": ("☠️ Cincuenta Sombras", "Derrota 50 monstruos.", "sin_piedad", "Sin Piedad"),
+    "discover_5": ("📖 Primeras Páginas", "Descubre 5 criaturas diferentes.", "cronista", "Cronista"),
+    "discover_12": ("🧭 Medio Mundo", "Descubre 12 criaturas diferentes.", "explorador", "Explorador"),
+    "discover_all": ("👁️ Los Conozco a Todos", "Descubre las 24 criaturas del Bestiario base.", "maestro_bestiario", "Maestro del Bestiario"),
+    "legendary_sighting": ("🌟 Eso no era normal", "Derrota una variante legendaria.", "testigo_legendario", "Testigo Legendario"),
+}
+CHRONICLES_KEY_ITEMS = {
+    "llave_oxidada": ("🗝️ Llave Oxidada", "Una llave antigua. No parece pertenecer a ninguna cerradura conocida."),
+    "moneda_sin_rostro": ("🪙 Moneda sin Rostro", "No tiene valor grabado. Uno de sus lados ni siquiera tiene símbolo."),
+    "pluma_negra": ("🪶 Pluma Negra", "Absorbe la luz de una forma extraña. Mejor conservarla."),
+    "fragmento_mapa": ("🗺️ Fragmento de Mapa", "Un pedazo de mapa sin nombres. Sus bordes parecen buscar otras piezas."),
+}
+
+def chronicles_enabled():
+    try:
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT value FROM rpg_chronicles_settings WHERE setting_key='enabled'").fetchone(); conn.close()
+        return not row or str(row.get('value') or '1')!='0'
+    except Exception:
+        logger.exception("No pude leer estado de Crónicas")
+        return False
+
+
+def chronicles_set_enabled(enabled):
+    with db_lock:
+        conn=get_db(); conn.execute("""INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES('enabled',?,?)
+            ON CONFLICT(setting_key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at""",('1' if enabled else '0',int(time.time()))); conn.commit(); conn.close()
+
+
+def _chron_player_name(user_id):
+    try: return _player_name_by_id(int(user_id))
+    except Exception: return f"Jugador {int(user_id)}"
+
+
+def _chron_unlock_first(conn, first_key, user_id, detail):
+    try:
+        # Reutiliza la misma conexión/transacción: evita abrir otra conexión dentro del lock de Crónicas.
+        _pr=conn.execute("SELECT display_name FROM players WHERE user_id=?",(int(user_id),)).fetchone()
+        _name=str(_pr['display_name']) if _pr and _pr.get('display_name') else f"Jugador {int(user_id)}"
+        conn.execute("INSERT INTO rpg_chronicle_firsts(first_key,user_id,display_name,discovered_at,detail) VALUES(?,?,?,?,?) ON CONFLICT(first_key) DO NOTHING",
+                     (str(first_key),int(user_id),_name,int(time.time()),str(detail or '')))
+    except Exception:
+        logger.exception("No pude registrar un Primero de Crónicas")
+
+
+def _chron_unlock_achievement(conn,user_id,key,notifications):
+    data=CHRONICLES_ACHIEVEMENTS.get(key)
+    if not data: return False
+    now=int(time.time())
+    cur=conn.execute("INSERT INTO rpg_chronicle_achievements(user_id,achievement_key,unlocked_at) VALUES(?,?,?) ON CONFLICT(user_id,achievement_key) DO NOTHING RETURNING achievement_key",(int(user_id),key,now))
+    new=bool(cur.fetchone())
+    if not new: return False
+    name,desc,title_key,title_name=data
+    conn.execute("INSERT INTO rpg_chronicle_titles(user_id,title_key,unlocked_at) VALUES(?,?,?) ON CONFLICT(user_id,title_key) DO NOTHING",(int(user_id),title_key,now))
+    _chron_unlock_first(conn,"achievement:"+key,user_id,name)
+    notifications.append(f"🏆 LOGRO DESBLOQUEADO\n{name}\n{desc}\n🎖️ Nuevo título: {title_name}")
+    return True
+
+
+def chronicles_record_enemy_defeat(user_id, enemy_key, rarity='normal'):
+    """Registra progreso de Crónicas. Nunca debe bloquear una victoria PvE."""
+    if not chronicles_enabled(): return []
+    enemy=next((e for e in RPG_ENEMIES if e['key']==enemy_key),None)
+    if not enemy: return []
+    rarity=str(rarity or 'normal').lower(); rarity=rarity if rarity in CHRONICLES_RARITY_RANK else 'normal'
+    now=int(time.time()); notes=[]
+    with db_lock:
+        conn=get_db()
+        try:
+            row=conn.execute("SELECT * FROM rpg_bestiary WHERE user_id=? AND enemy_key=? FOR UPDATE",(int(user_id),enemy_key)).fetchone()
+            is_new=not bool(row)
+            old_rarity=str(row.get('max_rarity') or 'normal') if row else 'normal'
+            best=rarity if CHRONICLES_RARITY_RANK[rarity]>CHRONICLES_RARITY_RANK.get(old_rarity,0) else old_rarity
+            if is_new:
+                conn.execute("INSERT INTO rpg_bestiary(user_id,enemy_key,sightings,defeats,max_rarity,first_seen_at,last_seen_at) VALUES(?,?,1,1,?,?,?)",
+                             (int(user_id),enemy_key,best,now,now))
+                _chron_unlock_first(conn,"bestiary:"+enemy_key,user_id,enemy['name'])
+                notes.append(f"📖 NUEVA ENTRADA DESCUBIERTA\n{enemy['name']}\nAvistamientos: 1\nDerrotados: 1\nRareza máxima: {CHRONICLES_RARITY_LABEL[best]}\n\n??? todavía guarda secretos.")
+            else:
+                conn.execute("UPDATE rpg_bestiary SET sightings=sightings+1,defeats=defeats+1,max_rarity=?,last_seen_at=? WHERE user_id=? AND enemy_key=?",
+                             (best,now,int(user_id),enemy_key))
+                if best!=old_rarity:
+                    notes.append(f"📖 BESTIARIO ACTUALIZADO\n{enemy['name']}\n🌟 Nueva rareza máxima: {CHRONICLES_RARITY_LABEL[best]}")
+            agg=conn.execute("SELECT COUNT(*) AS species,COALESCE(SUM(defeats),0) AS kills FROM rpg_bestiary WHERE user_id=?",(int(user_id),)).fetchone()
+            species=int(agg['species'] or 0); kills=int(agg['kills'] or 0)
+            if kills>=1: _chron_unlock_achievement(conn,user_id,'first_blood',notes)
+            if kills>=10: _chron_unlock_achievement(conn,user_id,'hunter_10',notes)
+            if kills>=50: _chron_unlock_achievement(conn,user_id,'hunter_50',notes)
+            if species>=5: _chron_unlock_achievement(conn,user_id,'discover_5',notes)
+            if species>=12: _chron_unlock_achievement(conn,user_id,'discover_12',notes)
+            if species>=len(RPG_ENEMIES): _chron_unlock_achievement(conn,user_id,'discover_all',notes)
+            if rarity=='legendary': _chron_unlock_achievement(conn,user_id,'legendary_sighting',notes)
+            conn.commit()
+        except Exception:
+            conn.rollback(); raise
+        finally: conn.close()
+    return notes
+
+
+def chronicles_summary(user_id):
+    with db_lock:
+        conn=get_db()
+        agg=conn.execute("SELECT COUNT(*) AS species,COALESCE(SUM(defeats),0) AS kills FROM rpg_bestiary WHERE user_id=?",(int(user_id),)).fetchone()
+        ach=conn.execute("SELECT COUNT(*) AS n FROM rpg_chronicle_achievements WHERE user_id=?",(int(user_id),)).fetchone()
+        titles=conn.execute("SELECT COUNT(*) AS n FROM rpg_chronicle_titles WHERE user_id=?",(int(user_id),)).fetchone()
+        prof=conn.execute("SELECT equipped_title FROM rpg_chronicle_profile WHERE user_id=?",(int(user_id),)).fetchone(); conn.close()
+    title=''
+    if prof and prof.get('equipped_title'):
+        dat=next((v for v in CHRONICLES_ACHIEVEMENTS.values() if v[2]==prof['equipped_title']),None); title=dat[3] if dat else ''
+    return int(agg['species'] or 0),int(agg['kills'] or 0),int(ach['n'] or 0),int(titles['n'] or 0),title
+
+
+def chronicles_profile_title_line(user_id):
+    try:
+        _,_,_,_,title=chronicles_summary(user_id)
+        return f"🎖️ Título: {title}" if title else "🎖️ Título: ninguno"
+    except Exception:
+        return "🎖️ Título: ninguno"
+
+
+def chronicles_grant_key_item(user_id,item_key,note=''):
+    if item_key not in CHRONICLES_KEY_ITEMS: return False
+    with db_lock:
+        conn=get_db(); conn.execute("""INSERT INTO rpg_chronicle_key_items(user_id,item_key,quantity,discovered_at,note) VALUES(?,?,1,?,?)
+            ON CONFLICT(user_id,item_key) DO UPDATE SET quantity=rpg_chronicle_key_items.quantity+1,note=EXCLUDED.note""",(int(user_id),item_key,int(time.time()),str(note or ''))); conn.commit(); conn.close()
+    return True
+
+
+def chronicles_key_items_text(user_id):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT item_key,quantity FROM rpg_chronicle_key_items WHERE user_id=? ORDER BY discovered_at ASC",(int(user_id),)).fetchall(); conn.close()
+    if not rows: return "🗝️ OBJETOS CLAVE\n\nTodavía no has encontrado ninguno. Algunos objetos no explican para qué sirven."
+    lines=["🗝️ OBJETOS CLAVE\n"]
+    for r in rows:
+        data=CHRONICLES_KEY_ITEMS.get(r['item_key'])
+        if data: lines.append(f"{data[0]} ×{int(r['quantity'])}\n{data[1]}")
+    return "\n\n".join(lines)
+
+
+def chronicles_home(user_id):
+    species,kills,ach,titles,title=chronicles_summary(user_id)
+    return ("📜 KIWBot RPG: CRÓNICAS\n\n"
+            f"📖 Bestiario: {species}/{len(RPG_ENEMIES)} criaturas\n"
+            f"⚔️ Derrotas registradas: {kills}\n🏆 Logros: {ach}/{len(CHRONICLES_ACHIEVEMENTS)}\n"
+            f"🎖️ Títulos: {titles}\n🔐 Secretos: ???\n"
+            +(f"\n✨ Título equipado: {title}" if title else "\n✨ Título equipado: ninguno")+
+            "\n\nEl mundo ya empezó a recordar tus pasos.")
+
+
+def chronicles_keyboard():
+    return {"inline_keyboard":[
+        [{"text":"📖 Bestiario","callback_data":"chron:bestiary"},{"text":"🏆 Logros","callback_data":"chron:achievements"}],
+        [{"text":"🎖️ Títulos","callback_data":"chron:titles"},{"text":"🏛️ Los Primeros","callback_data":"chron:firsts"}],
+        [{"text":"🗝️ Objetos clave","callback_data":"chron:keyitems"}],
+    ]}
+
+
+def chronicles_bestiary_text(user_id):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT * FROM rpg_bestiary WHERE user_id=? ORDER BY first_seen_at ASC",(int(user_id),)).fetchall(); conn.close()
+    by={r['enemy_key']:r for r in rows}; lines=[f"📖 BESTIARIO — {len(rows)}/{len(RPG_ENEMIES)}\n"]
+    for e in RPG_ENEMIES:
+        r=by.get(e['key'])
+        if not r: lines.append("▫️ ???")
+        else: lines.append(f"▪️ {e['name']} · ×{int(r['defeats'])} · {CHRONICLES_RARITY_LABEL.get(str(r['max_rarity']),'Normal')}")
+    return "\n".join(lines)
+
+
+def chronicles_achievements_text(user_id):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT achievement_key FROM rpg_chronicle_achievements WHERE user_id=?",(int(user_id),)).fetchall(); conn.close()
+    owned={r['achievement_key'] for r in rows}; lines=[f"🏆 LOGROS — {len(owned)}/{len(CHRONICLES_ACHIEVEMENTS)}\n"]
+    for k,(name,desc,_,__) in CHRONICLES_ACHIEVEMENTS.items(): lines.append(f"{'✅' if k in owned else '🔒'} {name}\n   {desc}")
+    return "\n".join(lines)
+
+
+def chronicles_titles_text_keyboard(user_id):
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT title_key FROM rpg_chronicle_titles WHERE user_id=? ORDER BY unlocked_at ASC",(int(user_id),)).fetchall(); prof=conn.execute("SELECT equipped_title FROM rpg_chronicle_profile WHERE user_id=?",(int(user_id),)).fetchone(); conn.close()
+    owned=[r['title_key'] for r in rows]; equipped=str((prof or {}).get('equipped_title') or '')
+    names={v[2]:v[3] for v in CHRONICLES_ACHIEVEMENTS.values()}; lines=["🎖️ TÍTULOS\n"]
+    kb=[]
+    if not owned: lines.append("Todavía no has desbloqueado títulos.")
+    for k in owned:
+        n=names.get(k,k); lines.append(f"{'✨' if k==equipped else '▫️'} {n}"); kb.append([{"text":('✨ ' if k==equipped else '🎖️ ')+n,"callback_data":"chron:title:"+k}])
+    if equipped: kb.append([{"text":"❌ Quitar título","callback_data":"chron:title:none"}])
+    return "\n".join(lines),{"inline_keyboard":kb} if kb else None
+
+
+def chronicles_equip_title(user_id,title_key):
+    title_key=str(title_key or '')
+    with db_lock:
+        conn=get_db()
+        if title_key and title_key!='none':
+            row=conn.execute("SELECT 1 FROM rpg_chronicle_titles WHERE user_id=? AND title_key=?",(int(user_id),title_key)).fetchone()
+            if not row: conn.close(); return False,"Ese título todavía está bloqueado."
+        else: title_key=''
+        conn.execute("INSERT INTO rpg_chronicle_profile(user_id,equipped_title,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET equipped_title=EXCLUDED.equipped_title,updated_at=EXCLUDED.updated_at",(int(user_id),title_key,int(time.time()))); conn.commit(); conn.close()
+    if not title_key: return True,"🎖️ Título retirado."
+    name=next((v[3] for v in CHRONICLES_ACHIEVEMENTS.values() if v[2]==title_key),title_key)
+    return True,f"✨ Título equipado: {name}"
+
+
+def chronicles_firsts_text():
+    with db_lock:
+        conn=get_db(); rows=conn.execute("SELECT * FROM rpg_chronicle_firsts ORDER BY discovered_at ASC LIMIT 20").fetchall(); conn.close()
+    if not rows: return "🏛️ SALA DE LOS PRIMEROS\n\nTodavía está vacía."
+    lines=["🏛️ SALA DE LOS PRIMEROS\n","Las primeras huellas del mundo quedan aquí.\n"]
+    for r in rows: lines.append(f"✦ {r['display_name']} — {r['detail']}")
+    return "\n".join(lines)
+
 # La tirada se hace por CADA /encuentro del mundo, sin importar quién lo genere.
 # Los porcentajes no son pity: el #2000 no está obligado a ser legendario.
 RPG_ENCOUNTER_RARITIES = [
@@ -4839,6 +5112,12 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 if int(battle.get("auto_spawn_id") or 0)>0:
                     mission_event(user_id,"auto_hunt",1)
                 newstats,levels=grant_rpg_exp(char["id"],reward_exp)
+                # Crónicas es observador: si falla, la victoria y sus recompensas siguen intactas.
+                _chron_notes=[]
+                try:
+                    _chron_notes=chronicles_record_enemy_defeat(user_id,battle["enemy_key"],encounter_rarity)
+                except Exception:
+                    logger.exception("Crónicas no pudo registrar una derrota; PvE continúa normalmente")
                 if ability_key=="one_winged_angel" and char["class_name"]=="The Cleaner":
                     send_one_winged_angel_finisher(chat_id)
                 crit="💥 CRÍTICO\n" if roll==6 else ""
@@ -4848,6 +5127,8 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.\n\n☠️ {battle['enemy_name']} ha sido derrotado.\n"
                     f"⭐ +{reward_exp} EXP\n🪙 +{reward_kw} KW"
                     +(f"\n🌟 ¡SUBISTE {levels} NIVEL{'ES' if levels!=1 else ''}! Nivel {newstats['level']}." if levels else ""))
+                for _chron_msg in _chron_notes:
+                    send_message(chat_id,_chron_msg)
                 drop=roll_rpg_drop(user_id,int(char["id"]),battle["enemy_key"],encounter_rarity)
                 if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
                 # Material común independiente: no reemplaza el loot normal.
@@ -6791,6 +7072,7 @@ def _omega_keyboard(event,user_id):
     char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
     sc=int(run['special_cd']) if run and int(run['turns_used'])<OMEGA_TURNS_PER_RUN else 0
     uc=int(run['ultimate_cd']) if run and int(run['turns_used'])<OMEGA_TURNS_PER_RUN else 0
+    hc=int(run.get('hidden_blade_cd') or 0) if run and int(run['turns_used'])<OMEGA_TURNS_PER_RUN else 0
     kb={"inline_keyboard":[
         [{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"omega_atk:{event['id']}:{a[0]['key']}"},
          {"text":f"{a[1]['emoji']} {a[1]['name']}" if sc<=0 else f"⏳ {a[1]['name']} ({sc})","callback_data":f"omega_atk:{event['id']}:{a[1]['key']}"}],
@@ -6798,7 +7080,7 @@ def _omega_keyboard(event,user_id):
         [{"text":"⚡ ENTRAR / VER MI BATALLA","callback_data":f"omega_join:{event['id']}"}],
         [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
     ]}
-    return _append_hidden_blade_button(kb,user_id,"omega_atk",sc,event['id'])
+    return _append_hidden_blade_button(kb,user_id,"omega_atk",hc,event['id'])
 
 def spawn_omega(chat_id):
     old=_omega_active(chat_id)
@@ -6856,14 +7138,15 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         with db_lock:
             conn=get_db()
             eff0=_boss_stats_for(user_id,char); pmax0=int(eff0['max_hp'])
-            conn.execute("UPDATE rpg_omega_runs SET run_started_at=?,turns_used=0,special_cd=0,ultimate_cd=0,hp=?,max_hp=? WHERE event_id=? AND user_id=?",
+            conn.execute("UPDATE rpg_omega_runs SET run_started_at=?,turns_used=0,special_cd=0,ultimate_cd=0,hidden_blade_cd=0,hp=?,max_hp=? WHERE event_id=? AND user_id=?",
                          (now,pmax0,pmax0,int(event_id),int(user_id)))
             conn.execute("UPDATE rpg_omega_scores SET runs=runs+1 WHERE event_id=? AND user_id=?",(int(event_id),int(user_id)))
             conn.commit(); conn.close()
-        run={'turns_used':0,'special_cd':0,'ultimate_cd':0,'run_started_at':now,'hp':pmax0,'max_hp':pmax0}; turns=0
+        run={'turns_used':0,'special_cd':0,'ultimate_cd':0,'hidden_blade_cd':0,'run_started_at':now,'hp':pmax0,'max_hp':pmax0}; turns=0
     ab=_rpg_get_ability_for_user(user_id,char['class_name'],ability_key)
     if not ab: return False,"Movimiento no válido o técnica no desbloqueada."
-    if ab.get('special') and int(run['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['special_cd']} turnos."
+    if ability_key=='hidden_blade' and int(run.get('hidden_blade_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(run.get('hidden_blade_cd') or 0)} turnos."
+    if ability_key!='hidden_blade' and ab.get('special') and int(run['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['special_cd']} turnos."
     if ab.get('ultimate') and int(run['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['ultimate_cd']} turnos."
     dr=send_dice(chat_id,'🎲')
     dice_mid=_telegram_message_id(dr)
@@ -6877,8 +7160,9 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         if pet_pct: dmg=max(1,int(round(dmg*(1.0+pet_pct/100.0))))
         if _marriage_row(user_id,("active",)): dmg=max(1,int(round(dmg*marriage_boss_multiplier(user_id))))
         if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
-    sc=max(0,int(run['special_cd'])-1); uc=max(0,int(run['ultimate_cd'])-1)
-    if ab.get('special'): sc=int(ab.get('cooldown',2))
+    sc=max(0,int(run['special_cd'])-1); uc=max(0,int(run['ultimate_cd'])-1); hc=max(0,int(run.get('hidden_blade_cd') or 0)-1)
+    if ability_key=='hidden_blade': hc=int(ab.get('cooldown',3))
+    elif ab.get('special'): sc=int(ab.get('cooldown',2))
     if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
     new_turns=turns+1
     own_hp=int(run.get('hp') or run.get('max_hp') or _boss_stats_for(user_id,char)['max_hp'])
@@ -6904,8 +7188,8 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         rowhp=conn.execute("""UPDATE rpg_omega_events SET hp=GREATEST(0,hp-?)
                               WHERE id=? AND status='active' RETURNING hp,max_hp""",
                            (dmg,int(event_id))).fetchone()
-        conn.execute("""UPDATE rpg_omega_runs SET turns_used=?,special_cd=?,ultimate_cd=?,hp=?,max_hp=?
-                        WHERE event_id=? AND user_id=?""",(new_turns,sc,uc,own_hp,own_max,int(event_id),int(user_id)))
+        conn.execute("""UPDATE rpg_omega_runs SET turns_used=?,special_cd=?,ultimate_cd=?,hidden_blade_cd=?,hp=?,max_hp=?
+                        WHERE event_id=? AND user_id=?""",(new_turns,sc,uc,hc,own_hp,own_max,int(event_id),int(user_id)))
         conn.execute("""UPDATE rpg_omega_scores SET total_damage=total_damage+?,total_turns=total_turns+1,last_attack_at=?
                         WHERE event_id=? AND user_id=?""",(dmg,now,int(event_id),int(user_id)))
         conn.commit(); conn.close()
@@ -7181,14 +7465,14 @@ def _boss_keyboard_base(b,user_id):
             return {"inline_keyboard":rows}
         return {"inline_keyboard":[[{"text":"♻️ VOLVER AL COMBATE","callback_data":f"boss_rejoin:{b['id']}"}],[{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]}
     char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
-    scd=int(p['special_cd']); ucd=int(p['ultimate_cd'])
+    scd=int(p['special_cd']); ucd=int(p['ultimate_cd']); hcd=int(p.get('hidden_blade_cd') or 0)
     rows=[[{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"boss_atk:{b['id']}:{a[0]['key']}"},
            {"text":f"{a[1]['emoji']} {a[1]['name']}" if scd<=0 else f"⏳ {a[1]['name']} ({scd})","callback_data":f"boss_atk:{b['id']}:{a[1]['key']}"}],
           [{"text":f"{a[2]['emoji']} {a[2]['name']}" if ucd<=0 else f"⏳ {a[2]['name']} ({ucd})","callback_data":f"boss_atk:{b['id']}:{a[2]['key']}"}],
           [{"text":"🛡️ Defender","callback_data":f"boss_def:{b['id']}"},{"text":"🧪 Pociones","callback_data":f"boss_potions:{b['id']}"}],
           [{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]
     if has_special_technique(user_id,"hidden_blade"):
-        htxt="🗡️ Hidden Blade" if scd<=0 else f"⏳ Hidden Blade ({scd})"
+        htxt="🗡️ Hidden Blade" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
         rows.insert(2,[{"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"}])
     if char and is_owner(user_id) and char['class_name']=='The Cleaner':
         active=bool(char['secret_blades_active']); rows.append([{"text":"🗡️🗡️ Guardar Espadas" if active else "🗡️🗡️ Sacar Espadas","callback_data":f"boss_blades:{b['id']}"}])
@@ -7396,12 +7680,13 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
     if defend:
         if int(p['defends_used'])>=3: return False,"🛡️ Ya usaste tus 3 defensas contra este Boss."
         with db_lock:
-            conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET defending=1,defends_used=defends_used+1,special_cd=GREATEST(0,special_cd-1),ultimate_cd=GREATEST(0,ultimate_cd-1),last_action_at=? WHERE boss_id=? AND user_id=?",(int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+            conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET defending=1,defends_used=defends_used+1,special_cd=GREATEST(0,special_cd-1),ultimate_cd=GREATEST(0,ultimate_cd-1),hidden_blade_cd=GREATEST(0,hidden_blade_cd-1),last_action_at=? WHERE boss_id=? AND user_id=?",(int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
         player_text=f"🛡️ {_pvp_name(user_id)} se prepara para resistir."
     else:
         ab=_rpg_get_ability_for_user(user_id,char['class_name'],ability_key)
         if not ab: return False,"Movimiento no válido."
-        if ab.get('special') and int(p['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['special_cd']} turnos."
+        if ability_key=='hidden_blade' and int(p.get('hidden_blade_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(p.get('hidden_blade_cd') or 0)} turnos."
+        if ability_key!='hidden_blade' and ab.get('special') and int(p['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['special_cd']} turnos."
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
         if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
@@ -7418,10 +7703,11 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         with db_lock:
             conn=get_db(); fresh=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(int(boss_id),)).fetchone()
             if not fresh or fresh['status']!='active': conn.rollback(); conn.close(); return False,"El Boss ya fue derrotado."
-            nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(p['special_cd'])-1); uc=max(0,int(p['ultimate_cd'])-1)
+            nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(p['special_cd'])-1); uc=max(0,int(p['ultimate_cd'])-1); hc=max(0,int(p.get('hidden_blade_cd') or 0)-1)
             old_phase=int(fresh['phase'])
             boss_phase_change=(nh>0 and phase>old_phase)
-            if ab.get('special'): sc=int(ab.get('cooldown',2))
+            if ability_key=='hidden_blade': hc=int(ab.get('cooldown',3))
+            elif ab.get('special'): sc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
             ownhp=min(int(p['max_hp']),int(p['hp'])+heal)
             counter=0
@@ -7435,7 +7721,7 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
                 phase=_boss_phase(dict(fresh)|{'hp':nh})
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
-            conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+            conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,hidden_blade_cd=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,hc,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
         mission_event(user_id,"boss_damage",dmg)
         if dmg>0: mission_event(user_id,"boss_hits",1)
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
@@ -9774,6 +10060,18 @@ def tavern_callback(user_id,chat_id,data):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data.startswith("chron:"):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        if data=="chron:bestiary": send_message(chat_id,chronicles_bestiary_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
+        if data=="chron:achievements": send_message(chat_id,chronicles_achievements_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
+        if data=="chron:titles":
+            txt,kb=chronicles_titles_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+        if data=="chron:firsts": send_message(chat_id,chronicles_firsts_text(),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
+        if data=="chron:keyitems": send_message(chat_id,chronicles_key_items_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
+        if data=="chron:home": send_message(chat_id,chronicles_home(uid),reply_markup=chronicles_keyboard()); return True
+        if data.startswith("chron:title:"):
+            ok,msg2=chronicles_equip_title(uid,data.split(":",2)[2]); send_message(chat_id,msg2); return True
+        return True
     if data.startswith("tavern:"):
         try:
             txt,kb=tavern_callback(uid,chat_id,data)
@@ -10779,6 +11077,29 @@ def process_command(
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
 
+    if command in ("/cronicas", "/chronicles"):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        ensure_player(message.get("from",{})); send_message(chat_id,chronicles_home(user_id),reply_markup=chronicles_keyboard()); return True
+    if command in ("/bestiario",):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        send_message(chat_id,chronicles_bestiary_text(user_id)); return True
+    if command in ("/logros",):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        send_message(chat_id,chronicles_achievements_text(user_id)); return True
+    if command in ("/titulos",):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        _ct,_ck=chronicles_titles_text_keyboard(user_id); send_message(chat_id,_ct,reply_markup=_ck); return True
+    if command in ("/primeros",):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        send_message(chat_id,chronicles_firsts_text()); return True
+    if command in ("/objetosclave", "/reliquias"):
+        if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        send_message(chat_id,chronicles_key_items_text(user_id)); return True
+    if command in ("/cronicasoff", "/cronicas_on", "/cronicason"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede cambiar el estado de Crónicas."); return True
+        enabled=command in ("/cronicas_on","/cronicason")
+        chronicles_set_enabled(enabled); send_message(chat_id,"📜 Crónicas activado." if enabled else "📕 Crónicas desactivado. El RPG normal sigue funcionando."); return True
+
     if command in ("/taberna", "/tavern"):
         ensure_player(message.get("from",{}))
         _tavern_pop(user_id)
@@ -11720,7 +12041,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             f"Jugador: {player_display_name(user)}\n"
             f"Kiwons: {balance:,} KW\n"
             f"{marriage_profile_line(user_id)}\n"
-            f"{clan_profile_line(user_id)}\n\n"
+            f"{clan_profile_line(user_id)}\n"
+            f"{chronicles_profile_title_line(user_id)}\n\n"
             f"{rpg_text}"
         )
         return True

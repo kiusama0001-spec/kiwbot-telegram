@@ -4,8 +4,6 @@ import json
 import logging
 import hashlib
 import hmac
-import base64
-import struct
 from urllib.parse import parse_qsl
 import os
 import random
@@ -647,15 +645,6 @@ def init_db():
                 updated_at BIGINT NOT NULL, PRIMARY KEY(mission_id,user_id)
             )
         """)
-        # Dibujo independiente (/dibujar). Aislado de misiones relámpago y /dibuja.
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS rpg_draw_solo_claims (
-                token_hash TEXT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                claimed_at BIGINT NOT NULL
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_draw_solo_claims_user ON rpg_draw_solo_claims(user_id,claimed_at DESC)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_cat_rescues (
                 user_id BIGINT PRIMARY KEY, rescues BIGINT NOT NULL DEFAULT 0,
@@ -9697,67 +9686,6 @@ def send_photo_bytes(chat_id, raw, caption="", message_thread_id=None, content_t
     return data
 
 
-DRAW_SOLO_REWARD_KW = 500
-DRAW_SOLO_REWARD_EXP = 75
-DRAW_SOLO_WORDS = [
-    ("ESCUDO", "🛡️"), ("ESPADA", "🗡️"), ("POCIÓN", "🧪"), ("DRAGÓN", "🐉"),
-    ("CASTILLO", "🏰"), ("GATO", "🐈"), ("SLIME", "👾"), ("CORONA", "👑"),
-    ("FANTASMA", "👻"), ("TESORO", "💰"), ("MAGO", "🧙"), ("ARCO", "🏹"),
-]
-
-def _drawsolo_b64e(raw):
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-def _drawsolo_b64d(txt):
-    txt=str(txt or "")
-    return base64.urlsafe_b64decode(txt + "="*((4-len(txt)%4)%4))
-
-def _drawsolo_token(user_id, chat_id, topic_id, word_index, ttl=600):
-    if not TELEGRAM_TOKEN:
-        raise RuntimeError("TELEGRAM_TOKEN no configurado")
-    exp=int(time.time())+int(ttl)
-    nonce=random.getrandbits(32)
-    payload=struct.pack(">qqiIBI", int(user_id), int(chat_id), int(topic_id or 0), exp, int(word_index), nonce)
-    sig=hmac.new(TELEGRAM_TOKEN.encode("utf-8"), b"drawsolo:"+payload, hashlib.sha256).digest()[:10]
-    return "ds_"+_drawsolo_b64e(payload+sig)
-
-def _drawsolo_parse(token, allow_expired=False):
-    try:
-        token=str(token or "")
-        if not token.startswith("ds_") or not TELEGRAM_TOKEN:
-            return None
-        raw=_drawsolo_b64d(token[3:])
-        if len(raw)!=39:
-            return None
-        payload,sig=raw[:-10],raw[-10:]
-        good=hmac.new(TELEGRAM_TOKEN.encode("utf-8"), b"drawsolo:"+payload, hashlib.sha256).digest()[:10]
-        if not hmac.compare_digest(sig,good):
-            return None
-        uid,chat_id,topic,exp,word_idx,nonce=struct.unpack(">qqiIBI",payload)
-        if not allow_expired and int(exp)<int(time.time()):
-            return None
-        if not (0<=int(word_idx)<len(DRAW_SOLO_WORDS)):
-            return None
-        return {"user_id":int(uid),"chat_id":int(chat_id),"topic":int(topic),"expires_at":int(exp),"word_index":int(word_idx),"nonce":int(nonce)}
-    except Exception:
-        return None
-
-def _drawsolo_pick_word(arg=""):
-    wanted=normalize_answer(str(arg or ""))
-    if wanted:
-        for i,(word,emoji) in enumerate(DRAW_SOLO_WORDS):
-            if normalize_answer(word)==wanted:
-                return i
-    return random.randrange(len(DRAW_SOLO_WORDS))
-
-def _drawsolo_html(token, info):
-    word,emoji=DRAW_SOLO_WORDS[int(info["word_index"])]
-    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
-body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:28px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2>__EMOJI__ Dibuja: __WORD__</h2><div class="muted">Actividad independiente de las Misiones Relámpago.</div><p>🎁 <b>500 KW + 75 EXP</b> al entregar un dibujo válido.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Entregar dibujo</button><div class="status" id="status"></div></div></div><script>
-const tg=window.Telegram.WebApp;tg.ready();tg.expand();const TOKEN=__TOKEN__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();const p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){const d=history.pop();if(!d)return;const im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status'),btn=document.getElementById('send');if(!tg.initData){st.textContent='Abre esta actividad desde el botón de KiwBot en Telegram.';return}if(strokes<1){st.textContent='Primero dibuja algo.';return}btn.disabled=true;st.textContent='Entregando...';try{const r=await fetch('/rpg/api/drawsolo-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,token:TOKEN,strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}else btn.disabled=false}catch(e){st.textContent='No pude conectar con KiwBot.';btn.disabled=false}};
-</script></body></html>'''
-    return html.replace('__WORD__',word).replace('__EMOJI__',emoji).replace('__TOKEN__',json.dumps(token))
-
 def process_command(
     message,
     text
@@ -9782,29 +9710,6 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
-
-    # /dibujar: actividad independiente. No toca /dibuja ni Misiones Relámpago.
-    if command == "/dibujar":
-        char=get_active_character(user_id)
-        if not char:
-            send_message(chat_id,"🎨 Necesitas un personaje activo para recibir EXP con /dibujar.")
-            return True
-        arg=parts[1].strip() if len(parts)>1 else ""
-        idx=_drawsolo_pick_word(arg)
-        try:
-            token=_drawsolo_token(user_id,int(chat_id),int(message.get("message_thread_id") or 0),idx,ttl=600)
-        except Exception:
-            logger.exception("No pude crear token de /dibujar")
-            send_message(chat_id,"❌ No pude preparar el lienzo.")
-            return True
-        botname=str(get_bot_identity().get("username") or "").strip()
-        if not botname:
-            send_message(chat_id,"❌ No pude obtener el usuario de KiwBot.")
-            return True
-        word,emoji=DRAW_SOLO_WORDS[idx]
-        url=f"https://t.me/{botname}?startapp={token}"
-        send_message(chat_id,f"🎨 DIBUJO RÁPIDO\n\n{emoji} Dibuja: {word}\n🎁 {DRAW_SOLO_REWARD_KW} KW + {DRAW_SOLO_REWARD_EXP} EXP\n⏳ El enlace dura 10 minutos.",reply_markup={"inline_keyboard":[[{"text":"🎨 ABRIR LIENZO","url":url}]]})
-        return True
 
     if command == "/testimagenia":
         if not is_owner(user_id):
@@ -12325,74 +12230,8 @@ def rpg_draw_submit():
     except Exception: logger.exception('No pude publicar el dibujo ganador')
     return jsonify({'ok':True,'message':'🏆 ¡Llegaste primero! Tu dibujo ganó la misión.'})
 
-@app.route("/rpg/api/drawsolo-submit", methods=["POST"])
-def rpg_drawsolo_submit():
-    body=request.get_json(silent=True) or {}
-    auth=validate_telegram_init_data(body.get("init_data", ""))
-    if not auth:
-        return jsonify({"ok":False,"message":"No pude verificar tu cuenta de Telegram."}),403
-    info=_drawsolo_parse(body.get("token", ""))
-    if not info:
-        return jsonify({"ok":False,"message":"Este lienzo venció o el enlace no es válido."}),400
-    uid=int(auth["user"]["id"])
-    if uid!=int(info["user_id"]):
-        return jsonify({"ok":False,"message":"Este lienzo pertenece a otro jugador."}),403
-    try:
-        strokes=int(body.get("strokes",0)); data=str(body.get("image", ""))
-    except Exception:
-        return jsonify({"ok":False,"message":"Entrega inválida."}),400
-    if strokes<1:
-        return jsonify({"ok":False,"message":"Primero dibuja algo en el lienzo."}),400
-    import base64 as _b64
-    try:
-        head,b64data=data.split(',',1); raw=_b64.b64decode(b64data,validate=True)
-        if not head.startswith('data:image/png') or len(raw)<1500 or len(raw)>4_000_000:
-            raise ValueError('bad image')
-    except Exception:
-        return jsonify({"ok":False,"message":"El dibujo no parece una imagen válida."}),400
-    char=get_active_character(uid)
-    if not char:
-        return jsonify({"ok":False,"message":"Necesitas un personaje activo para recibir la EXP."}),400
-    token_hash=hashlib.sha256(str(body.get("token", "")).encode("utf-8")).hexdigest()
-    claimed=False
-    try:
-        with db_lock:
-            conn=get_db()
-            cur=conn.execute("INSERT INTO rpg_draw_solo_claims(token_hash,user_id,claimed_at) VALUES(?,?,?) ON CONFLICT(token_hash) DO NOTHING",(token_hash,uid,int(time.time())))
-            claimed=(int(cur.rowcount or 0)==1)
-            conn.commit(); conn.close()
-        if not claimed:
-            return jsonify({"ok":False,"message":"Este dibujo ya fue entregado."}),409
-        change_kiwons(uid,DRAW_SOLO_REWARD_KW,'draw_solo',chat_id=int(info['chat_id']),note='Actividad /dibujar')
-        grant_rpg_exp(int(char['id']),DRAW_SOLO_REWARD_EXP)
-    except Exception:
-        logger.exception("Falló recompensa /dibujar | user=%s",uid)
-        if claimed:
-            try:
-                with db_lock:
-                    conn=get_db(); conn.execute("DELETE FROM rpg_draw_solo_claims WHERE token_hash=?",(token_hash,)); conn.commit(); conn.close()
-            except Exception:
-                logger.exception("No pude revertir claim /dibujar")
-        return jsonify({"ok":False,"message":"No pude entregar la recompensa. Intenta otra vez."}),500
-    word,emoji=DRAW_SOLO_WORDS[int(info['word_index'])]
-    try:
-        payload={'chat_id':str(int(info['chat_id'])),'caption':f"🎨 DIBUJO ENTREGADO — {word}\n\n🏆 +{DRAW_SOLO_REWARD_KW} KW · +{DRAW_SOLO_REWARD_EXP} EXP"}
-        if int(info.get('topic') or 0): payload['message_thread_id']=str(int(info['topic']))
-        files={'photo':('dibujo.png',raw,'image/png')}
-        TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendPhoto",data=payload,files=files,timeout=TELEGRAM_TIMEOUT)
-    except Exception:
-        logger.exception("No pude publicar dibujo de /dibujar")
-    return jsonify({"ok":True,"message":f"🏆 Entregado: +{DRAW_SOLO_REWARD_KW} KW y +{DRAW_SOLO_REWARD_EXP} EXP."})
-
 @app.route("/rpg/create", methods=["GET"])
 def rpg_create_page():
-    # La Main Mini App sigue siendo /rpg/create; solo interceptamos nuestro startapp.
-    sp=str(request.args.get("tgWebAppStartParam", "") or "")
-    if sp.startswith("ds_"):
-        info=_drawsolo_parse(sp)
-        if not info:
-            return "Este lienzo venció o el enlace no es válido.",400
-        return _drawsolo_html(sp,info)
     html="""<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
 body{font-family:system-ui,-apple-system,sans-serif;background:#0d0f14;color:#fff;margin:0;padding:20px}.wrap{max-width:680px;margin:auto}.hero{text-align:center;margin:10px 0 22px}.muted{color:#aeb6c5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#171b24;border:1px solid #2a3040;border-radius:16px;padding:16px;cursor:pointer}.card.sel{outline:2px solid #fff}.emoji{font-size:32px}.stats{font-size:14px;color:#dce2ed;margin-top:8px}.owner{border-color:#d6b85a}.name{width:100%;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #343b4b;background:#11151d;color:#fff;font-size:16px;margin:18px 0 10px}.btn{width:100%;padding:15px;border:0;border-radius:13px;font-weight:800;font-size:16px;cursor:pointer}.status{text-align:center;margin-top:12px;min-height:24px}@media(max-width:500px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><div class="hero"><h1>🧙 Crea tu personaje</h1><div class="muted">Elige una clase, revisa sus estadísticas y comienza tu aventura.</div></div><div id="classes" class="grid"></div><input id="name" class="name" maxlength="24" placeholder="Nombre de tu personaje"><button id="create" class="btn">✨ Crear personaje</button><div id="status" class="status"></div></div><script>
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();const base=[{key:'guerrero',e:'⚔️',n:'Guerrero',hp:120,a:14,d:8,x:'Resistente y estable. Buen equilibrio entre ataque y defensa.',img:'/rpg/art/class/guerrero'},{key:'mago',e:'🔮',n:'Mago',hp:85,a:18,d:4,x:'Gran daño y magia capaz de atravesar defensas, a cambio de resistencia.',img:'/rpg/art/class/mago'},{key:'picaro',e:'🗡️',n:'Pícaro',hp:95,a:16,d:5,x:'Ágil y agresivo. Especialista en críticos y evasión.',img:'/rpg/art/class/picaro'},{key:'paladin',e:'🛡️',n:'Paladín',hp:130,a:11,d:10,x:'Defensa, bloqueo y recuperación.',img:'/rpg/art/class/paladin'},{key:'arquero',e:'🏹',n:'Arquero',hp:100,a:15,d:6,x:'Preciso y consistente. Premia las buenas tiradas.',img:'/rpg/art/class/arquero'}];let selected=null,classes=[...base];const uid=tg.initDataUnsafe?.user?.id;if(uid&&String(uid)==='OWNER_ID_PLACEHOLDER')classes.push({key:'the_cleaner',e:'🪽',n:'The Cleaner',hp:130,a:18,d:9,x:'Clase exclusiva de Kiu. One Winged Angel.',img:'/rpg/art/class/the_cleaner',owner:true});const box=document.getElementById('classes');function draw(){box.innerHTML='';classes.forEach(c=>{let el=document.createElement('div');el.className='card'+(selected===c.key?' sel':'')+(c.owner?' owner':'');el.innerHTML=`${c.img?`<img src="${c.img}" style="width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:12px;margin-bottom:10px" onerror="this.remove()">`:''}<div class="emoji">${c.e}</div><h3>${c.n}</h3><div class="stats">❤️ ${c.hp} HP · 🗡️ ${c.a} ATK · 🛡️ ${c.d} DEF</div><p class="muted">${c.x}</p>`;el.onclick=()=>{selected=c.key;draw()};box.appendChild(el)})}draw();document.getElementById('create').onclick=async()=>{const st=document.getElementById('status'),name=document.getElementById('name').value.trim();if(!selected){st.textContent='Elige una clase.';return}if(!name){st.textContent='Escribe el nombre de tu personaje.';return}st.textContent='Creando...';try{const r=await fetch('/rpg/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,class_key:selected,name})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1300)}}catch(e){st.textContent='No pude conectar con KiwBot.'}};if(!tg.initData)document.getElementById('status').textContent='Abre este creador desde KiwBot en Telegram.';</script></body></html>"""

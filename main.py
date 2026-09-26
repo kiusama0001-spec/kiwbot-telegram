@@ -9099,12 +9099,12 @@ TAVERN_DRINKS = {
 }
 
 TAVERN_MYTHIC_WEAPONS = {
-    "Guerrero": ("tavern_mythic_guerrero","⚔️ Rompemundos del Rey Caído",13,3,25,2),
-    "Mago": ("tavern_mythic_mago","🔮 Cetro de la Última Estrella",15,1,15,2),
-    "Pícaro": ("tavern_mythic_picaro","🗡️ Gemelas del Pecado",14,2,15,2),
-    "Paladín": ("tavern_mythic_paladin","🔨 Juramento del Sol Eterno",11,6,40,2),
-    "Arquero": ("tavern_mythic_arquero","🏹 Arco del Horizonte Roto",14,2,20,2),
-    "The Cleaner": ("tavern_mythic_cleaner","🦅 Final Bell",16,4,35,1),
+    "Guerrero": ("tavern_mythic_guerrero","⚔️ Rompemundos del Rey Caído",32,6,60,2),
+    "Mago": ("tavern_mythic_mago","🔮 Cetro de la Última Estrella",38,2,35,2),
+    "Pícaro": ("tavern_mythic_picaro","🗡️ Gemelas del Pecado",36,4,35,2),
+    "Paladín": ("tavern_mythic_paladin","🔨 Juramento del Sol Eterno",28,10,90,2),
+    "Arquero": ("tavern_mythic_arquero","🏹 Arco del Horizonte Roto",34,4,45,2),
+    "The Cleaner": ("tavern_mythic_cleaner","🦅 Final Bell",42,8,80,1),
 }
 
 TAVERN_MISSIONS = {
@@ -9245,6 +9245,23 @@ def _tavern_apply_effect(user_id,won,exp,payout,bet):
     return exp,payout,extra_loss,label
 
 
+def _tavern_player_label(user_id):
+    """Nombre visible del dueño/usuario de cada mensaje de la Taberna."""
+    try:
+        return _player_name_by_id(int(user_id))
+    except Exception:
+        return f"Jugador {int(user_id)}"
+
+
+def _tavern_tag_text(user_id, text):
+    """Marca todos los mensajes de Taberna para que en grupos se sepa de quién son."""
+    text=str(text or "")
+    tag=f"👤 Jugador: {_tavern_player_label(user_id)}"
+    if text.startswith(tag):
+        return text
+    return f"{tag}\n\n{text}"
+
+
 def tavern_home_keyboard():
     return {"inline_keyboard":[
         [{"text":"🎲 Dados del Tahúr","callback_data":"tavern:game:dice"},{"text":"🃏 Carta Mayor","callback_data":"tavern:game:cards"}],
@@ -9312,7 +9329,12 @@ def _tavern_finish(user_id,chat_id,game,won,exp,payout,detail,streak=0):
         if grant_rpg_item(user_id,int(char["id"]),"esencia_tecnica","taberna:bonus"):
             essence="\n💠 Bonus raro: Esencia de Técnica ×1"
     result="🏆 Victoria" if won else "💀 La casa gana"
-    money=f"🪙 {'+' if net>=0 else ''}{net:,} KW netos"
+    if won and bet>0:
+        effective_mult=(float(payout)/float(bet)) if payout else 0.0
+        money=(f"💵 Premio: {bet:,} × {effective_mult:.2f} = {payout:,} KW\n"
+               f"🪙 Ganancia neta: {'+' if net>=0 else ''}{net:,} KW")
+    else:
+        money=f"🪙 Pérdida neta: {net:,} KW"
     if extra_loss: money+=f" (incluye {extra_loss:,} KW extra por el Whisky)"
     txt=(f"{_tavern_game_name(game)}\n\n{detail}\n\n{result}\n✨ +{exp} EXP\n{money}\n💰 Saldo: {balance:,} KW{essence}{effect_txt}")
     kb={"inline_keyboard":[[{"text":f"🔁 Otra vez · {bet:,} KW","callback_data":f"tavern:start:{game}:{bet}"}],
@@ -9571,7 +9593,7 @@ def handle_rpg_callback(query):
     if data.startswith("tavern:"):
         try:
             txt,kb=tavern_callback(uid,chat_id,data)
-            send_message(chat_id,txt,reply_markup=kb)
+            send_message(chat_id,_tavern_tag_text(uid,txt),reply_markup=kb)
         except Exception:
             logger.exception("Error en Taberna RPG")
             send_message(chat_id,"🍺 El tabernero tiró una jarra. Intenta abrir /taberna otra vez.")
@@ -10380,7 +10402,7 @@ def process_command(
     if command in ("/taberna", "/tavern"):
         ensure_player(message.get("from",{}))
         _tavern_pop(user_id)
-        send_message(chat_id,tavern_home_text(user_id),reply_markup=tavern_home_keyboard())
+        send_message(chat_id,_tavern_tag_text(user_id,tavern_home_text(user_id)),reply_markup=tavern_home_keyboard())
         return True
 
     if command == "/testimagenia":

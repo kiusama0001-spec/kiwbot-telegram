@@ -1376,6 +1376,34 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_expedition_status ON rpg_chronicle_expeditions(status,updated_at)")
+        # Expediciones v2: aislamiento real por usuario + chat + topic.
+        # Se usan tablas nuevas para no alterar/bloquear la tabla estable anterior durante el deploy.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_expeditions_v2 (
+                user_id BIGINT NOT NULL, chat_id BIGINT NOT NULL, thread_id BIGINT NOT NULL DEFAULT 0,
+                zone_key TEXT NOT NULL, depth BIGINT NOT NULL DEFAULT 0, max_depth BIGINT NOT NULL DEFAULT 5,
+                hp_state BIGINT NOT NULL DEFAULT 3, findings BIGINT NOT NULL DEFAULT 0,
+                pending_type TEXT NOT NULL DEFAULT '', pending_code TEXT NOT NULL DEFAULT '',
+                pending_data TEXT NOT NULL DEFAULT '', reward_kw BIGINT NOT NULL DEFAULT 0,
+                reward_essence BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+                nonce BIGINT NOT NULL DEFAULT 1, started_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id,chat_id,thread_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_expedition_claims_v2 (
+                user_id BIGINT NOT NULL, chat_id BIGINT NOT NULL, thread_id BIGINT NOT NULL DEFAULT 0,
+                expedition_started_at BIGINT NOT NULL, reward_kw BIGINT NOT NULL DEFAULT 0,
+                reward_essence BIGINT NOT NULL DEFAULT 0, claimed_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id,chat_id,thread_id,expedition_started_at)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_expedition_v2_status ON rpg_chronicle_expeditions_v2(status,updated_at)")
+        # Conserva la expedición previa en el topic donde realmente nació; no duplica en otros topics.
+        cur.execute("""INSERT INTO rpg_chronicle_expeditions_v2
+            (user_id,chat_id,thread_id,zone_key,depth,max_depth,hp_state,findings,pending_type,pending_code,pending_data,reward_kw,reward_essence,status,nonce,started_at,updated_at)
+            SELECT user_id,chat_id,thread_id,zone_key,depth,max_depth,hp_state,findings,pending_type,pending_code,pending_data,reward_kw,reward_essence,status,nonce,started_at,updated_at
+            FROM rpg_chronicle_expeditions ON CONFLICT(user_id,chat_id,thread_id) DO NOTHING""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_bestiary_user ON rpg_bestiary(user_id, defeats DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_firsts_time ON rpg_chronicle_firsts(discovered_at ASC)")
 
@@ -4563,11 +4591,11 @@ CHRON_EXP_ZONES = {
 }
 CHRON_EXP_EVENTS=("chest","runes","mine","altar","traveler","tracks","corpse","fountain")
 
-def _chron_exp_row(user_id, lock=False, conn=None):
+def _chron_exp_row(user_id, chat_id, thread_id, lock=False, conn=None):
     own=conn is None
     if own: conn=get_db()
-    q="SELECT * FROM rpg_chronicle_expeditions WHERE user_id=?"+(" FOR UPDATE" if lock else "")
-    row=conn.execute(q,(int(user_id),)).fetchone()
+    q="SELECT * FROM rpg_chronicle_expeditions_v2 WHERE user_id=? AND chat_id=? AND thread_id=?"+(" FOR UPDATE" if lock else "")
+    row=conn.execute(q,(int(user_id),int(chat_id),int(thread_id or 0))).fetchone()
     if own: conn.close()
     return row
 
@@ -4586,8 +4614,6 @@ def chron_exp_zone_keyboard(user_id):
     return {"inline_keyboard":rows}
 
 def chron_exp_menu_text(user_id):
-    r=_chron_exp_row(user_id)
-    if r and str(r['status'])=='active': return chron_exp_render(r)
     return "🗺️ EXPEDICIONES\n\nElige una zona. Cada viaje cambia: puedes retirarte con tus hallazgos o arriesgarte a perder parte de ellos.\n\n🌘 Algunas rutas no aparecen hasta que el mundo decide mostrarlas."
 
 def _chron_exp_cb(r, action): return f"cex:go:{int(r['nonce'])}:{action}"
@@ -4624,16 +4650,16 @@ def _chron_exp_start_impl(user_id, chat_id, thread_id, zone):
     with db_lock:
         c=get_db()
         try:
-            old=_chron_exp_row(user_id,True,c)
+            old=_chron_exp_row(user_id,chat_id,thread_id,True,c)
             if old and str(old['status'])=='active': c.rollback(); c.close(); return False,"Ya tienes una expedición activa.",old
-            c.execute("""INSERT INTO rpg_chronicle_expeditions(user_id,chat_id,thread_id,zone_key,depth,max_depth,hp_state,findings,pending_type,pending_code,pending_data,reward_kw,reward_essence,status,nonce,started_at,updated_at)
-                VALUES(?,?,?,?,0,?,3,0,'','','',0,0,'active',1,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,thread_id=EXCLUDED.thread_id,zone_key=EXCLUDED.zone_key,depth=0,max_depth=EXCLUDED.max_depth,hp_state=3,findings=0,pending_type='',pending_code='',pending_data='',reward_kw=0,reward_essence=0,status='active',nonce=rpg_chronicle_expeditions.nonce+1,started_at=EXCLUDED.started_at,updated_at=EXCLUDED.updated_at""",
-                (int(user_id),int(chat_id),int(thread_id or 0),zone,int(mx),now,now)); c.commit(); row=_chron_exp_row(user_id,False,c); c.close(); return True,"",row
+            c.execute("""INSERT INTO rpg_chronicle_expeditions_v2(user_id,chat_id,thread_id,zone_key,depth,max_depth,hp_state,findings,pending_type,pending_code,pending_data,reward_kw,reward_essence,status,nonce,started_at,updated_at)
+                VALUES(?,?,?,?,0,?,3,0,'','','',0,0,'active',1,?,?) ON CONFLICT(user_id,chat_id,thread_id) DO UPDATE SET zone_key=EXCLUDED.zone_key,depth=0,max_depth=EXCLUDED.max_depth,hp_state=3,findings=0,pending_type='',pending_code='',pending_data='',reward_kw=0,reward_essence=0,status='active',nonce=rpg_chronicle_expeditions_v2.nonce+1,started_at=EXCLUDED.started_at,updated_at=EXCLUDED.updated_at""",
+                (int(user_id),int(chat_id),int(thread_id or 0),zone,int(mx),now,now)); c.commit(); row=_chron_exp_row(user_id,chat_id,thread_id,False,c); c.close(); return True,"",row
         except Exception: c.rollback(); c.close(); raise
 
 def chron_exp_start(user_id, chat_id, thread_id, zone):
     # Una sola creación por usuario incluso si pulsa dos veces casi simultáneamente.
-    lock=_user_action_lock(_chron_exp_action_locks,_chron_exp_action_locks_guard,user_id)
+    lock=_user_action_lock(_chron_exp_action_locks,_chron_exp_action_locks_guard,user_id,chat_id,thread_id or 0)
     with lock:
         return _chron_exp_start_impl(user_id,chat_id,thread_id,zone)
 
@@ -4652,11 +4678,11 @@ def _chron_exp_new_scene(row, rng=random):
     return typ,code,scene
 
 def _chron_exp_finish_locked(c,row,reason):
-    uid=int(row['user_id']); started=int(row['started_at']); kw=max(0,int(row['reward_kw'])); es=max(0,int(row['reward_essence']))
-    claim=c.execute("SELECT 1 FROM rpg_chronicle_expedition_claims WHERE user_id=? AND expedition_started_at=?",(uid,started)).fetchone()
+    uid=int(row['user_id']); cid=int(row['chat_id']); tid=int(row['thread_id']); started=int(row['started_at']); kw=max(0,int(row['reward_kw'])); es=max(0,int(row['reward_essence']))
+    claim=c.execute("SELECT 1 FROM rpg_chronicle_expedition_claims_v2 WHERE user_id=? AND chat_id=? AND thread_id=? AND expedition_started_at=?",(uid,cid,tid,started)).fetchone()
     if claim: return 0,0
-    c.execute("INSERT INTO rpg_chronicle_expedition_claims(user_id,expedition_started_at,reward_kw,reward_essence,claimed_at) VALUES(?,?,?,?,?)",(uid,started,kw,es,int(time.time())))
-    c.execute("UPDATE rpg_chronicle_expeditions SET status='finished',pending_type='',pending_code='',pending_data=?,nonce=nonce+1,updated_at=? WHERE user_id=?",(str(reason),int(time.time()),uid))
+    c.execute("INSERT INTO rpg_chronicle_expedition_claims_v2(user_id,chat_id,thread_id,expedition_started_at,reward_kw,reward_essence,claimed_at) VALUES(?,?,?,?,?,?,?)",(uid,cid,tid,started,kw,es,int(time.time())))
+    c.execute("UPDATE rpg_chronicle_expeditions_v2 SET status='finished',pending_type='',pending_code='',pending_data=?,nonce=nonce+1,updated_at=? WHERE user_id=? AND chat_id=? AND thread_id=?",(str(reason),int(time.time()),uid,cid,tid))
     return kw,es
 
 def _chron_exp_pay_rewards(user_id,kw,essence,chat_id):
@@ -4667,12 +4693,12 @@ def _chron_exp_pay_rewards(user_id,kw,essence,chat_id):
             for _ in range(int(essence)):
                 grant_rpg_item(user_id,int(char['id']),'esencia_tecnica',source='cronicas_expedicion')
 
-def _chron_exp_act_impl(user_id,nonce,action,rng=random):
-    uid=int(user_id); now=int(time.time()); payout=(0,0); final=None
+def _chron_exp_act_impl(user_id,chat_id,thread_id,nonce,action,rng=random):
+    uid=int(user_id); cid=int(chat_id); tid=int(thread_id or 0); now=int(time.time()); payout=(0,0); final=None
     with db_lock:
         c=get_db()
         try:
-            r=_chron_exp_row(uid,True,c)
+            r=_chron_exp_row(uid,cid,tid,True,c)
             if not r or str(r['status'])!='active': c.rollback(); c.close(); return False,"Esa expedición ya terminó.",None,None
             if int(r['nonce'])!=int(nonce): c.rollback(); c.close(); return False,"Ese botón ya es antiguo.",r,None
             typ=str(r.get('pending_type') or ''); valid={'advance','retreat','skip'}
@@ -4735,9 +4761,9 @@ def _chron_exp_act_impl(user_id,nonce,action,rng=random):
             if hp<=0:
                 # El peligro cuesta la mitad de la bolsa, nunca objetos clave.
                 kw//=2; es//=2
-                c.execute("UPDATE rpg_chronicle_expeditions SET reward_kw=?,reward_essence=? WHERE user_id=?",(kw,es,uid)); r=_chron_exp_row(uid,False,c)
+                c.execute("UPDATE rpg_chronicle_expeditions_v2 SET reward_kw=?,reward_essence=? WHERE user_id=? AND chat_id=? AND thread_id=?",(kw,es,uid,cid,tid)); r=_chron_exp_row(uid,cid,tid,False,c)
                 kw2,es2=_chron_exp_finish_locked(c,r,'failed'); c.commit(); c.close(); return True,scene+f"\n\n💀 Regresas malherido. Conservas la mitad de los hallazgos.",None,(kw2,es2,int(r['chat_id']))
-            c.execute("UPDATE rpg_chronicle_expeditions SET depth=?,hp_state=?,findings=?,pending_type=?,pending_code=?,reward_kw=?,reward_essence=?,nonce=nonce+1,updated_at=? WHERE user_id=?",(depth,hp,findings,typ,code,kw,es,now,uid)); c.commit(); nr=_chron_exp_row(uid,False,c); c.close()
+            c.execute("UPDATE rpg_chronicle_expeditions_v2 SET depth=?,hp_state=?,findings=?,pending_type=?,pending_code=?,reward_kw=?,reward_essence=?,nonce=nonce+1,updated_at=? WHERE user_id=? AND chat_id=? AND thread_id=?",(depth,hp,findings,typ,code,kw,es,now,uid,cid,tid)); c.commit(); nr=_chron_exp_row(uid,cid,tid,False,c); c.close()
         except Exception: c.rollback(); c.close(); raise
     if final:
         if final[0]=='key': chronicles_grant_key_item(uid,final[1],'Encontrado en una expedición')
@@ -4746,14 +4772,14 @@ def _chron_exp_act_impl(user_id,nonce,action,rng=random):
                 c=get_db(); c.execute("INSERT INTO rpg_chronicle_zone_unlocks(user_id,zone_key,unlocked_at) VALUES(?,?,?) ON CONFLICT(user_id,zone_key) DO NOTHING",(uid,final[1],now)); c.commit(); c.close()
     return True,scene,nr,None
 
-def chron_exp_act(user_id,nonce,action,rng=random):
+def chron_exp_act(user_id,chat_id,thread_id,nonce,action,rng=random):
     # Serializa decisiones del mismo usuario. El segundo callback verá el nonce ya consumido.
-    lock=_user_action_lock(_chron_exp_action_locks,_chron_exp_action_locks_guard,user_id)
+    lock=_user_action_lock(_chron_exp_action_locks,_chron_exp_action_locks_guard,user_id,chat_id,thread_id or 0)
     with lock:
-        return _chron_exp_act_impl(user_id,nonce,action,rng)
+        return _chron_exp_act_impl(user_id,chat_id,thread_id,nonce,action,rng)
 
-def chron_exp_status(user_id):
-    r=_chron_exp_row(user_id)
+def chron_exp_status(user_id,chat_id,thread_id):
+    r=_chron_exp_row(user_id,chat_id,thread_id)
     if not r or str(r['status'])!='active': return chron_exp_menu_text(user_id),chron_exp_zone_keyboard(user_id)
     return chron_exp_render(r),chron_exp_keyboard(r)
 
@@ -10349,10 +10375,10 @@ def _chron_exp_edit_card(chat_id, message, text, reply_markup=None):
 
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
+    thread_id=int(msg.get("message_thread_id") or 0)
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
     if data.startswith("cex:"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
-        thread_id=int(msg.get("message_thread_id") or 0)
         try:
             if data=="cex:locked": send_message(chat_id,"🔒 Esa ruta todavía no aparece en tu mapa."); return True
             if data.startswith("cex:start:"):
@@ -10360,7 +10386,7 @@ def handle_rpg_callback(query):
                 if not ok: send_message(chat_id,note); return True
                 _chron_exp_edit_card(chat_id,msg,chron_exp_render(row,"🚪 Das el primer paso. Aún puedes regresar... por ahora."),chron_exp_keyboard(row)); return True
             if data.startswith("cex:go:"):
-                _,_,nonce,action=data.split(":",3); ok,note,row,payout=chron_exp_act(uid,int(nonce),action)
+                _,_,nonce,action=data.split(":",3); ok,note,row,payout=chron_exp_act(uid,chat_id,thread_id,int(nonce),action)
                 if payout:
                     _chron_exp_pay_rewards(uid,payout[0],payout[1],payout[2]); _chron_exp_edit_card(chat_id,msg,note,chron_exp_zone_keyboard(uid)); return True
                 if not ok:
@@ -10373,7 +10399,7 @@ def handle_rpg_callback(query):
     if data.startswith("chron:"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
         if data=="chron:expeditions":
-            txt,kb=chron_exp_status(uid); send_message(chat_id,txt,reply_markup=kb); return True
+            txt,kb=chron_exp_status(uid,chat_id,thread_id); send_message(chat_id,txt,reply_markup=kb); return True
         if data=="chron:bestiary": send_message(chat_id,chronicles_bestiary_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:achievements": send_message(chat_id,chronicles_achievements_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:titles":
@@ -11395,7 +11421,7 @@ def process_command(
 
     if command in ("/expedicion", "/expedición", "/explorar"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
-        ensure_player(message.get("from",{})); txt,kb=chron_exp_status(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+        ensure_player(message.get("from",{})); txt,kb=chron_exp_status(user_id,chat_id,int(message.get("message_thread_id") or 0)); send_message(chat_id,txt,reply_markup=kb); return True
 
     if command in ("/cronicas", "/chronicles"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True

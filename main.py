@@ -701,8 +701,19 @@ def init_db():
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dungeons_chat_status ON rpg_dungeons(chat_id,status,expires_at)")
+
+        # Estas migraciones necesitan AccessExclusiveLock en PostgreSQL.  No las
+        # ejecutamos arrastrando todos los locks adquiridos durante init_db():
+        # durante un deploy el proceso anterior de Render puede seguir atendiendo
+        # consultas y eso puede formar un deadlock entre ambas instancias.
+        # Confirmar aquí deja esta migración en una transacción corta: puede
+        # esperar a que el proceso viejo libere rpg_dungeons, pero no mantiene
+        # locks de otras tablas mientras espera.
+        conn.commit()
         cur.execute("ALTER TABLE rpg_dungeons ADD COLUMN IF NOT EXISTS boss_id BIGINT NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE rpg_dungeons ADD COLUMN IF NOT EXISTS treasure_awarded BIGINT NOT NULL DEFAULT 0")
+        conn.commit()
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_dungeon_runs (
                 dungeon_id BIGINT NOT NULL, user_id BIGINT NOT NULL, room BIGINT NOT NULL DEFAULT 1,

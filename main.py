@@ -9039,22 +9039,31 @@ def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
     if data=="drawg_take":
-        ok,msg2=_drawg_claim(chat_id,user,msg.get("message_thread_id"))
-        if not ok:
-            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True}); return True
-        topic=int(msg.get("message_thread_id") or 0)
-        # En grupos Telegram puede rechazar login_url si el dominio no está vinculado en BotFather.
-        # Usamos un enlace HTTPS firmado, corto y ligado al artista/chat/topic para abrir el lienzo
-        # directamente desde el mismo mensaje, sin mandar al usuario al privado del bot.
-        access=_drawg_access_token(int(uid),int(chat_id),topic,ttl=300)
-        url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}&topic={topic}&access={access}"
-        keyboard={"inline_keyboard":[[{"text":"🎨 ABRIR MI LIENZO","url":url}]]}
-        edited=telegram("editMessageReplyMarkup",{"chat_id":chat_id,"message_id":msg.get("message_id"),"reply_markup":keyboard})
-        if not edited or not edited.get('ok'):
-            with db_lock:
-                c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET status='idle',artist_id=0,artist_name='',updated_at=? WHERE scope_key=?",(int(time.time()),_drawg_scope(chat_id,topic))); c.commit(); c.close()
-            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"No pude preparar el lienzo. Intenta tomar el turno otra vez.","show_alert":True})
-        return True
+        logger.info("Dibuja callback take | chat=%s topic=%s user=%s",chat_id,msg.get("message_thread_id"),uid)
+        try:
+            ok,msg2=_drawg_claim(chat_id,user,msg.get("message_thread_id"))
+            if not ok:
+                telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True}); return True
+            topic=int(msg.get("message_thread_id") or 0)
+            access=_drawg_access_token(int(uid),int(chat_id),topic,ttl=900)
+            from urllib.parse import urlencode
+            url=PUBLIC_BASE_URL+"/rpg/draw-global?"+urlencode({"chat":int(chat_id),"topic":topic,"access":access})
+            keyboard={"inline_keyboard":[[{"text":"🎨 ABRIR MI LIENZO","url":url}]]}
+            edited=telegram("editMessageReplyMarkup",{"chat_id":chat_id,"message_id":msg.get("message_id"),"reply_markup":keyboard})
+            if not edited or not edited.get('ok'):
+                # Fallback visible: no perdemos el turno si Telegram no permite editar el mensaje.
+                send_message(chat_id,"🎨 Turno tomado. Abre tu lienzo:",reply_markup=keyboard)
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"Turno tomado. Abre tu lienzo.","show_alert":False})
+            return True
+        except Exception as e:
+            logger.exception("Fallo preparando Dibuja y Adivina")
+            try:
+                with db_lock:
+                    c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET status='idle',artist_id=0,artist_name='',updated_at=? WHERE scope_key=?",(int(time.time()),_drawg_scope(chat_id,int(msg.get('message_thread_id') or 0)))); c.commit(); c.close()
+            except Exception:
+                logger.exception("No se pudo liberar turno de dibujo tras error")
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"No pude abrir el lienzo. El turno fue liberado.","show_alert":True})
+            return True
     if data.startswith("qm:"):
         try:
             _,mid,kind,choice=data.split(":",3)
@@ -9138,12 +9147,20 @@ def handle_rpg_callback(query):
         if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 Esa tienda ya no pertenece al chat RPG activo."); return True
         kind=data.split(":",1)[1]; ok,msg2=event_buy(chat_id,uid,kind); send_message(chat_id,msg2); return True
     if data.startswith("rpg_dungeon_enter:"):
-        try: dungeon_id=int(data.split(":",1)[1])
-        except Exception: return True
-        ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
-        char=get_active_character(uid)
-        kb=rpg_battle_keyboard(char["class_name"],0,0,uid) if ok and char else None
-        send_message(chat_id,msg2,reply_markup=kb)
+        logger.info("Mazmorra callback enter | chat=%s user=%s data=%s",chat_id,uid,data)
+        try:
+            dungeon_id=int(data.split(":",1)[1])
+        except Exception:
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"Botón de mazmorra inválido.","show_alert":True}); return True
+        try:
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"Entrando a la mazmorra…","show_alert":False})
+            ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
+            char=get_active_character(uid)
+            kb=rpg_battle_keyboard(char["class_name"],0,0,uid) if ok and char else None
+            send_message(chat_id,msg2,reply_markup=kb)
+        except Exception:
+            logger.exception("Error entrando a mazmorra | chat=%s user=%s dungeon=%s",chat_id,uid,dungeon_id)
+            send_message(chat_id,"⚠️ No pude abrir la mazmorra por un error interno. Ya quedó registrado en los logs.")
         return True
     if data.startswith("rpg_help_revive:"):
         try: target_id=int(data.split(":",1)[1])
@@ -12608,7 +12625,7 @@ def _drawg_validate_login_query(args, max_age=900):
         if abs(int(time.time())-int(data['auth_date']))>int(max_age):
             return None
         check='\\n'.join(f'{k}={data[k]}' for k in sorted(data))
-        secret=hashlib.sha256(BOT_TOKEN.encode()).digest()
+        secret=hashlib.sha256(TELEGRAM_TOKEN.encode()).digest()
         want=hmac.new(secret,check.encode(),hashlib.sha256).hexdigest()
         if not hmac.compare_digest(want,got):
             return None
@@ -12619,14 +12636,14 @@ def _drawg_validate_login_query(args, max_age=900):
 def _drawg_access_token(uid,chat_id,topic,ttl=1800):
     exp=int(time.time())+int(ttl)
     body=f'{int(uid)}:{int(chat_id)}:{int(topic or 0)}:{exp}'
-    sig=hmac.new(BOT_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
+    sig=hmac.new(TELEGRAM_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
     return f'{body}:{sig}'
 
 def _drawg_access_uid(token,chat_id,topic):
     try:
         uid_s,chat_s,topic_s,exp_s,sig=str(token or '').split(':',4)
         body=f'{uid_s}:{chat_s}:{topic_s}:{exp_s}'
-        want=hmac.new(BOT_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
+        want=hmac.new(TELEGRAM_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
         if not hmac.compare_digest(want,sig) or int(exp_s)<int(time.time()): return 0
         if int(chat_s)!=int(chat_id) or int(topic_s)!=int(topic or 0): return 0
         return int(uid_s)

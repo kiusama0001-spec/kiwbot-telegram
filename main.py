@@ -7839,7 +7839,21 @@ def marriage_profile_line(user_id):
     row=_marriage_row(user_id,("active",))
     if not row: return "💞 Pareja: —"
     pid=_marriage_partner_id(row,user_id)
-    return f"💞 Pareja: {_player_name_by_id(pid)} · 💍 Casados"
+    return (
+        f"💞 Pareja: {_player_name_by_id(pid)} · 💍 Casados\n"
+        f"⚔️ Bonus de pareja: +{RPG_MARRIAGE_BOSS_BONUS}% daño contra Bosses · ACTIVO"
+    )
+
+
+def clan_profile_line(user_id):
+    cl=rpg_user_clan(user_id)
+    if not cl:
+        return "🏰 Clan: —"
+    role="Líder" if str(cl.get("role") or "") == "leader" else "Miembro"
+    return (
+        f"🏰 Clan: {cl['name']} · {role}\n"
+        f"✨ Bonus de clan: +{RPG_CLAN_EXP_BONUS}% EXP · ACTIVO"
+    )
 
 
 def marriage_boss_multiplier(user_id):
@@ -10636,7 +10650,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             "👤 PERFIL DE JUGADOR\n\n"
             f"Jugador: {player_display_name(user)}\n"
             f"Kiwons: {balance:,} KW\n"
-            f"{marriage_profile_line(user_id)}\n\n"
+            f"{marriage_profile_line(user_id)}\n"
+            f"{clan_profile_line(user_id)}\n\n"
             f"{rpg_text}"
         )
         return True

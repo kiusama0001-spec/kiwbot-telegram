@@ -1312,6 +1312,12 @@ def init_db():
                 setting_key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', updated_at BIGINT NOT NULL
             )
         """)
+        # Migración única: al pasar Boss normal a cada 3 horas, descarta el próximo horario corto heredado.
+        _boss3h=cur.execute("SELECT value FROM rpg_chronicles_settings WHERE setting_key='boss_interval_3h_v1'").fetchone()
+        if not _boss3h:
+            _now3h=int(time.time())
+            cur.execute("UPDATE rpg_auto_chats SET next_boss_at=?,updated_at=? WHERE enabled=1",(_now3h+3*60*60,_now3h))
+            cur.execute("INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES('boss_interval_3h_v1','1',?)",(_now3h,))
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_bestiary (
                 user_id BIGINT NOT NULL, enemy_key TEXT NOT NULL, sightings BIGINT NOT NULL DEFAULT 0,
@@ -1363,6 +1369,12 @@ def init_db():
                 user_id BIGINT NOT NULL, finding_key TEXT NOT NULL, finding_type TEXT NOT NULL DEFAULT 'echo',
                 discovered_at BIGINT NOT NULL, detail TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(user_id,finding_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_chronicle_world_flags (
+                user_id BIGINT NOT NULL, flag_key TEXT NOT NULL, flag_value TEXT NOT NULL DEFAULT '',
+                updated_at BIGINT NOT NULL DEFAULT 0, PRIMARY KEY(user_id,flag_key)
             )
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chron_world_findings_user ON rpg_chronicle_world_findings(user_id,discovered_at)")
@@ -4585,7 +4597,8 @@ def chronicles_world_event_after_victory(user_id,chat_id,enemy_key,rarity='norma
                 k=rng.choice(unseen or keys); detail=CHRON_WORLD_ECHOES[k]
                 is_new=_chron_world_record(conn,uid,'echo:'+k,'echo',detail)
                 if is_new: _chron_unlock_first(conn,'world:echo:'+k,uid,'Un eco del Mundo Vivo')
-                text=f"🌒 EL MUNDO REACCIONA\n\n{detail}\n\nNo ocurre nada más."
+                extra=_chron_world_consequence(conn,uid,k)
+                text=f"🌒 EL MUNDO REACCIONA\n\n{detail}{extra}\n\nNo ocurre nada más."
             conn.execute("""INSERT INTO rpg_chronicle_world_state(user_id,last_event_at,total_events,updated_at) VALUES(?,?,1,?)
                 ON CONFLICT(user_id) DO UPDATE SET last_event_at=EXCLUDED.last_event_at,total_events=rpg_chronicle_world_state.total_events+1,updated_at=EXCLUDED.updated_at""",
                 (uid,now,now))
@@ -4595,6 +4608,86 @@ def chronicles_world_event_after_victory(user_id,chat_id,enemy_key,rarity='norma
             try: conn.rollback(); conn.close()
             except Exception: pass
             raise
+
+def _chron_world_has_item(conn,user_id,item_key):
+    return bool(conn.execute("SELECT 1 FROM rpg_chronicle_key_items WHERE user_id=? AND item_key=?",(int(user_id),str(item_key))).fetchone())
+
+def _chron_world_has_finding(conn,user_id,key):
+    return bool(conn.execute("SELECT 1 FROM rpg_chronicle_world_findings WHERE user_id=? AND finding_key=?",(int(user_id),str(key))).fetchone())
+
+def _chron_world_set_flag(conn,user_id,key,value):
+    conn.execute("""INSERT INTO rpg_chronicle_world_flags(user_id,flag_key,flag_value,updated_at) VALUES(?,?,?,?)
+        ON CONFLICT(user_id,flag_key) DO UPDATE SET flag_value=EXCLUDED.flag_value,updated_at=EXCLUDED.updated_at""",
+        (int(user_id),str(key),str(value),int(time.time())))
+
+def _chron_world_get_flag(conn,user_id,key):
+    return conn.execute("SELECT flag_value,updated_at FROM rpg_chronicle_world_flags WHERE user_id=? AND flag_key=?",(int(user_id),str(key))).fetchone()
+
+def chronicles_malkor_secret(user_id):
+    uid=int(user_id)
+    with db_lock:
+        conn=get_db()
+        try:
+            if not _chron_world_has_item(conn,uid,'moneda_sin_rostro'):
+                conn.close(); return "🐪 Malkor te mira las manos.\n\n—No traes nada que me interese. Y eso, viniendo de mí, es preocupante."
+            first=not _chron_world_has_finding(conn,uid,'secret:malkor_coin')
+            if first:
+                _chron_world_record(conn,uid,'secret:malkor_coin','secret','Malkor reconoció la Moneda sin Rostro')
+                _chron_unlock_first(conn,'world:secret:malkor_coin',uid,'Hizo hablar a Malkor sobre la Moneda sin Rostro')
+                _chron_world_set_flag(conn,uid,'knock_clue','1')
+            conn.commit(); conn.close()
+            return ("🐪 Malkor deja de sonreír en cuanto ve la moneda.\n\n"
+                    "—Guárdala. No la vendas. Y si alguna noche escuchas tres golpes donde no debería haber una puerta... "
+                    "no abras. Primero pregunta quién es.\n\n"
+                    "Malkor vuelve a ordenar su mercancía.\n\n—Y no, no pienso explicarte más.")
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+def chronicles_world_malkor_button(user_id):
+    try:
+        with db_lock:
+            conn=get_db(); has=_chron_world_has_item(conn,int(user_id),'moneda_sin_rostro'); conn.close()
+        return [{"text":"🪙 Mostrar Moneda sin Rostro","callback_data":"chron_secret:malkor_coin"}] if has else None
+    except Exception:
+        return None
+
+def _chron_world_consequence(conn,user_id,echo_key):
+    uid=int(user_id)
+    if echo_key=='black_door' and _chron_world_has_item(conn,uid,'llave_oxidada') and not _chron_world_has_finding(conn,uid,'secret:rust_key'):
+        _chron_world_record(conn,uid,'secret:rust_key','secret','La Llave Oxidada reaccionó ante la Puerta Negra')
+        _chron_unlock_first(conn,'world:secret:rust_key',uid,'Hizo reaccionar la Llave Oxidada')
+        return "\n\n🗝️ La Llave Oxidada se calienta en tu inventario. Por un instante, la puerta parece tener cerradura."
+    if echo_key=='nameless_whisper' and _chron_world_has_item(conn,uid,'pluma_negra') and not _chron_world_has_finding(conn,uid,'secret:black_feather'):
+        _chron_world_record(conn,uid,'secret:black_feather','secret','La Pluma Negra escribió una palabra imposible')
+        return "\n\n🪶 La Pluma Negra deja una marca sobre tu mano: «UMBRAL». Un segundo después desaparece."
+    if echo_key=='cold_footprints' and _chron_world_has_item(conn,uid,'fragmento_mapa') and not _chron_world_has_finding(conn,uid,'secret:map_tracks'):
+        _chron_world_record(conn,uid,'secret:map_tracks','secret','El Fragmento de Mapa dibujó un camino nuevo')
+        return "\n\n🗺️ El Fragmento de Mapa cambia. Ahora muestra tres huellas y una X donde antes no había nada."
+    if echo_key=='broken_clock' and _chron_world_get_flag(conn,uid,'knock_clue'):
+        _chron_world_set_flag(conn,uid,'knock_until',str(int(time.time())+600))
+        return "\n\n...toc... toc... toc..."
+    return ''
+
+def handle_chronicles_secret_text(message,text):
+    raw=' '.join(str(text or '').strip().lower().replace('¿','').replace('?','').split())
+    if raw not in ('quien es','quién es'): return False
+    uid=int((message.get('from') or {}).get('id') or 0); chat_id=int((message.get('chat') or {}).get('id') or 0)
+    if not uid or not chat_id or not chronicles_enabled(): return False
+    now=int(time.time())
+    with db_lock:
+        conn=get_db(); flag=_chron_world_get_flag(conn,uid,'knock_until')
+        if not flag: conn.close(); return False
+        try: until=int(flag.get('flag_value') or 0)
+        except Exception: until=0
+        if now>until:
+            conn.execute("DELETE FROM rpg_chronicle_world_flags WHERE user_id=? AND flag_key='knock_until'",(uid,)); conn.commit(); conn.close(); return False
+        fresh=not _chron_world_has_finding(conn,uid,'secret:three_knocks')
+        if fresh:
+            _chron_world_record(conn,uid,'secret:three_knocks','secret','Respondió a los tres golpes')
+            _chron_unlock_first(conn,'world:secret:three_knocks',uid,'Respondió a los tres golpes')
+        conn.execute("DELETE FROM rpg_chronicle_world_flags WHERE user_id=? AND flag_key='knock_until'",(uid,)); conn.commit(); conn.close()
+    send_message(chat_id,"🚪 ...\n\n—Todavía no.\n\nLa voz viene del otro lado de algo que no puedes ver.\n\n🌒 Has descubierto un secreto del Mundo Vivo.")
+    return True
 
 # Protección de acciones de Boss contra doble clic concurrente.
 # Render procesa callbacks en varios hilos; un botón puede llegar dos veces antes
@@ -7996,7 +8089,7 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
 # =========================================================
 RPG_AUTO_ENCOUNTER_INTERVAL = 3 * 60
 RPG_AUTO_ENCOUNTER_TTL = 2 * 60 + 40
-RPG_AUTO_BOSS_INTERVAL = 30 * 60
+RPG_AUTO_BOSS_INTERVAL = 3 * 60 * 60
 # =========================================================
 # KIWRPG V9 — CLANES + EVENTOS MENSUALES + WORLD BOSS
 # =========================================================
@@ -8375,6 +8468,8 @@ def merchant_private_text_keyboard(merchant_id, user_id=None):
         elif char and not compatible: btn={"text":f"🔒 No compatible · {o['name']}","callback_data":"merchant_incompatible"}
         else: btn={"text":f"{icon} Ver / comprar · {o['name']}","callback_data":f"merchant_confirm:{int(o['id'])}"}
         kb.append([btn])
+    secret_btn=chronicles_world_malkor_button(user_id) if user_id else None
+    if secret_btn: kb.append(secret_btn)
     return "\n".join(lines),{"inline_keyboard":kb}
 
 def merchant_confirm_text(user_id, offer_id):
@@ -9215,8 +9310,8 @@ def rpg_auto_world_tick(now=None):
             finally:
                 set_current_message_thread_id(_old_topic)
     except Exception: logger.exception("Error sincronizando eventos mensuales")
-    # Boss normal cooperativo cada 30 minutos. Los Bosses Mundiales pertenecen solo a eventos. Si el anterior sigue vivo, no se duplica:
-    # simplemente se programa la siguiente comprobación media hora después.
+    # Boss normal cooperativo cada 3 horas. Los Bosses Mundiales pertenecen solo a eventos. Si el anterior sigue vivo, no se duplica:
+    # simplemente se programa la siguiente comprobación 3 horas después.
     for rr in boss_due:
         chat_id=int(rr['chat_id']); topic=rr.get('message_thread_id')
         try:
@@ -9510,7 +9605,7 @@ def send_will_quick_mission_video(chat_id, caption, reply_markup=None):
         return send_message(chat_id,caption,reply_markup=reply_markup)
     try:
         with path.open("rb") as fh:
-            resp=TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendAnimation",data={"chat_id":str(int(chat_id)),"caption":caption},files={"animation":("will-ospreay-hidden-blade.mp4",fh,"video/mp4")},timeout=TELEGRAM_TIMEOUT)
+            resp=TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendAnimation",data=apply_current_topic({"chat_id":str(int(chat_id)),"caption":caption}),files={"animation":("will-ospreay-hidden-blade.mp4",fh,"video/mp4")},timeout=TELEGRAM_TIMEOUT)
         payload=resp.json() if resp.ok else {}
         anim=((payload.get("result") or {}).get("animation") or {})
         if anim.get("file_id"): _rpg_asset_set("will_ospreay_hidden_blade",anim["file_id"])
@@ -10647,6 +10742,12 @@ def handle_rpg_callback(query):
         try: oid=int(data.split(":",1)[1])
         except Exception: return True
         ok,msg2=answer_trade_offer(oid,uid,accept); send_message(chat_id,msg2); return True
+    if data=="chron_secret:malkor_coin":
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        try: send_message(chat_id,chronicles_malkor_secret(uid))
+        except Exception:
+            logger.exception("Error en secreto de Malkor"); send_message(chat_id,"🐪 Malkor decide que hoy no quiere hablar de eso.")
+        return True
     if data.startswith("merchant_confirm:"):
         if not _is_private_chat_obj(msg.get("chat")): return True
         try: oid=int(data.split(":",1)[1])
@@ -13354,6 +13455,9 @@ def process_update(
         if handle_reset_password_message(message, text):
             return
         if handle_character_name_message(message, text):
+            return
+
+        if handle_chronicles_secret_text(message, text):
             return
 
         if handle_quick_mission_text(message, text):

@@ -10386,6 +10386,94 @@ _RPG_ENEMY_VISUALS = {
     "bestia_eclipse": "a colossal quadrupedal eclipse beast, black fur, crescent-like horns, cosmic shadow aura",
 }
 
+
+# Dirección artística específica por asset. El objetivo es que FLUX no repita
+# la misma silueta/composición para todo el catálogo.
+_RPG_CLASS_VISUALS = {
+    "guerrero":"battle-worn human swordmaster in heavy steel plate, broad longsword, scarred shield, red cloth accents, grounded defensive stance",
+    "mago":"arcane human mage in layered indigo robes, floating spellbook, crystal-tipped staff, luminous geometric runes orbiting both hands",
+    "picaro":"lean hooded human rogue in asymmetrical black leather, twin curved daggers, smoke bombs and climbing gear, low stalking pose",
+    "paladin":"radiant human holy knight in ivory-and-gold plate, tower shield, consecrated warhammer, halo-like sun sigil behind the head",
+    "arquero":"forest ranger in practical green-brown light armor, recurved longbow fully drawn, feathered arrows, windswept cloak, alert hunter stance",
+    "the_cleaner":"elite dark fantasy executioner-assassin in an elegant long black combat coat, two distinct silver-white angelic blades, immaculate gloves, calm intimidating posture",
+}
+_RPG_BOSS_VISUALS = {
+    "golem":"gigantic iron golem assembled from riveted fortress plates, furnace core glowing through the chest, massive piston fists, steam leaking from joints",
+    "fenrir":"colossal crimson dire wolf, strictly quadrupedal canine anatomy, four legs, enormous fangs, torn black chains, ember-red mane, no humanoid traits",
+    "rey_demonio":"towering horned demon king in blackened royal armor, molten crown fused to the skull, huge infernal greatsword, torn ceremonial cape",
+    "lich":"skeletal arch-lich floating above the ground, cracked obsidian crown, ancient robes, violet soul-fire in empty eye sockets, orbiting necromantic relics",
+    "leviatan":"impossibly huge abyssal sea serpent emerging from a storm-black ocean, bioluminescent fins, barnacled scales, vast jaws, tiny ships for scale",
+    "angel_caido":"fallen celestial warrior with six damaged black wings, broken golden halo, pale armor fractured by dark light, long spear pointed downward",
+    "hidra":"enormous nine-headed reptilian hydra, nine clearly separate serpentine necks and jaws, swamp scales, venom mist, four powerful legs",
+    "emperador_caos":"surreal armored chaos emperor whose silhouette fractures into impossible geometry, mismatched cosmic horns, reality cracks and unstable colored energy",
+    "arachne":"monstrous spider queen with a giant black arachnid lower body and regal humanoid torso, eight spider legs clearly visible, silk crown and web blades",
+    "behemoth":"mountain-sized quadrupedal bone behemoth, thick skeletal armor plates, fossil horns, exposed red marrow glow, charging through shattered stone",
+    "vlad":"aristocratic vampire warlord in blood-red and black plate, pale face, long dark hair, elegant rapier, cape dissolving into a swarm of bats",
+    "raijin":"muscular storm deity suspended among thunderclouds, ring of war drums behind him, lightning coiling around arms, wild hair, divine oni-inspired armor",
+    "nidhogg":"colossal ancient black dragon, four legs plus two vast wings, root-like horns, corrosive green breath, coiled around the roots of a dying world-tree",
+    "chronos":"ancient armored time guardian, faceless clockwork helm, enormous broken clock halo, sand flowing upward, segmented temporal spear",
+    "azath":"eldritch abyss god with no ordinary human anatomy, immense many-eyed shadow mass, crown of void tendrils, stars bending around its silhouette",
+    "will_trial":"titanic void titan Aeternus, humanoid stone-and-cosmic body, glowing cracks filled with stars, enormous ring-shaped portal behind the shoulders",
+}
+_RPG_PET_VISUALS = {
+    "slime_lunar":"tiny pearlescent moon slime, round gelatinous body, crescent glow inside, cute simple face",
+    "murcielago_cueva":"small charcoal cave bat, oversized ears, leathery wings, bright curious eyes, hanging from a crystal",
+    "zorro_ceniza":"small ash-gray fox, four paws, fluffy tail tipped with drifting cinders, bright amber eyes",
+    "buho_errante":"compact tawny owl with travel satchel and tiny brass compass, wings folded, large intelligent eyes",
+    "gato_runa":"small black cat with glowing blue runes woven through its fur, long tail, silver collar charm",
+    "cuervo_gris":"sleek gray raven with metallic feather highlights, black beak, tiny charm tied to one leg",
+    "lagarto_brasa":"small four-legged ember lizard, charcoal scales with warm orange cracks, harmless sparks from nostrils",
+    "conejo_astral":"fluffy white rabbit with star-speckled ears, tiny nebula drifting around its paws",
+    "escarabajo_hierro":"palm-sized iron beetle, six legs, polished segmented shell, tiny rune engravings",
+    "luci_luna":"delicate lunar firefly with translucent wings and a bright silver-blue abdomen, floating in darkness",
+    "lobo_carmesi":"young crimson wolf companion, quadrupedal canine, thick red fur, black paws, confident but friendly expression",
+    "pantera_niebla":"sleek quadrupedal black panther partially dissolving into pale mist, luminous teal eyes",
+    "halcon_tempestad":"sharp-eyed storm hawk in flight, broad wings, dark feathers edged with tiny lightning arcs",
+    "serpiente_jade":"elegant limbless jade-green serpent, polished gemlike scales, curled around a small stone lantern",
+    "tigre_hielo":"young white tiger with icy blue stripes, four paws, frost on whiskers, visible cold breath",
+    "oso_runa":"stout young brown bear with carved glowing runes on stone-like shoulder plates, friendly guardian posture",
+    "kitsune_celeste":"celestial fox with multiple flowing tails, white-blue fur, star sparks and delicate gold ornaments",
+    "sabueso_nocturno":"lean supernatural black hound, four legs, violet eyes, shadow vapor trailing from paws",
+    "fenix_azur":"small majestic azure phoenix, bird anatomy, wings spread, blue flame feathers that do not burn the perch",
+    "grifon_real":"young royal griffin, eagle head and wings with lion hindquarters, gold-white plumage, proud pose",
+    "kirin_tormenta":"graceful storm kirin, deer-horse body, single branching horn, cloud mane and small lightning arcs",
+    "cerbero_joven":"young three-headed black hound, exactly three canine heads, four legs, ember collars, playful but fierce",
+    "wyvern_obsidiana":"young obsidian wyvern, two hind legs and two wing-arms, glassy black scales, violet membrane wings",
+    "dragon_dorado":"regal golden dragon companion, four legs and two wings, polished gold scales, warm sunlit breath",
+    "fenrir_blanco":"large snow-white dire wolf companion, quadrupedal canine anatomy, icy blue eyes, silver rune collar",
+    "quimera_solar":"mythic solar chimera combining lion body, goat features and serpent tail, radiant mane, coherent four-legged silhouette",
+    "leviatan_celeste":"miniature celestial sea leviathan floating through the air like water, long serpentine body, blue-white fins and starlight scales",
+    "angel_negro":"small dark celestial guardian, humanoid angel with four black feathered wings, obsidian halo, solemn expression",
+    "azazel_devoraalmas":"miniature demonic familiar Azazel, horned imp-like sovereign with spectral soul flames, black-red wings, ornate collar",
+    "belial_rey_infernal":"miniature infernal king Belial, proud horned demon familiar in tiny royal armor, crown of flame, controlled fire aura",
+}
+_RPG_EVENT_ART = {
+    1:("frozen new-year citadel, aurora sky, ice lanterns and crystalline banners","cold blue moonlight, glittering snow","high wide establishing shot"),
+    2:("enchanted crimson festival garden, heart-shaped crystal lanterns and rose arches","warm magenta twilight","romantic symmetrical avenue view"),
+    3:("stormy spring battlefield, emerald banners, rain-swept ruins and fresh green growth","green-gray storm light","low dynamic landscape angle"),
+    4:("ancient blossom sanctuary, giant flowering trees, floating petals and rune shrines","soft golden sunrise","serene panoramic composition"),
+    5:("sunlit tournament city, colorful pennants, training grounds and crowded fantasy stands","bright midday sunlight","energetic arena establishing shot"),
+    6:("midsummer volcanic coast, bonfires, glowing reefs and red-orange festival tents","fiery sunset","sweeping coastal vista"),
+    7:("high celestial observatory, star bridges, floating islands and meteor showers","deep indigo starlight","upward-looking cosmic panorama"),
+    8:("lush monsoon jungle temple, waterfalls, giant leaves and glowing ancient statues","humid emerald light shafts","adventure expedition wide shot"),
+    9:("harvest kingdom, amber fields, giant moon, market stalls and rune-lit windmills","warm amber dusk","layered countryside vista"),
+    10:("gothic autumn city, candlelit streets, pumpkins, ravens and crimson leaves","orange-purple twilight","street-level cinematic perspective"),
+    11:("haunted necropolis during a festival of souls, marigold paths, spectral candles and ancestral altars","blue-violet night with warm candlelight","deep processional avenue composition"),
+    12:("snow-covered fantasy capital celebrating winter, giant illuminated tree, crystal ornaments and fireworks","festive blue-gold night","grand plaza aerial-wide view"),
+}
+
+def _rpg_art_variant(key):
+    """Dirección de cámara determinista para dar variedad sin volver aleatorio el lore."""
+    variants=[
+        ("low three-quarter camera angle","strong rim light","ruined battlefield"),
+        ("eye-level three-quarter view","moody side lighting","ancient stone sanctuary"),
+        ("slightly elevated camera","backlit volumetric rays","windswept fantasy wilderness"),
+        ("dramatic close-to-ground perspective","hard moonlit silhouette","misty ruined courtyard"),
+        ("dynamic diagonal composition","contrasting fire-and-shadow light","rocky cliff environment"),
+        ("calm centered portrait with asymmetrical background","soft atmospheric light","mysterious arcane chamber"),
+    ]
+    return variants[sum(ord(c) for c in str(key))%len(variants)]
+
 def _rpg_ai_lock(asset_key):
     key=str(asset_key or "").strip().lower()
     with _RPG_AI_IMAGE_LOCKS_GUARD:
@@ -10442,31 +10530,28 @@ def _rpg_ai_asset_info(asset_key):
         cfg=_rpg_enemy_info(key)
         if not cfg: return None
         visual=_RPG_ENEMY_VISUALS.get(key, f"a hostile fantasy creature named {cfg.get('name',key)}")
-        return {"canonical":f"enemy:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":"dangerous bestiary encounter"}
+        camera,lighting,scene=_rpg_art_variant("enemy_"+key)
+        return {"canonical":f"enemy:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="class":
         aliases={"picaro":"picaro","pícaro":"picaro","paladin":"paladin","paladín":"paladin","the cleaner":"the_cleaner","the_cleaner":"the_cleaner"}
         key=aliases.get(key,key)
         if key not in ("guerrero","mago","picaro","paladin","arquero","the_cleaner"): return None
         labels={"guerrero":"Guerrero","mago":"Mago","picaro":"Pícaro","paladin":"Paladín","arquero":"Arquero","the_cleaner":"The Cleaner"}
-        visuals={
-          "guerrero":"a heroic armored fantasy warrior with sword and shield",
-          "mago":"a powerful arcane mage wielding luminous magic and a staff",
-          "picaro":"an agile fantasy rogue with light leather armor and twin daggers",
-          "paladin":"a noble heavily armored paladin with shield and radiant holy weapon",
-          "arquero":"an expert fantasy archer with longbow, quiver and light ranger armor",
-          "the_cleaner":"an elite dark fantasy cleaner-assassin, elegant black combat coat, twin angelic blades, controlled intimidating presence",
-        }
-        return {"canonical":f"class:{key}","kind":kind,"key":key,"name":labels[key],"visual":visuals[key],"scene":"iconic playable hero portrait"}
+        camera,lighting,scene=_rpg_art_variant(key)
+        return {"canonical":f"class:{key}","kind":kind,"key":key,"name":labels[key],"visual":_RPG_CLASS_VISUALS[key],"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="boss":
         cfg=RPG_BOSSES.get(key)
         if not cfg: return None
-        return {"canonical":f"boss:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":f"a colossal unique dark fantasy raid boss named {cfg.get('name',key)}, visual theme {cfg.get('style','tactical')}","scene":"epic raid boss arena"}
+        camera,lighting,scene=_rpg_art_variant("boss_"+key)
+        return {"canonical":f"boss:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":_RPG_BOSS_VISUALS.get(key,f"a colossal unique raid boss named {cfg.get('name',key)}"),"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="pet":
         cfg=RPG_PETS.get(key)
         if not cfg: return None
-        return {"canonical":f"pet:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":f"a charming collectible fantasy companion creature named {cfg.get('name',key)}, rarity {cfg.get('rarity','fantasy')}","scene":"magical companion showcase"}
+        camera,lighting,scene=_rpg_art_variant("pet_"+key)
+        visual=_RPG_PET_VISUALS.get(key,f"a unique collectible fantasy companion named {cfg.get('name',key)}, visually themed around {cfg.get('rarity','fantasy')} rarity")
+        return {"canonical":f"pet:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="npc" and key=="malkor":
-        return {"canonical":"npc:malkor","kind":kind,"key":key,"name":"Malkor","visual":"Malkor, a charismatic mysterious dark-fantasy traveling merchant, clever rogue-like human trader with layered merchant clothes, satchel, trinkets and a knowing expression","scene":"mysterious fantasy market stall"}
+        return {"canonical":"npc:malkor","kind":kind,"key":key,"name":"Malkor","visual":"Malkor, lean middle-aged traveling merchant with sharp amber eyes, dark auburn hair, layered charcoal-and-burgundy merchant coat, leather satchel overflowing with strange relics, rings and keys, one gloved hand presenting a suspicious glowing artifact, sly knowing half-smile","scene":"cramped night bazaar stall packed with hanging charms, potion bottles and relic crates","camera":"waist-up three-quarter merchant portrait","lighting":"warm lantern light against cool blue night"}
     if kind in ("event","eventboss"):
         if key=="opening_2026": cfg=_opening_cfg()
         else:
@@ -10474,8 +10559,13 @@ def _rpg_ai_asset_info(asset_key):
             cfg=_event_cfg(int(m.group(1)),int(m.group(2))) if m else None
         if not cfg: return None
         if kind=="event":
-            return {"canonical":f"event:{key}","kind":kind,"key":key,"name":f"{cfg['title']} {cfg['year']}","visual":f"a grand seasonal fantasy RPG event scene for {cfg['title']} {cfg['year']}, celebratory environment, thematic decorations, adventurers in the distance","scene":"wide cinematic seasonal event key art"}
-        return {"canonical":f"eventboss:{key}","kind":kind,"key":key,"name":str(cfg['boss']),"visual":f"a colossal unique seasonal raid boss named {cfg['boss']}, themed for {cfg['title']} {cfg['year']}","scene":"epic seasonal raid boss arena"}
+            theme,lighting,camera=_RPG_EVENT_ART.get(int(cfg.get('month') or 1),_RPG_EVENT_ART[1])
+            if key=="opening_2026": theme="grand inaugural fantasy capital opening its colossal gates for the first time, gold-blue banners, crowds of adventurers, fireworks and floating KiwRPG crystals"; lighting="triumphant sunrise with gold volumetric rays"; camera="very wide heroic establishing shot through the opening gates"
+            return {"canonical":f"event:{key}","kind":kind,"key":key,"name":f"{cfg['title']} {cfg['year']}","visual":theme,"scene":f"seasonal celebration: {cfg['title']} {cfg['year']}","camera":camera,"lighting":lighting}
+        theme,lighting,camera=_RPG_EVENT_ART.get(int(cfg.get('month') or 1),_RPG_EVENT_ART[1])
+        boss_visual=f"colossal one-of-a-kind seasonal raid boss {cfg['boss']}, creature design visibly inspired by {theme}; intimidating silhouette, environment-scaled anatomy, unique crown/horns/armor motifs matching the season"
+        if key=="opening_2026": boss_visual="Aeternus, Guardian of the First Gate: colossal stone-and-celestial titan with a radiant keyhole-shaped core, monumental gate fragments orbiting its shoulders, blue-gold cosmic energy"
+        return {"canonical":f"eventboss:{key}","kind":kind,"key":key,"name":str(cfg['boss']),"visual":boss_visual,"scene":theme,"camera":"extreme low-angle raid scale shot","lighting":lighting}
     return None
 
 def cloudflare_generate_rpg_asset_image(asset_key):
@@ -10487,11 +10577,14 @@ def cloudflare_generate_rpg_asset_image(asset_key):
         return cloudflare_generate_rpg_enemy_image(info['key'])
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         raise RuntimeError("Faltan CLOUDFLARE_ACCOUNT_ID o CLOUDFLARE_API_TOKEN en Render.")
-    framing="single subject, full body or nearly full body, centered, readable silhouette" if info['kind'] not in ("event",) else "wide environmental composition, clear focal point, cinematic depth"
+    framing="single clearly readable subject, full body or nearly full body, natural pose, strong silhouette" if info['kind'] not in ("event",) else "environment is the main subject, multiple depth layers, no single centered character portrait"
     prompt=(
-        "Premium dark fantasy cinematic RPG concept art. "
-        f"Subject: {info['visual']}. Scene: {info['scene']}. {framing}. "
-        "Consistent KiwRPG visual identity, dramatic volumetric lighting, atmospheric depth, realistic fantasy materials, high detail, polished game key art. "
+        "Premium dark fantasy cinematic RPG concept art made as unique key art, NOT a reusable character template. "
+        f"Identity: {info['name']}. Subject design: {info['visual']}. "
+        f"Environment: {info.get('scene','fantasy environment')}. Camera/composition: {info.get('camera','three-quarter cinematic view')}. "
+        f"Lighting: {info.get('lighting','dramatic natural fantasy lighting')}. {framing}. "
+        "Make the pose, camera, environment and silhouette visibly specific to this subject. Avoid generic front-facing standing poses, generic throne poses, repeated circular magic backgrounds, and identical centered compositions. "
+        "Consistent KiwRPG dark-fantasy quality, atmospheric depth, believable materials, detailed environment, polished game key art, cinematic but readable. "
         "ABSOLUTELY NO text, letters, words, title, logo, watermark, signature, UI, border, frame, card design or branding."
     )
     ok,used,limit,day=_rpg_ai_usage_reserve()
@@ -10538,12 +10631,14 @@ def cloudflare_generate_rpg_enemy_image(enemy_key):
         raise RuntimeError("Faltan CLOUDFLARE_ACCOUNT_ID o CLOUDFLARE_API_TOKEN en Render.")
     name=str(enemy.get("name") or enemy_key).strip()
     visual=_RPG_ENEMY_VISUALS.get(str(enemy_key), f"a hostile fantasy creature named {name}")
+    camera,lighting,scene=_rpg_art_variant("enemy_"+str(enemy_key))
     prompt=(
-        "Dark fantasy cinematic RPG bestiary illustration. "
-        f"Subject: {visual}. The subject must visually match this anatomy exactly. "
-        "Single creature only, full body or nearly full body, centered, readable silhouette, natural pose, "
-        "ancient dangerous environment appropriate to the creature, dramatic moonlit volumetric lighting, "
-        "atmospheric depth, realistic fantasy materials, high detail, premium game concept art, vertical composition. "
+        "Premium dark fantasy RPG bestiary concept art made as a unique creature illustration, NOT a reusable monster template. "
+        f"Creature identity: {name}. Exact anatomy and design: {visual}. The creature must visually match that anatomy exactly. "
+        f"Environment: {scene}. Camera/composition: {camera}. Lighting: {lighting}. "
+        "Single creature only, full body or nearly full body, natural action pose, strong readable silhouette. "
+        "Make its posture, habitat and camera visibly specific to this creature. Avoid generic front-facing standing poses, repeated circular magic backgrounds, identical centered compositions and humanoid anatomy unless the description explicitly says humanoid. "
+        "Atmospheric depth, believable fantasy materials, detailed habitat, polished cinematic game key art. "
         "ABSOLUTELY NO text, letters, words, title, logo, watermark, signature, UI, border, frame, card design or branding."
     )
     ok,used,limit,day=_rpg_ai_usage_reserve()

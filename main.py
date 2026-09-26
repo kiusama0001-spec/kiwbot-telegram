@@ -4,6 +4,8 @@ import json
 import logging
 import hashlib
 import hmac
+import base64
+import struct
 from urllib.parse import parse_qsl
 import os
 import random
@@ -9046,8 +9048,16 @@ def handle_rpg_callback(query):
                 telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True}); return True
             topic=int(msg.get("message_thread_id") or 0)
             access=_drawg_access_token(int(uid),int(chat_id),topic,ttl=900)
-            from urllib.parse import urlencode
-            url=PUBLIC_BASE_URL+"/rpg/draw-global?"+urlencode({"chat":int(chat_id),"topic":topic,"access":access})
+            bot_username=(get_bot_identity().get("username") or "").strip().lstrip("@")
+            # Los botones web_app del Bot API son solo para chats privados. En grupos,
+            # el mecanismo oficial para abrir una Mini App dentro de Telegram es startapp.
+            # Requiere tener configurada la Main Mini App del bot en BotFather.
+            if bot_username:
+                url=f"https://t.me/{bot_username}?startapp={access}&mode=fullscreen"
+            else:
+                # Respaldo para instalaciones donde getMe no haya respondido todavía.
+                from urllib.parse import urlencode
+                url=PUBLIC_BASE_URL+"/rpg/draw-global?"+urlencode({"chat":int(chat_id),"topic":topic,"access":access})
             keyboard={"inline_keyboard":[[{"text":"🎨 ABRIR MI LIENZO","url":url}]]}
             edited=telegram("editMessageReplyMarkup",{"chat_id":chat_id,"message_id":msg.get("message_id"),"reply_markup":keyboard})
             if not edited or not edited.get('ok'):
@@ -9910,16 +9920,18 @@ def _drawg_render_png(strokes):
     for y in range(H): raw.append(0); raw.extend(pix[y*stride:(y+1)*stride])
     def chunk(tag,data):
         return struct.pack('>I',len(data))+tag+data+struct.pack('>I',zlib.crc32(tag+data)&0xffffffff)
-    return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(bytes(raw),6))+chunk(b'IEND',b'')
+    return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(bytes(raw),1))+chunk(b'IEND',b'')
 
 def _drawg_publish_preview(chat_id, topic=None, force=False):
     """Publica/actualiza el lienzo SOLO en el chat/topic dueño de la ronda."""
-    chat_id=int(chat_id); topic=int(topic or 0); scope=_drawg_scope(chat_id,topic); now=int(time.time())
+    chat_id=int(chat_id); topic=int(topic or 0); scope=_drawg_scope(chat_id,topic); now_ms=int(time.time()*1000)
     try:
         with db_lock:
             c=get_db(); row=c.execute("SELECT status,artist_name,strokes,preview_message_id,preview_updated_at FROM rpg_draw_global_v2 WHERE scope_key=?",(scope,)).fetchone(); c.close()
         if not row or row['status']!='drawing': return False
-        if not force and now-int(row.get('preview_updated_at') or 0)<3: return False
+        prev=int(row.get('preview_updated_at') or 0)
+        if 0 < prev < 10_000_000_000: prev*=1000  # compatibilidad con builds que guardaban segundos
+        if not force and now_ms-prev<1200: return False
         try: strokes=json.loads(row.get('strokes') or '[]')
         except Exception: strokes=[]
         raw=_drawg_render_png(strokes); mid=int(row.get('preview_message_id') or 0)
@@ -9934,7 +9946,7 @@ def _drawg_publish_preview(chat_id, topic=None, force=False):
             mid=int((((sent or {}).get('result') or {}).get('message_id') or 0)); ok=bool(mid)
         if ok:
             with db_lock:
-                c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET preview_message_id=?,preview_updated_at=? WHERE scope_key=?",(mid,now,scope)); c.commit(); c.close()
+                c=get_db(); c.execute("UPDATE rpg_draw_global_v2 SET preview_message_id=?,preview_updated_at=? WHERE scope_key=?",(mid,now_ms,scope)); c.commit(); c.close()
         return ok
     except Exception:
         logger.exception("No pude actualizar el lienzo global en su chat/topic")
@@ -12576,7 +12588,7 @@ def rpg_draw_page():
         conn=get_db(); row=conn.execute("SELECT id,title,prompt,status,expires_at,mission_type,answer,payload FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
     if not row or row['mission_type']!='draw': return "Misión de dibujo no encontrada.",404
     title=str(row['title']); prompt=str(row['prompt'])
-    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🎨 <b>Dibuja la palabra secreta.</b> Al publicar, el grupo comenzará a adivinar.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Publicar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
+    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🎨 <b>Completa el dibujo de la misión.</b> La primera entrega válida gana.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Entregar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
     return html.replace('__MID__',str(mid)).replace('__TITLE__',json.dumps(title)).replace('__PROMPT__',json.dumps(prompt))
 
 @app.route("/rpg/api/draw-submit", methods=["POST"])
@@ -12596,24 +12608,25 @@ def rpg_draw_submit():
         head,b64=data.split(',',1); raw=base64.b64decode(b64,validate=True)
         if not head.startswith('data:image/png') or len(raw)<1500 or len(raw)>4_000_000: raise ValueError('bad image')
     except Exception: return jsonify({'ok':False,'message':'El dibujo no parece una imagen válida.'}),400
-    payload_state=_draw_payload(dict(row))
-    if int(payload_state.get('artist_id') or 0)!=uid:
-        return jsonify({'ok':False,'message':'Solo el artista que tomó el turno puede publicar este dibujo.'}),403
-    if payload_state.get('submitted'):
-        return jsonify({'ok':False,'message':'Este dibujo ya fue publicado. Ahora toca adivinar en el grupo.'}),409
-    payload_state['submitted']=True; payload_state['submitted_at']=int(time.time())
-    with db_lock:
-        conn=get_db(); locked=conn.execute("SELECT status,payload FROM rpg_quick_missions WHERE id=? FOR UPDATE",(mid,)).fetchone()
-        current=_draw_payload(dict(locked or {}))
-        if not locked or locked['status']!='active' or int(current.get('artist_id') or 0)!=uid or current.get('submitted'):
-            conn.rollback(); conn.close(); return jsonify({'ok':False,'message':'El turno ya no está disponible.'}),409
-        conn.execute("UPDATE rpg_quick_missions SET payload=? WHERE id=?",(json.dumps(payload_state,separators=(',',':')),mid)); conn.commit(); conn.close()
+    # La misión relámpago de dibujo NO tiene artista reservado ni fase de adivinanza.
+    # Todos pueden abrir el lienzo; la primera entrega válida gana de forma atómica.
+    ok,finish_msg=_quick_finish(dict(row),uid)
+    if not ok:
+        return jsonify({'ok':False,'message':finish_msg}),409
     try:
-        files={'photo':('dibujo.png',raw,'image/png')}; tg_payload={'chat_id':str(int(row['chat_id'])),'caption':"🎨 DIBUJA Y ADIVINA\n\nEl artista terminó. ¿Qué palabra representa este dibujo?\n💬 Escriban sus respuestas directamente en el chat.\n🏆 La primera respuesta correcta gana."}
-        if row.get('message_thread_id') is not None: tg_payload['message_thread_id']=str(int(row['message_thread_id']))
-        TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendPhoto",data=tg_payload,files=files,timeout=TELEGRAM_TIMEOUT)
-    except Exception: logger.exception('No pude publicar el dibujo para adivinar')
-    return jsonify({'ok':True,'message':'🎨 Dibujo publicado. Ahora el grupo debe adivinar la palabra.'})
+        files={'photo':('dibujo.png',raw,'image/png')}
+        tg_payload={
+            'chat_id':str(int(row['chat_id'])),
+            'caption':f"🎨 MISIÓN RELÁMPAGO COMPLETADA\n\n{finish_msg}"
+        }
+        if row.get('message_thread_id') is not None:
+            tg_payload['message_thread_id']=str(int(row['message_thread_id']))
+        resp=TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendPhoto",data=tg_payload,files=files,timeout=TELEGRAM_TIMEOUT)
+        if not resp.ok:
+            logger.error("No pude publicar dibujo ganador misión %s: %s",mid,resp.text[:500])
+    except Exception:
+        logger.exception('No pude publicar el dibujo ganador de la misión')
+    return jsonify({'ok':True,'message':'🏆 ¡Entrega válida! Ganaste la misión relámpago.'})
 
 def _drawg_validate_login_query(args, max_age=900):
     """Valida Telegram LoginUrl/Login Widget sin depender del chat privado del bot."""
@@ -12634,33 +12647,48 @@ def _drawg_validate_login_query(args, max_age=900):
         return None
 
 def _drawg_access_token(uid,chat_id,topic,ttl=1800):
+    """Token compacto (<64 chars) apto para tgWebAppStartParam/startapp."""
     exp=int(time.time())+int(ttl)
-    body=f'{int(uid)}:{int(chat_id)}:{int(topic or 0)}:{exp}'
-    sig=hmac.new(TELEGRAM_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
-    return f'{body}:{sig}'
+    body=struct.pack('>qqqI',int(uid),int(chat_id),int(topic or 0),exp)
+    sig=hmac.new(TELEGRAM_TOKEN.encode(),body,hashlib.sha256).digest()[:12]
+    return 'dg_'+base64.urlsafe_b64encode(body+sig).decode().rstrip('=')
+
+def _drawg_access_data(token):
+    try:
+        token=str(token or '')
+        if not token.startswith('dg_'): return None
+        enc=token[3:]; raw=base64.urlsafe_b64decode(enc+'='*((4-len(enc)%4)%4))
+        if len(raw)!=40: return None
+        body,sig=raw[:28],raw[28:]
+        want=hmac.new(TELEGRAM_TOKEN.encode(),body,hashlib.sha256).digest()[:12]
+        if not hmac.compare_digest(want,sig): return None
+        uid,chat_id,topic,exp=struct.unpack('>qqqI',body)
+        if int(exp)<int(time.time()): return None
+        return {'uid':int(uid),'chat_id':int(chat_id),'topic':int(topic),'exp':int(exp)}
+    except Exception:
+        return None
 
 def _drawg_access_uid(token,chat_id,topic):
-    try:
-        uid_s,chat_s,topic_s,exp_s,sig=str(token or '').split(':',4)
-        body=f'{uid_s}:{chat_s}:{topic_s}:{exp_s}'
-        want=hmac.new(TELEGRAM_TOKEN.encode(),body.encode(),hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(want,sig) or int(exp_s)<int(time.time()): return 0
-        if int(chat_s)!=int(chat_id) or int(topic_s)!=int(topic or 0): return 0
-        return int(uid_s)
-    except Exception: return 0
+    data=_drawg_access_data(token)
+    if not data: return 0
+    if int(data['chat_id'])!=int(chat_id) or int(data['topic'])!=int(topic or 0): return 0
+    return int(data['uid'])
 
 @app.route('/rpg/draw-global')
 def rpg_draw_global_page():
     qchat=int(request.args.get('chat') or 0); qtopic=int(request.args.get('topic') or 0)
-    # Acepta tanto Telegram LoginUrl (si el dominio está vinculado) como el acceso firmado
-    # generado al tomar el turno. El API vuelve a comprobar que ese uid siga siendo el artista.
-    supplied=str(request.args.get('access') or '')
+    # startapp abre la Main Mini App DENTRO de Telegram y entrega tgWebAppStartParam.
+    # También conservamos el acceso HTTPS firmado como respaldo.
+    supplied=str(request.args.get('tgWebAppStartParam') or request.args.get('access') or '')
+    start_data=_drawg_access_data(supplied) if supplied else None
+    if start_data and not qchat:
+        qchat=int(start_data['chat_id']); qtopic=int(start_data['topic'])
     supplied_uid=_drawg_access_uid(supplied,qchat,qtopic) if supplied and qchat else 0
     login_user=_drawg_validate_login_query(request.args)
     access=supplied if supplied_uid else (_drawg_access_token(login_user['id'],qchat,qtopic) if login_user and qchat else '')
     html="""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><title>Dibuja y Adivina</title><script src='https://telegram.org/js/telegram-web-app.js'></script><style>*{box-sizing:border-box}body{margin:0;background:#10120f;color:#eee;font-family:system-ui;overscroll-behavior:none}.wrap{max-width:950px;margin:auto;padding:10px}.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.choices,.tools{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.choices button,.tools button,.change{border:1px solid #5f674f;background:#252a20;color:#eee;border-radius:10px;padding:10px;font-weight:700}.change{background:#5d451b}.sw{width:31px;height:31px;border-radius:50%;border:2px solid #ddd;padding:0}.canvas{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 8px 30px #0008}canvas{display:block;width:100%;height:auto;touch-action:none}.status{padding:8px 0;color:#e7cf7a;font-weight:700}.hidden{display:none}input[type=range]{width:120px}</style></head><body><div class='wrap'><div class='bar'><b>🎨 Dibuja y Adivina</b><span id='status' class='status'>Cargando…</span></div><div id='choices' class='choices'></div><div id='tools' class='tools hidden'></div><div class='canvas'><canvas id='cv' width='900' height='650'></canvas></div></div><script>
-const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),topic=Number(qs.get('topic')||0),init=tg?.initData||'',access='__DRAW_ACCESS__',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,access_token:access,chat_id:chat,topic_id:topic,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%10===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
-    return Response(html.replace('__DRAW_ACCESS__',access),mimetype='text/html')
+const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||'__DRAW_CHAT__'),topic=Number(qs.get('topic')||'__DRAW_TOPIC__'),init=tg?.initData||'',access='__DRAW_ACCESS__',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,access_token:access,chat_id:chat,topic_id:topic,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%4===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
+    return Response(html.replace('__DRAW_ACCESS__',access).replace('__DRAW_CHAT__',str(qchat)).replace('__DRAW_TOPIC__',str(qtopic)),mimetype='text/html')
 
 @app.route('/rpg/api/draw-global',methods=['POST'])
 def rpg_draw_global_api():

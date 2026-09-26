@@ -4599,6 +4599,15 @@ def _chron_exp_row(user_id, chat_id, thread_id, lock=False, conn=None):
     if own: conn.close()
     return row
 
+def _chron_exp_active_anywhere(user_id, lock=False, conn=None):
+    """Única expedición activa por usuario, sin importar chat/topic."""
+    own=conn is None
+    if own: conn=get_db()
+    q="SELECT * FROM rpg_chronicle_expeditions_v2 WHERE user_id=? AND status='active' ORDER BY updated_at DESC LIMIT 1"+(" FOR UPDATE" if lock else "")
+    row=conn.execute(q,(int(user_id),)).fetchone()
+    if own: conn.close()
+    return row
+
 def chron_exp_unlocked(user_id, zone):
     if zone!="veil": return zone in CHRON_EXP_ZONES
     with db_lock:
@@ -4650,8 +4659,12 @@ def _chron_exp_start_impl(user_id, chat_id, thread_id, zone):
     with db_lock:
         c=get_db()
         try:
-            old=_chron_exp_row(user_id,chat_id,thread_id,True,c)
-            if old and str(old['status'])=='active': c.rollback(); c.close(); return False,"Ya tienes una expedición activa.",old
+            old=_chron_exp_active_anywhere(user_id,True,c)
+            if old and str(old['status'])=='active':
+                same_place=(int(old['chat_id'])==int(chat_id) and int(old['thread_id'])==int(thread_id or 0))
+                c.rollback(); c.close()
+                note="Ya tienes una expedición activa." if same_place else "🧭 Ya tienes una expedición activa en otro tema/chat. Termínala o regresa desde donde la iniciaste antes de comenzar otra."
+                return False,note,old
             c.execute("""INSERT INTO rpg_chronicle_expeditions_v2(user_id,chat_id,thread_id,zone_key,depth,max_depth,hp_state,findings,pending_type,pending_code,pending_data,reward_kw,reward_essence,status,nonce,started_at,updated_at)
                 VALUES(?,?,?,?,0,?,3,0,'','','',0,0,'active',1,?,?) ON CONFLICT(user_id,chat_id,thread_id) DO UPDATE SET zone_key=EXCLUDED.zone_key,depth=0,max_depth=EXCLUDED.max_depth,hp_state=3,findings=0,pending_type='',pending_code='',pending_data='',reward_kw=0,reward_essence=0,status='active',nonce=rpg_chronicle_expeditions_v2.nonce+1,started_at=EXCLUDED.started_at,updated_at=EXCLUDED.updated_at""",
                 (int(user_id),int(chat_id),int(thread_id or 0),zone,int(mx),now,now)); c.commit(); row=_chron_exp_row(user_id,chat_id,thread_id,False,c); c.close(); return True,"",row
@@ -4665,16 +4678,19 @@ def chron_exp_start(user_id, chat_id, thread_id, zone):
 
 def _chron_exp_new_scene(row, rng=random):
     typ=rng.choice(CHRON_EXP_EVENTS); code=''
-    if typ=='runes': code=rng.choice(('moon','diamond','star'))
-    scene={
-      'chest':'📦 Un cofre demasiado limpio descansa en mitad del camino. Eso nunca es buena señal.',
-      'runes':f"🜁 Tres runas rodean una cerradura. Una inscripción apenas legible dice: «La respuesta es { {'moon':'la que gobierna la noche','diamond':'la que no tiene curvas','star':'la que cae del cielo'}[code] }». ",
-      'mine':'⛏️ Una veta brilla detrás de una pared rota. Puedes sacar algo… o hacer caer el techo.',
-      'altar':'🕯️ Un altar sin nombre sigue encendido. Nadie debería haber estado aquí antes que tú.',
-      'traveler':'🧥 Un viajero encapuchado bloquea el sendero. «Cincuenta monedas por un rumor. Hablar es gratis».',
-      'tracks':'👣 Encuentras huellas que empiezan como garras y terminan como botas.',
-      'corpse':'🪦 Hay un cuerpo junto al camino. Su mano todavía aprieta una bolsa.',
-      'fountain':'⛲ Una fuente funciona en mitad de las ruinas. El agua refleja un cielo que no está sobre ti.'}[typ]
+    if typ=='runes':
+        code=rng.choice(('moon','diamond','star'))
+        clue={'moon':'la que gobierna la noche','diamond':'la que no tiene curvas','star':'la que cae del cielo'}[code]
+        scene=f"🜁 Tres runas rodean una cerradura. Una inscripción apenas legible dice: «La respuesta es {clue}». "
+    else:
+        scene={
+          'chest':'📦 Un cofre demasiado limpio descansa en mitad del camino. Eso nunca es buena señal.',
+          'mine':'⛏️ Una veta brilla detrás de una pared rota. Puedes sacar algo… o hacer caer el techo.',
+          'altar':'🕯️ Un altar sin nombre sigue encendido. Nadie debería haber estado aquí antes que tú.',
+          'traveler':'🧥 Un viajero encapuchado bloquea el sendero. «Cincuenta monedas por un rumor. Hablar es gratis».',
+          'tracks':'👣 Encuentras huellas que empiezan como garras y terminan como botas.',
+          'corpse':'🪦 Hay un cuerpo junto al camino. Su mano todavía aprieta una bolsa.',
+          'fountain':'⛲ Una fuente funciona en mitad de las ruinas. El agua refleja un cielo que no está sobre ti.'}[typ]
     return typ,code,scene
 
 def _chron_exp_finish_locked(c,row,reason):
@@ -4780,8 +4796,14 @@ def chron_exp_act(user_id,chat_id,thread_id,nonce,action,rng=random):
 
 def chron_exp_status(user_id,chat_id,thread_id):
     r=_chron_exp_row(user_id,chat_id,thread_id)
-    if not r or str(r['status'])!='active': return chron_exp_menu_text(user_id),chron_exp_zone_keyboard(user_id)
-    return chron_exp_render(r),chron_exp_keyboard(r)
+    if r and str(r['status'])=='active':
+        return chron_exp_render(r),chron_exp_keyboard(r)
+    other=_chron_exp_active_anywhere(user_id)
+    if other and str(other['status'])=='active':
+        return ("🗺️ EXPEDICIONES\n\n🧭 Ya tienes una expedición activa en otro tema/chat.\n"
+                "Vuelve al lugar donde la iniciaste para continuarla o regresar antes de abrir otra."), \
+               {"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}
+    return chron_exp_menu_text(user_id),chron_exp_zone_keyboard(user_id)
 
 # La tirada se hace por CADA /encuentro del mundo, sin importar quién lo genere.
 # Los porcentajes no son pity: el #2000 no está obligado a ser legendario.
@@ -10394,7 +10416,7 @@ def handle_rpg_callback(query):
                 _chron_exp_edit_card(chat_id,msg,chron_exp_render(row,note),chron_exp_keyboard(row)); return True
         except Exception:
             logger.exception("Error en Expediciones de Crónicas")
-            send_message(chat_id,"🗺️ La ruta se volvió inestable. Tu progreso quedó guardado; abre /expedicion otra vez."); return True
+            _chron_exp_edit_card(chat_id,msg,"🗺️ La ruta se volvió inestable. Tu progreso quedó guardado; abre /expedicion otra vez."); return True
         return True
     if data.startswith("chron:"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True

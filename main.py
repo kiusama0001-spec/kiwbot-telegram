@@ -4261,6 +4261,8 @@ def register_world_encounter(rarity):
 
 
 RPG_DICE_MULT = {1: 0.0, 2: 1.00, 3: 1.10, 4: 1.20, 5: 1.35, 6: 1.60}
+RPG_PVE_PLAYER_DAMAGE_MULT = 1.00  # El balance viene de las estadísticas reales del personaje.
+RPG_PVE_ENEMY_DAMAGE_MULT = 1.00   # Sin modificadores ocultos al daño de monstruos.
 
 # Dos técnicas normales + una fuerte por clase.
 # power está ajustado para que los stats base diferentes no conviertan una clase
@@ -4602,7 +4604,7 @@ def _rpg_enemy_damage(battle, eff, defending=False):
         return enemy_roll, 0
     mult = RPG_DICE_MULT[enemy_roll]
     raw = (int(battle["enemy_atk"]) * 0.72 * mult) - (eff["defense"] * 0.46)
-    dmg = max(1, int(round(raw)))
+    dmg = max(1, int(round(raw * RPG_PVE_ENEMY_DAMAGE_MULT)))
     if defending:
         dmg = max(0, int(round(dmg * 0.50)))
     return enemy_roll, dmg
@@ -4626,7 +4628,7 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
     rd = RPG_ENCOUNTER_RARITY_DATA[rarity]
     scale = max(0, level - 1)
     enemy_hp = max(1, int(round((base["hp"] + scale * 10) * rd["hp"])))
-    enemy_atk = max(1, int(round((base["atk"] + scale * 2) * rd["atk"])))
+    enemy_atk = max(1, int(round((base["atk"] + scale * 1.25) * rd["atk"])))
     enemy_def = max(0, int(round((base["def"] + scale) * rd["def"])))
     enemy_name = base["name"] + rd["suffix"]
     now = int(time.time())
@@ -4794,7 +4796,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             if roll != 1:
                 pen=float(ability.get("pen",0.0))
                 raw=(eff["atk"] * float(ability["power"]) * RPG_DICE_MULT[roll]) - (enemy_def * (1.0-pen) * 0.42)
-                damage=max(1,int(round(raw)))
+                damage=max(1,int(round(raw * RPG_PVE_PLAYER_DAMAGE_MULT)))
                 pet_pct=_pet_bonus(user_id,"pve_damage")
                 if pet_pct: damage=max(1,int(round(damage*(1.0+pet_pct/100.0))))
                 if opening_event_bonus_active(): damage=max(1,int(round(damage*1.15)))
@@ -5124,8 +5126,19 @@ def equipped_bonuses(character_id):
         out["hp"]+=int(r["hp_bonus"] or 0)+b["hp"]
     return out
 
+def rpg_level_character_bonus(char):
+    """Crecimiento adicional real por nivel, retroactivo y sin reescribir la BD.
+
+    La progresión histórica guardada en characters sigue siendo +2 ATK/+1 DEF por nivel.
+    Este complemento hace que subir de nivel vuelva a sentirse importante para todas las
+    clases: +1 ATK cada 2 niveles y +1 DEF cada 4 niveles completados.
+    """
+    steps=max(0, min(RPG_MAX_LEVEL, int(char.get("level") or 1))-1)
+    return {"atk": steps//2, "defense": steps//4, "hp": 0}
+
 def effective_character_stats(char):
     b=equipped_bonuses(char["id"])
+    lvlb=rpg_level_character_bonus(char)
     # Habilidad exclusiva de The Cleaner: las Espadas del Ángel son un estado,
     # no ocupan slot de equipo, pero su +6 ATK sí participa en el daño real.
     secret_atk=0
@@ -5136,11 +5149,12 @@ def effective_character_stats(char):
             secret_atk=6
     except Exception:
         secret_atk=0
-    total_bonus={"atk":b["atk"]+secret_atk,"defense":b["defense"],"hp":b["hp"]}
+    total_bonus={"atk":b["atk"]+secret_atk+lvlb["atk"],"defense":b["defense"]+lvlb["defense"],"hp":b["hp"]+lvlb["hp"]}
     return {"atk":int(char["atk"])+total_bonus["atk"],
             "defense":int(char["defense"])+total_bonus["defense"],
             "max_hp":int(char["max_hp"])+total_bonus["hp"],
             "bonus":total_bonus,
+            "level_bonus":lvlb,
             "secret_blades_atk":secret_atk}
 
 def item_compatibility(item, char):
@@ -5582,6 +5596,52 @@ def _pvp_char(cid):
         conn=get_db(); row=conn.execute("SELECT * FROM characters WHERE id=?",(int(cid),)).fetchone(); conn.close()
     return row
 
+def _pvp_equal_level(c1, c2):
+    """Nivel virtual compartido: usa el mayor nivel real sin modificar personajes en BD."""
+    return max(1, min(RPG_MAX_LEVEL, max(int(c1['level']), int(c2['level']))))
+
+# Ajuste competitivo por clase. Solo existe dentro de PvP: no altera PvE ni la BD.
+# Compensa las diferencias de HP/ATK/DEF y efectos propios de cada kit para que
+# ninguna clase tenga una ventaja estructural solo por ser esa clase.
+PVP_CLASS_POWER_MULT = {
+    "Guerrero": 1.05,
+    "Mago": 1.00,
+    "Pícaro": 0.74,
+    "Paladín": 1.09,
+    "Arquero": 0.98,
+    "The Cleaner": 1.32,
+}
+
+def _pvp_base_ability(class_name, key):
+    """Habilidad PvP normalizada: ignora por completo el nivel de técnica del usuario."""
+    base=_rpg_get_ability(class_name,key)
+    if not base: return None
+    ability=dict(base)
+    ability['power']=float(ability['power'])*float(PVP_CLASS_POWER_MULT.get(str(class_name),1.0))
+    ability['technique_level']=1
+    return ability
+
+def _pvp_effective_stats(char, duel_level):
+    """Stats PvP reconstruidos al mismo nivel, conservando equipo y estados propios."""
+    base=get_rpg_class_stats(char['class_name'])
+    lv=max(1,min(RPG_MAX_LEVEL,int(duel_level)))
+    level_steps=lv-1
+    b=equipped_bonuses(char['id'])
+    # PvP competitivo/amistoso normaliza también estados exclusivos externos al kit.
+    # Las Espadas del Ángel siguen funcionando en PvE, pero no dan +ATK en duelos.
+    secret_atk=0
+    # Mismo crecimiento efectivo que usa el personaje real: ambos duelistas
+    # reciben exactamente la progresión del nivel virtual compartido.
+    level_atk_bonus=level_steps//2
+    level_def_bonus=level_steps//4
+    return {
+        'atk': int(base['atk']) + level_steps*2 + level_atk_bonus + int(b['atk']) + secret_atk,
+        'defense': int(base['defense']) + level_steps + level_def_bonus + int(b['defense']),
+        'max_hp': int(base['hp']) + level_steps*10 + int(b['hp']),
+        'bonus': {'atk':int(b['atk'])+secret_atk,'defense':int(b['defense']),'hp':int(b['hp'])},
+        'duel_level': lv,
+    }
+
 def _pvp_keyboard(duel, viewer_turn=True):
     if duel['status']!='active': return None
     turn=int(duel['turn_user_id'] or 0)
@@ -5607,8 +5667,9 @@ def _pvp_card(duel):
         return f"⚔️ DUELO ABIERTO\n\n{n1} — {c1['name']} · {c1['class_name']} · Nv. {c1['level']}\n\n¿Quién se atreve?"
     turn='—'
     if duel['status']=='active': turn=_pvp_name(duel['turn_user_id'])
-    return (f"{'🏆 DUELO CLASIFICATORIO' if duel.get('duel_mode')=='ranked' else '⚔️ DUELO AMISTOSO'}\n\n{n1} — {c1['name']} · {c1['class_name']}\n❤️ {duel['challenger_hp']}/{effective_character_stats(c1)['max_hp']}\n\nVS\n\n"
-            f"{n2} — {c2['name']} · {c2['class_name']}\n❤️ {duel['opponent_hp']}/{effective_character_stats(c2)['max_hp']}\n\n🎯 Turno: {turn}")
+    duel_level=_pvp_equal_level(c1,c2); e1=_pvp_effective_stats(c1,duel_level); e2=_pvp_effective_stats(c2,duel_level)
+    return (f"{'🏆 DUELO CLASIFICATORIO' if duel.get('duel_mode')=='ranked' else '⚔️ DUELO AMISTOSO'} · ⚖️ Nv.{duel_level} IGUALADO\n\n{n1} — {c1['name']} · {c1['class_name']}\n❤️ {duel['challenger_hp']}/{e1['max_hp']}\n\nVS\n\n"
+            f"{n2} — {c2['name']} · {c2['class_name']}\n❤️ {duel['opponent_hp']}/{e2['max_hp']}\n\n🎯 Turno: {turn}")
 
 def start_pvp_challenge(chat_id, user, target=None, duel_mode="friendly"):
     duel_mode = "ranked" if str(duel_mode)=="ranked" else "friendly"
@@ -5670,7 +5731,7 @@ def accept_pvp(duel_id, chat_id, user):
         busy=conn.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND id<>? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(int(chat_id),int(duel_id),uid,uid)).fetchone()
         pve=conn.execute('SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=?',(int(chat_id),uid)).fetchone()
         if busy or pve: conn.rollback(); conn.close(); return False,'Ahora mismo estás ocupado en otro combate o desafío.'
-        c1=_pvp_char(d['challenger_character_id']); e1=effective_character_stats(c1); e2=effective_character_stats(char)
+        c1=_pvp_char(d['challenger_character_id']); duel_level=_pvp_equal_level(c1,char); e1=_pvp_effective_stats(c1,duel_level); e2=_pvp_effective_stats(char,duel_level)
         conn.execute("""UPDATE rpg_pvp_duels SET opponent_id=?,opponent_character_id=?,challenger_hp=?,opponent_hp=?,status='initiative',is_open=0,updated_at=? WHERE id=?""",(uid,int(char['id']),int(e1['max_hp']),int(e2['max_hp']),int(time.time()),int(duel_id))); conn.commit(); conn.close()
     # Dos dados reales de Telegram: uno por combatiente.
     r1=send_dice(chat_id,'🎲'); r2=send_dice(chat_id,'🎲')
@@ -5702,14 +5763,14 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
             conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_defending=1,{pref}_defends_used={pref}_defends_used+1,{pref}_special_cd=?,{pref}_ultimate_cd=?,turn_user_id=?,updated_at=? WHERE id=?",(nsc,nuc,other,int(time.time()),int(duel_id))); conn.commit(); conn.close()
             nd=_pvp_get(duel_id); remaining=max(0,3-int(nd[pref+'_defends_used']))
             send_message(d['chat_id'],f"🛡️ {_pvp_name(uid)} adopta una postura defensiva. ({remaining}/3 restantes)\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
-        ab=_rpg_get_ability(char['class_name'],ability_key)
+        ab=_pvp_base_ability(char['class_name'],ability_key)
         if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
         if ab.get('special') and scd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {scd} turnos."
         if ab.get('ultimate') and ucd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {ucd} turnos."
         conn.rollback(); conn.close()
     dr=send_dice(d['chat_id'],'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
     with db_lock:
-        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone(); is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); ab=_rpg_get_ability(char['class_name'],ability_key); eff=effective_character_stats(char); oe=effective_character_stats(opp)
+        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone(); is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); ab=_pvp_base_ability(char['class_name'],ability_key); duel_level=_pvp_equal_level(char,opp); eff=_pvp_effective_stats(char,duel_level); oe=_pvp_effective_stats(opp,duel_level)
         target_hp=int(d['opponent_hp'] if is_ch else d['challenger_hp']); defending=int(d['opponent_defending'] if is_ch else d['challenger_defending']); dmg=0; heal=0
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*PVP_DICE_MULT[roll])-(oe['defense']*(1.0-float(ab.get('pen',0)))*0.36); dmg=max(1,int(round(raw*0.78)))

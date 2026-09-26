@@ -654,6 +654,23 @@ def init_db():
                 updated_at BIGINT NOT NULL, PRIMARY KEY(mission_id,user_id)
             )
         """)
+        # Dibuja y Adivina GLOBAL: independiente de Misiones Relámpago.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_draw_global (
+                chat_id BIGINT PRIMARY KEY, message_thread_id BIGINT, artist_id BIGINT NOT NULL DEFAULT 0,
+                artist_name TEXT DEFAULT '', word TEXT DEFAULT '', synonyms TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'idle', choices TEXT NOT NULL DEFAULT '[]', strokes TEXT NOT NULL DEFAULT '[]',
+                stroke_version BIGINT NOT NULL DEFAULT 0, started_at BIGINT NOT NULL DEFAULT 0,
+                ends_at BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rpg_draw_global_stats (
+                user_id BIGINT PRIMARY KEY, wins BIGINT NOT NULL DEFAULT 0, exp_won BIGINT NOT NULL DEFAULT 0,
+                kw_won BIGINT NOT NULL DEFAULT 0, rounds_drawn BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0
+            )
+        """)
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_cat_rescues (
                 user_id BIGINT PRIMARY KEY, rescues BIGINT NOT NULL DEFAULT 0,
@@ -765,6 +782,12 @@ def init_db():
             dungeon_id BIGINT NOT NULL,user_id BIGINT NOT NULL,joined_at BIGINT NOT NULL,
             room_cleared BIGINT NOT NULL DEFAULT 0,completed BIGINT NOT NULL DEFAULT 0,
             PRIMARY KEY(dungeon_id,user_id)
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_dungeon_rooms (
+            dungeon_id BIGINT NOT NULL, room BIGINT NOT NULL, enemy_key TEXT NOT NULL, enemy_name TEXT NOT NULL,
+            enemy_hp BIGINT NOT NULL, enemy_max_hp BIGINT NOT NULL, enemy_atk BIGINT NOT NULL, enemy_def BIGINT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active', updated_at BIGINT NOT NULL,
+            PRIMARY KEY(dungeon_id,room)
         )""")
 
         # KiwRPG V2: mundos, salón histórico, drops e interacciones.
@@ -4656,6 +4679,11 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             char=conn.execute("SELECT * FROM characters WHERE id=? FOR UPDATE",(int(battle["character_id"]),)).fetchone() if battle else None
             if not battle or not char:
                 conn.rollback(); conn.close(); return True
+            dungeon_id=int(battle.get('dungeon_event_id') or 0); dungeon_room=int(battle.get('dungeon_room') or 0)
+            if dungeon_id>0 and dungeon_room>0:
+                rr=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(dungeon_id,dungeon_room)).fetchone()
+                if rr and rr['status']=='active':
+                    battle=dict(battle); battle['enemy_key']=rr['enemy_key']; battle['enemy_name']=rr['enemy_name']; battle['enemy_hp']=rr['enemy_hp']; battle['enemy_max_hp']=rr['enemy_max_hp']; battle['enemy_atk']=rr['enemy_atk']; battle['enemy_def']=rr['enemy_def']
             ability=_rpg_get_ability_for_user(user_id,char["class_name"],ability_key)
             eff=effective_character_stats(char)
             enemy_hp=int(battle["enemy_hp"])
@@ -4676,6 +4704,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 if ability.get("heal_pct"):
                     heal=max(1,int(round(eff["max_hp"]*float(ability["heal_pct"])*RPG_DICE_MULT[roll])))
             enemy_hp=max(0,enemy_hp-damage)
+            if dungeon_id>0 and dungeon_room>0:
+                conn.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=?,updated_at=? WHERE dungeon_id=? AND room=? AND status='active'",(enemy_hp,int(time.time()),dungeon_id,dungeon_room))
+                conn.execute("UPDATE rpg_battles SET enemy_hp=?,updated_at=? WHERE chat_id=? AND dungeon_event_id=? AND dungeon_room=?",(enemy_hp,int(time.time()),int(chat_id),dungeon_id,dungeon_room))
 
             new_cd=max(0,int(battle.get("ultimate_cd") or 0)-1)
             new_special_cd=max(0,int(battle.get("special_cd") or 0)-1)
@@ -4735,29 +4766,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 except Exception: logger.exception("Error entregando drop de temporada")
                 dungeon_id=int(battle.get("dungeon_event_id") or 0); dungeon_room=int(battle.get("dungeon_room") or 0)
                 if dungeon_id>0:
-                    try:
-                        with db_lock:
-                            _dc=get_db(); _dc.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=? AND user_id=?",(dungeon_room,dungeon_id,int(user_id))); _dc.commit(); _dc.close()
-                    except Exception: logger.exception("No pude actualizar progreso cooperativo de mazmorra")
-                    if dungeon_room<RPG_DUNGEON_ROOMS:
-                        nr=dungeon_room+1
-                        with db_lock:
-                            dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
-                        e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
-                        if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
-                    else:
-                        with db_lock:
-                            dc=get_db(); run=dc.execute("SELECT completed FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(dungeon_id,int(user_id))).fetchone(); first=bool(run and not int(run.get("completed") or 0))
-                            if first: dc.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=? AND user_id=?",(int(time.time()),dungeon_id,int(user_id)))
-                            dc.commit(); dc.close()
-                        if first:
-                            with db_lock:
-                                _pc=get_db(); _pn=_pc.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(dungeon_id,)).fetchone(); _pc.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=? AND user_id=?",(RPG_DUNGEON_ROOMS,dungeon_id,int(user_id))); _pc.commit(); _pc.close()
-                            _party=max(1,int(_pn['n'] if _pn else 1)); _coop=1.0+min(0.40,0.10*(_party-1)); _kw=int(round(RPG_DUNGEON_FINAL_KW*_coop)); _xp=int(round(RPG_DUNGEON_FINAL_EXP*_coop))
-                            change_kiwons(user_id,_kw,"rpg_dungeon",chat_id=chat_id,note=f"Mazmorra cooperativa {dungeon_id} completada"); grant_rpg_exp(char["id"],_xp)
-                            chest=roll_dungeon_completion_loot(user_id,int(char["id"]),dungeon_id)
-                            chest_txt=(f"\n🎁 Cofre final: {RPG_RARITY_ICON.get(chest['rarity'],'⚪')} {chest['name']}" if chest else "")
-                            send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 Expedición: {_party} aventureros · bonus de equipo +{int((_coop-1)*100)}%\n🪙 Bono final: +{_kw} KW\n⭐ Bono final: +{_xp} EXP{chest_txt}")
+                    _dungeon_party_advance(chat_id,dungeon_id,dungeon_room)
                 cleanup_combat_dice(chat_id,user_id)
                 return True
 
@@ -7657,7 +7666,7 @@ def clan_members_text(clan_id):
 
 RPG_DUNGEON_INTERVAL = 60 * 60
 RPG_DUNGEON_TTL = 20 * 60
-RPG_DUNGEON_ROOMS = 3
+RPG_DUNGEON_ROOMS = 6
 RPG_DUNGEON_FINAL_KW = 1500
 RPG_DUNGEON_FINAL_EXP = 300
 RPG_DUNGEON_LOOT_POOLS = {'comun': ['v8_espada_del_bastion', 'v8_vara_de_bruma', 'v8_dagas_de_medianoche', 'v8_maza_del_alba', 'v8_arco_de_fresno', 'v8_hoja_cleaner_i', 'v8_casco_1', 'v8_casco_2', 'v8_casco_3', 'v8_armadura_1', 'v8_armadura_2', 'v8_armadura_3', 'v8_armadura_4', 'v8_guantes_1', 'v8_guantes_2', 'v8_botas_1', 'v8_botas_2', 'v8_accesorio_1', 'v8_accesorio_2', 'v8_material_1', 'v8_material_2'], 'poco_comun': ['v8_hacha_del_caminante', 'v8_mandoble_de_bronce', 'v8_baculo_astral', 'v8_cetro_de_ambar', 'v8_estilete_del_cuervo', 'v8_kukri_sombrio', 'v8_espada_juramentada', 'v8_martillo_de_guardia', 'v8_arco_del_vendaval', 'v8_arco_de_luna', 'v8_katana_del_barrido', 'v8_filo_de_combate', 'v8_casco_4', 'v8_casco_5', 'v8_casco_6', 'v8_casco_7', 'v8_casco_8', 'v8_casco_9', 'v8_armadura_5', 'v8_armadura_6', 'v8_armadura_7', 'v8_armadura_8', 'v8_armadura_9', 'v8_armadura_10', 'v8_armadura_11', 'v8_armadura_12', 'v8_guantes_3', 'v8_guantes_4', 'v8_guantes_5', 'v8_guantes_6', 'v8_botas_3', 'v8_botas_4', 'v8_botas_5', 'v8_botas_6', 'v8_accesorio_3', 'v8_accesorio_4', 'v8_accesorio_5', 'v8_accesorio_6', 'v8_material_3'], 'raro': ['v8_hoja_del_centinela', 'v8_orbe_del_eclipse_menor', 'v8_gemelas_de_mercurio', 'v8_hoja_del_templo', 'v8_ballesta_ligera', 'v8_espada_del_ultimo_round', 'v8_casco_10', 'v8_casco_11', 'v8_casco_12', 'v8_armadura_13', 'v8_armadura_14', 'v8_armadura_15', 'v8_armadura_16', 'v8_guantes_7', 'v8_guantes_8', 'v8_botas_7', 'v8_botas_8', 'v8_accesorio_7', 'v8_accesorio_8', 'v8_material_4'], 'ultra_raro': ['v8_filo_del_leon', 'v8_vara_de_runas', 'v8_hoja_silenciosa', 'v8_maza_solar', 'v8_arco_del_halcon', 'v8_hoja_best_bout', 'v8_casco_13', 'v8_casco_14', 'v8_casco_15', 'v8_armadura_17', 'v8_armadura_18', 'v8_armadura_19', 'v8_armadura_20', 'v8_guantes_9', 'v8_guantes_10', 'v8_botas_9', 'v8_botas_10', 'v8_accesorio_9', 'v8_accesorio_10', 'v8_material_5']}
@@ -8042,6 +8051,28 @@ RPG_QUICK_MISSIONS = [
     {"key":"draw_ring","type":"draw","title":"💍 Dibuja: ANILLO","prompt":"La palabra es ANILLO. Dibuja uno digno de una aventura legendaria. Primera entrega válida gana.","kw":1000,"exp":105},
 ]
 
+DRAW_WORDS = {
+    "draw_slime":"SLIME","draw_sword":"ESPADA","draw_cat":"GATO","draw_boss":"BOSS",
+    "draw_malkor":"MALKOR","draw_dragon":"DRAGÓN","draw_potion":"POCIÓN","draw_castle":"CASTILLO",
+    "draw_goblin":"GOBLIN","draw_mimic":"MIMIC","draw_knight":"CABALLERO","draw_wizard":"MAGO",
+    "draw_bow":"ARCO","draw_crown":"CORONA","draw_ghost":"FANTASMA","draw_chicken":"POLLO",
+    "draw_treasure":"TESORO","draw_monster":"MONSTRUO","draw_shield":"ESCUDO","draw_ring":"ANILLO"
+}
+
+def _normalize_guess(value):
+    import unicodedata
+    txt=unicodedata.normalize("NFKD",str(value or "").casefold())
+    txt="".join(ch for ch in txt if not unicodedata.combining(ch))
+    txt=re.sub(r"[^a-z0-9]+"," ",txt).strip()
+    return re.sub(r"\s+"," ",txt)
+
+def _draw_payload(row):
+    try:
+        data=json.loads(str((row or {}).get("payload") or "{}"))
+        return data if isinstance(data,dict) else {}
+    except Exception:
+        return {}
+
 def _quick_active(chat_id, now=None):
     now=int(now or time.time())
     with db_lock:
@@ -8074,7 +8105,7 @@ def _quick_reward(m,user_id):
     if item and char:
         got=grant_rpg_item(uid,int(char['id']),item,f"mision_relampago:{int(m['id'])}")
         if got: item_msg=f"\n💍 Premio especial: {got['name']}\n✨ No es poder ni estadísticas: es una promesa esperando a la persona correcta."
-    if str(m.get('mission_key') or '')=='gatos_perdidos' or str(m.get('mission_type') or '')=='draw':
+    if str(m.get('mission_key') or '')=='gatos_perdidos':
         with db_lock:
             conn=get_db(); row=conn.execute("SELECT rescues,sword_claimed FROM rpg_cat_rescues WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
             rescues=int(row['rescues'] or 0) if row else 0; claimed=int(row['sword_claimed'] or 0) if row else 0
@@ -8359,41 +8390,107 @@ def _spawn_dungeon(chatrow, now=None):
     old=get_current_message_thread_id()
     try:
         set_current_message_thread_id(topic)
-        sent=send_message(chat_id,f"🏰 MAZMORRA ALEATORIA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\nCada aventurero puede hacer su propia expedición.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{did}"}]]})
+        sent=send_message(chat_id,f"🏰 MAZMORRA ALEATORIA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\nTodos los aventureros que entren forman una sola expedición.\n⚔️ Comparten enemigo, HP y progreso por las 6 salas.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Entrar a la mazmorra","callback_data":f"rpg_dungeon_enter:{did}"}]]})
     finally: set_current_message_thread_id(old)
     mid=int((((sent or {}).get("result") or {}).get("message_id") or 0)) if isinstance(sent,dict) else 0
     with db_lock:
         conn=get_db(); conn.execute("UPDATE rpg_dungeons SET message_id=?,status=? WHERE id=?",(mid,'active' if mid else 'send_failed',did)); conn.commit(); conn.close()
     return bool(mid)
 
-def enter_dungeon(chat_id,user_id,dungeon_id):
-    now=int(time.time())
+def _sync_dungeon_battle_to_room(chat_id,user_id,dungeon_id,room):
+    """Hace que la batalla individual sea solo una interfaz hacia el enemigo compartido."""
     with db_lock:
-        conn=get_db(); d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(int(dungeon_id),)).fetchone()
-        if not d or int(d["chat_id"])!=int(chat_id) or d["status"]!='active' or int(d["expires_at"])<=now:
+        conn=get_db()
+        b=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? FOR UPDATE",(int(chat_id),int(user_id))).fetchone()
+        rr=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(int(dungeon_id),int(room))).fetchone()
+        if not b:
+            conn.rollback(); conn.close(); return None
+        if not rr:
+            conn.execute("""INSERT INTO rpg_dungeon_rooms(dungeon_id,room,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,status,updated_at)
+                         VALUES(?,?,?,?,?,?,?,?, 'active',?) ON CONFLICT(dungeon_id,room) DO NOTHING""",
+                         (int(dungeon_id),int(room),b['enemy_key'],b['enemy_name'],int(b['enemy_hp']),int(b['enemy_max_hp']),int(b['enemy_atk']),int(b['enemy_def']),int(time.time())))
+            rr=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(int(dungeon_id),int(room))).fetchone()
+        conn.execute("""UPDATE rpg_battles SET enemy_key=?,enemy_name=?,enemy_hp=?,enemy_max_hp=?,enemy_atk=?,enemy_def=?,updated_at=?
+                        WHERE chat_id=? AND user_id=?""",
+                     (rr['enemy_key'],rr['enemy_name'],int(rr['enemy_hp']),int(rr['enemy_max_hp']),int(rr['enemy_atk']),int(rr['enemy_def']),int(time.time()),int(chat_id),int(user_id)))
+        conn.commit(); conn.close(); return dict(rr)
+
+def _dungeon_party_advance(chat_id,dungeon_id,cleared_room):
+    """Avanza a toda la expedición junta. Una sala muere una sola vez para todos."""
+    now=int(time.time()); did=int(dungeon_id); room=int(cleared_room)
+    with db_lock:
+        conn=get_db()
+        rr=conn.execute("SELECT status FROM rpg_dungeon_rooms WHERE dungeon_id=? AND room=? FOR UPDATE",(did,room)).fetchone()
+        if not rr or rr['status']!='active':
+            conn.rollback(); conn.close(); return
+        members=conn.execute("SELECT user_id FROM rpg_dungeon_party_members WHERE dungeon_id=? AND completed=0 ORDER BY joined_at",(did,)).fetchall()
+        uids=[int(x['user_id']) for x in members]
+        conn.execute("UPDATE rpg_dungeon_rooms SET enemy_hp=0,status='cleared',updated_at=? WHERE dungeon_id=? AND room=? AND status='active'",(now,did,room))
+        conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND dungeon_event_id=? AND dungeon_room=?",(int(chat_id),did,room))
+        conn.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=?",(room,did))
+        if room < RPG_DUNGEON_ROOMS:
+            nr=room+1
+            conn.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND completed=0",(nr,now,did))
+        else:
+            nr=0
+            conn.execute("UPDATE rpg_dungeon_runs SET completed=1,updated_at=? WHERE dungeon_id=?",(now,did))
+            conn.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,did))
+        conn.commit(); conn.close()
+    if not uids: return
+    if room < RPG_DUNGEON_ROOMS:
+        enemy=random.choice(RPG_ENEMIES)
+        first_uid=uids[0]
+        ok,msg=start_rpg_encounter(chat_id,first_uid,forced_enemy_key=enemy['key'],dungeon_event_id=did,dungeon_room=nr)
+        if not ok: return
+        shared=_sync_dungeon_battle_to_room(chat_id,first_uid,did,nr)
+        for uid in uids[1:]:
+            ok2,_=start_rpg_encounter(chat_id,uid,forced_enemy_key=enemy['key'],dungeon_event_id=did,dungeon_room=nr)
+            if ok2: _sync_dungeon_battle_to_room(chat_id,uid,did,nr)
+        if shared:
+            send_message(chat_id,f"🚪 SALA {room} SUPERADA POR TODO EL EQUIPO\\n\\n➡️ Sala {nr}/{RPG_DUNGEON_ROOMS}\\n⚔️ {shared['enemy_name']}\\n❤️ {shared['enemy_hp']}/{shared['enemy_max_hp']} HP compartidos\\n\\nCada ataque de cualquier integrante golpea a este mismo enemigo.")
+    else:
+        party=max(1,len(uids)); coop=1.0+min(0.50,0.10*(party-1)); kw=int(round(RPG_DUNGEON_FINAL_KW*coop)); xp=int(round(RPG_DUNGEON_FINAL_EXP*coop))
+        rewarded=[]
+        for uid in uids:
+            ch=get_active_character(uid)
+            if not ch: continue
+            change_kiwons(uid,kw,'rpg_dungeon',chat_id=chat_id,note=f'Mazmorra cooperativa {did} completada')
+            grant_rpg_exp(int(ch['id']),xp); chest=roll_dungeon_completion_loot(uid,int(ch['id']),did)
+            rewarded.append(_pvp_name(uid)+(f" — {chest['name']}" if chest else ''))
+        send_message(chat_id,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\\n👥 {party} aventureros terminaron juntos las {RPG_DUNGEON_ROOMS} salas.\\n🪙 +{kw:,} KW por integrante · ⭐ +{xp:,} EXP por integrante"+("\\n🎁 "+" | ".join(rewarded) if rewarded else ''))
+
+def enter_dungeon(chat_id,user_id,dungeon_id):
+    now=int(time.time()); did=int(dungeon_id); uid=int(user_id)
+    with db_lock:
+        conn=get_db(); d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(did,)).fetchone()
+        if not d or int(d['chat_id'])!=int(chat_id) or d['status']!='active' or int(d['expires_at'])<=now:
             conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya cerró."
-        battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone()
-        if battle:
-            # Entrar a una mazmorra es idempotente: si este mismo botón ya creó
-            # la pelea de esta mazmorra, simplemente volvemos a mostrarla.
-            # Nunca creamos un segundo enemigo ni pisamos el combate existente.
-            if int(battle.get("dungeon_event_id") or 0) == int(dungeon_id):
-                room=int(battle.get("dungeon_room") or 1)
-                enemy_name=battle.get("enemy_name") or "Enemigo"
-                enemy_hp=max(0,int(battle.get("enemy_hp") or 0))
-                enemy_max=max(1,int(battle.get("enemy_max_hp") or enemy_hp or 1))
-                conn.rollback(); conn.close()
-                return True,(f"🏰 {d['dungeon_name']}\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n"
-                             f"⚔️ {enemy_name}\n❤️ {enemy_hp}/{enemy_max} HP\n\n"
-                             "Ya estabas dentro. Continúa el combate.")
-            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Termínalo antes de entrar a la mazmorra."
-        run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(int(dungeon_id),int(user_id))).fetchone()
-        if run and int(run.get("completed") or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
-        if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,1,0,?,?)",(int(dungeon_id),int(user_id),now,now))
-        conn.execute("INSERT INTO rpg_dungeon_party_members(dungeon_id,user_id,joined_at,room_cleared,completed) VALUES(?,?,?,0,0) ON CONFLICT(dungeon_id,user_id) DO NOTHING",(int(dungeon_id),int(user_id),now))
-        room=int(run["room"]) if run else 1; name=d["dungeon_name"]; party=conn.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(int(dungeon_id),)).fetchone(); conn.commit(); conn.close()
-    enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,user_id,forced_enemy_key=enemy["key"],dungeon_event_id=dungeon_id,dungeon_room=room)
-    return (True,f"🏰 {name}\n👥 Expedición cooperativa: {int(party['n'])} aventureros\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\n\n{msg}") if ok else (False,msg)
+        battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),uid)).fetchone()
+        if battle and int(battle.get('dungeon_event_id') or 0)!=did:
+            conn.rollback(); conn.close(); return False,"⚔️ Ya tienes otro combate activo. Termínalo antes de entrar."
+        run=conn.execute("SELECT * FROM rpg_dungeon_runs WHERE dungeon_id=? AND user_id=? FOR UPDATE",(did,uid)).fetchone()
+        if run and int(run.get('completed') or 0): conn.rollback(); conn.close(); return False,"🏆 Ya completaste esta mazmorra."
+        # El grupo siempre entra a la sala más avanzada que siga activa.
+        rr=conn.execute("SELECT * FROM rpg_dungeon_rooms WHERE dungeon_id=? AND status='active' ORDER BY room DESC LIMIT 1 FOR UPDATE",(did,)).fetchone()
+        room=int(rr['room']) if rr else 1
+        if not run: conn.execute("INSERT INTO rpg_dungeon_runs(dungeon_id,user_id,room,completed,started_at,updated_at) VALUES(?,?,?,0,?,?)",(did,uid,room,now,now))
+        else: conn.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(room,now,did,uid))
+        conn.execute("INSERT INTO rpg_dungeon_party_members(dungeon_id,user_id,joined_at,room_cleared,completed) VALUES(?,?,?,0,0) ON CONFLICT(dungeon_id,user_id) DO NOTHING",(did,uid,now))
+        name=d['dungeon_name']; conn.commit(); conn.close()
+    if battle and int(battle.get('dungeon_event_id') or 0)==did:
+        shared=_sync_dungeon_battle_to_room(chat_id,uid,did,room)
+        return True,f"🏰 {name}\\n👥 Sigues con la expedición\\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\\n⚔️ {shared['enemy_name'] if shared else battle['enemy_name']}\\n❤️ {shared['enemy_hp'] if shared else battle['enemy_hp']} HP compartidos"
+    if rr:
+        ok,msg=start_rpg_encounter(chat_id,uid,forced_enemy_key=rr['enemy_key'],dungeon_event_id=did,dungeon_room=room)
+        if ok: _sync_dungeon_battle_to_room(chat_id,uid,did,room)
+    else:
+        enemy=random.choice(RPG_ENEMIES); ok,msg=start_rpg_encounter(chat_id,uid,forced_enemy_key=enemy['key'],dungeon_event_id=did,dungeon_room=room)
+        if ok: _sync_dungeon_battle_to_room(chat_id,uid,did,room)
+    if not ok: return False,msg
+    with db_lock:
+        c=get_db(); n=c.execute("SELECT COUNT(*) n FROM rpg_dungeon_party_members WHERE dungeon_id=?",(did,)).fetchone(); c.close()
+    shared=_sync_dungeon_battle_to_room(chat_id,uid,did,room)
+    return True,f"🏰 {name}\\n👥 Expedición cooperativa: {int(n['n'])} aventureros\\n🚪 Sala {room}/{RPG_DUNGEON_ROOMS}\\n\\n⚔️ {shared['enemy_name']}\\n❤️ {shared['enemy_hp']}/{shared['enemy_max_hp']} HP compartidos\\n\\nTodos atacan a este mismo enemigo."
 
 def spawn_will_epic_event(chatrow, now=None):
     chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
@@ -8925,6 +9022,19 @@ def help_revive_player(helper_id,target_id):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    if data=="drawg_take":
+        ok,msg2=_drawg_claim(chat_id,user,msg.get("message_thread_id"))
+        if not ok:
+            telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":msg2,"show_alert":True}); return True
+        url=f"{PUBLIC_BASE_URL}/rpg/draw-global?chat={int(chat_id)}"
+        dm=send_private_message(int(uid),"🎨 Tu turno. Elige una palabra. Puedes cambiarla todas las veces que quieras.",reply_markup={"inline_keyboard":[[{"text":"🎨 Abrir lienzo","web_app":{"url":url}}]]})
+        if not dm:
+            with db_lock:
+                c=get_db(); c.execute("UPDATE rpg_draw_global SET status='idle',artist_id=0,artist_name='',updated_at=? WHERE chat_id=?",(int(time.time()),int(chat_id))); c.commit(); c.close()
+            botname=str(get_bot_identity().get('username') or '').strip(); link=f"https://t.me/{botname}" if botname else PUBLIC_BASE_URL
+            send_message(chat_id,"No puedo enviarte el lienzo por privado todavía. Abre primero el chat de KiwBot y vuelve a tomar el turno.",reply_markup={"inline_keyboard":[[{"text":"Abrir KiwBot","url":link}]]}); return True
+        send_message(chat_id,f"🎨 {user.get('first_name') or 'El artista'} tomó el turno. Está eligiendo palabra.")
+        return True
     if data.startswith("qm:"):
         try:
             _,mid,kind,choice=data.split(":",3)
@@ -9695,6 +9805,96 @@ def send_photo_bytes(chat_id, raw, caption="", message_thread_id=None, content_t
     return data
 
 
+# =========================================================
+# DIBUJA Y ADIVINA GLOBAL — separado de Misiones Relámpago
+# =========================================================
+RPG_DRAW_GLOBAL_SECONDS=90
+RPG_DRAW_GLOBAL_KW=500
+RPG_DRAW_GLOBAL_EXP=75
+RPG_DRAW_GLOBAL_MAX_STROKES=2200
+RPG_DRAW_GLOBAL_WORDS=[
+    ('dragón',['dragon']),('castillo',[]),('gato',['michi']),('espada',[]),('pirata',[]),('fantasma',[]),
+    ('volcán',['volcan']),('cohete',[]),('tiburón',['tiburon']),('corona',[]),('robot',[]),('pizza',[]),
+    ('dinosaurio',[]),('bruja',['hechicera']),('barco',[]),('avión',['avion']),('caballero',[]),('sirena',[]),
+    ('murciélago',['murcielago']),('helado',[]),('pulpo',[]),('montaña',['montana']),('tesoro',[]),('unicornio',[]),
+    ('zombie',['zombi']),('cactus',[]),('martillo',[]),('pingüino',['pinguino']),('paraguas',[]),('tortuga',[]),
+    ('calavera',[]),('astronauta',[]),('poción',['pocion']),('mago',[]),('arco',[]),('escudo',[]),('anillo',[]),
+    ('goblin',[]),('mimic',[]),('pollo',[]),('monstruo',[])
+]
+
+def _drawg_norm(v):
+    import unicodedata
+    v=unicodedata.normalize('NFKD',str(v or '').casefold())
+    return re.sub(r'[^a-z0-9]+','', ''.join(ch for ch in v if not unicodedata.combining(ch)))
+
+def _drawg_choices(exclude=None):
+    ex=set(exclude or []); pool=[x for x in RPG_DRAW_GLOBAL_WORDS if x[0] not in ex]
+    if len(pool)<3: pool=list(RPG_DRAW_GLOBAL_WORDS)
+    return random.SystemRandom().sample(pool,3)
+
+def _drawg_offer(chat_id,topic=None):
+    now=int(time.time()); chat_id=int(chat_id)
+    with db_lock:
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
+        if row and row['status']=='drawing' and int(row['ends_at'] or 0)>now:
+            left=int(row['ends_at'])-now; c.rollback(); c.close(); return False,f'🎨 Ya hay una ronda activa. Quedan {left}s.'
+        c.execute("""INSERT INTO rpg_draw_global(chat_id,message_thread_id,status,updated_at) VALUES(?,?,'idle',?)
+                     ON CONFLICT(chat_id) DO UPDATE SET message_thread_id=EXCLUDED.message_thread_id,artist_id=0,artist_name='',word='',synonyms='[]',status='idle',choices='[]',strokes='[]',stroke_version=0,started_at=0,ends_at=0,updated_at=EXCLUDED.updated_at""",(chat_id,int(topic) if topic is not None else None,now)); c.commit(); c.close()
+    send_message(chat_id,'🎨 DIBUJA Y ADIVINA\n\nEl lienzo está libre. El primero en tomar el turno será el artista.\n⏱️ Al elegir palabra comienzan 90 segundos.\n💬 Todos los demás adivinan escribiendo en el grupo.',reply_markup={'inline_keyboard':[[{'text':'🎨 Tomar turno','callback_data':'drawg_take'}]]})
+    return True,'Ronda preparada.'
+
+def _drawg_claim(chat_id,user,topic=None):
+    now=int(time.time()); uid=int((user or {}).get('id') or 0); name=((user or {}).get('first_name') or (user or {}).get('username') or 'Artista')[:80]
+    with db_lock:
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
+        if not row or row['status']!='idle': c.rollback(); c.close(); return False,'Ese turno ya fue tomado.'
+        choices=[{'word':w,'synonyms':sy} for w,sy in _drawg_choices()]
+        c.execute("UPDATE rpg_draw_global SET artist_id=?,artist_name=?,status='choosing',choices=?,strokes='[]',stroke_version=0,updated_at=? WHERE chat_id=?",(uid,name,json.dumps(choices,ensure_ascii=False),now,int(chat_id))); c.commit(); c.close()
+    return True,'Turno tomado.'
+
+def _drawg_finish(chat_id,reason='time'):
+    now=int(time.time()); chat_id=int(chat_id)
+    with db_lock:
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
+        if not row or row['status']!='drawing': c.rollback(); c.close(); return False
+        word=str(row['word'] or '?'); topic=row.get('message_thread_id')
+        c.execute("UPDATE rpg_draw_global SET status='finished',updated_at=? WHERE chat_id=?",(now,chat_id)); c.commit(); c.close()
+    old=get_current_message_thread_id(); set_current_message_thread_id(topic)
+    try: send_message(chat_id,f'⏰ Tiempo. Nadie adivinó.\nLa palabra era: {word}')
+    finally: set_current_message_thread_id(old)
+    _drawg_offer(chat_id,topic); return True
+
+def _drawg_guess(message,text):
+    chat=message.get('chat') or {}; chat_id=chat.get('id'); user=message.get('from') or {}; uid=int(user.get('id') or 0); now=int(time.time())
+    if not chat_id or chat.get('type') not in ('group','supergroup') or not text or str(text).startswith('/'): return False
+    with db_lock:
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(int(chat_id),)).fetchone()
+        if not row or row['status']!='drawing': c.rollback(); c.close(); return False
+        if int(row['ends_at'] or 0)<=now: c.rollback(); c.close(); _drawg_finish(chat_id); return False
+        if int(row['artist_id'] or 0)==uid: c.rollback(); c.close(); return False
+        answers=[str(row['word'] or '')]+list(json.loads(row['synonyms'] or '[]'))
+        if _drawg_norm(text) not in {_drawg_norm(a) for a in answers}: c.rollback(); c.close(); return False
+        # Primer acierto cierra la ronda atómicamente.
+        topic=row.get('message_thread_id'); word=str(row['word']); artist=int(row['artist_id'] or 0)
+        c.execute("UPDATE rpg_draw_global SET status='finished',updated_at=? WHERE chat_id=? AND status='drawing'",(now,int(chat_id)))
+        prow=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+        if prow is None:
+            c.execute("INSERT INTO players(user_id,display_name,kiwons,created_at,updated_at) VALUES(?,?,?,?,?)",(uid,(user.get('first_name') or f'Jugador {uid}'),RPG_DRAW_GLOBAL_KW,now,now))
+        else:
+            c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(RPG_DRAW_GLOBAL_KW,now,uid))
+        c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(uid,RPG_DRAW_GLOBAL_KW,'draw_global_win',uid,None,int(chat_id),f'Dibuja y Adivina: {word}',now))
+        ch=c.execute("SELECT id FROM characters WHERE user_id=? AND is_active=1 LIMIT 1",(uid,)).fetchone()
+        c.execute("""INSERT INTO rpg_draw_global_stats(user_id,wins,exp_won,kw_won,rounds_drawn,updated_at) VALUES(?,1,?,?,0,?)
+                     ON CONFLICT(user_id) DO UPDATE SET wins=rpg_draw_global_stats.wins+1,exp_won=rpg_draw_global_stats.exp_won+EXCLUDED.exp_won,kw_won=rpg_draw_global_stats.kw_won+EXCLUDED.kw_won,updated_at=EXCLUDED.updated_at""",(uid,RPG_DRAW_GLOBAL_EXP,RPG_DRAW_GLOBAL_KW,now))
+        c.execute("""INSERT INTO rpg_draw_global_stats(user_id,wins,exp_won,kw_won,rounds_drawn,updated_at) VALUES(?,0,0,0,1,?)
+                     ON CONFLICT(user_id) DO UPDATE SET rounds_drawn=rpg_draw_global_stats.rounds_drawn+1,updated_at=EXCLUDED.updated_at""",(artist,now))
+        c.commit(); c.close()
+    if ch: grant_rpg_exp(int(ch['id']),RPG_DRAW_GLOBAL_EXP)
+    old=get_current_message_thread_id(); set_current_message_thread_id(topic)
+    try: send_message(chat_id,f"🏆 {(user.get('first_name') or user.get('username') or 'Alguien')} adivinó: {word.upper()}\n🪙 +{RPG_DRAW_GLOBAL_KW:,} KW · ✨ +{RPG_DRAW_GLOBAL_EXP} EXP")
+    finally: set_current_message_thread_id(old)
+    _drawg_offer(chat_id,topic); return True
+
 def process_command(
     message,
     text
@@ -9719,6 +9919,14 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+
+    if command in ("/dibuja","/dibujar","/pinta"):
+        if chat.get("type") not in ("group","supergroup"):
+            send_message(chat_id,"🎨 Dibuja y Adivina es global: úsalo dentro del grupo.")
+            return True
+        ok,msg=_drawg_offer(chat_id,message.get("message_thread_id"))
+        if not ok: send_message(chat_id,msg)
+        return True
 
     if command == "/testimagenia":
         if not is_owner(user_id):
@@ -11821,6 +12029,9 @@ def process_update(
         if handle_character_name_message(message, text):
             return
 
+        if _drawg_guess(message, text):
+            return
+
         if handle_quick_mission_text(message, text):
             return
 
@@ -12244,10 +12455,10 @@ def rpg_draw_page():
     try: mid=int(request.args.get("mission","0") or 0)
     except Exception: mid=0
     with db_lock:
-        conn=get_db(); row=conn.execute("SELECT id,title,prompt,status,expires_at,mission_type FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
+        conn=get_db(); row=conn.execute("SELECT id,title,prompt,status,expires_at,mission_type,answer,payload FROM rpg_quick_missions WHERE id=?",(mid,)).fetchone(); conn.close()
     if not row or row['mission_type']!='draw': return "Misión de dibujo no encontrada.",404
     title=str(row['title']); prompt=str(row['prompt'])
-    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🏁 <b>El primero que ENTREGUE un dibujo válido gana.</b> Abrir el lienzo no reserva la misión.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Entregar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
+    html='''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{margin:0;background:#0c0f15;color:#fff;font-family:system-ui,sans-serif}.wrap{max-width:760px;margin:auto;padding:14px}.card{background:#171b24;border:1px solid #303748;border-radius:18px;padding:14px}.muted{color:#b8c0cf}.bar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.bar button{border:0;border-radius:12px;padding:11px 14px;font-weight:800}.canvasbox{background:#fff;border-radius:16px;overflow:hidden;touch-action:none}canvas{display:block;width:100%;height:auto;touch-action:none}.send{width:100%;margin-top:12px;padding:15px;border:0;border-radius:13px;font-size:16px;font-weight:900}.status{text-align:center;min-height:26px;padding-top:10px}</style></head><body><div class="wrap"><div class="card"><h2 id="title"></h2><div id="prompt" class="muted"></div><p>🎨 <b>Dibuja la palabra secreta.</b> Al publicar, el grupo comenzará a adivinar.</p><div class="bar"><button onclick="setColor('#111111')">⚫ Negro</button><button onclick="setColor('#e53935')">🔴 Rojo</button><button onclick="setColor('#1e88e5')">🔵 Azul</button><button onclick="setColor('#43a047')">🟢 Verde</button><button onclick="undo()">↩️ Deshacer</button><button onclick="clearCanvas()">🗑️ Borrar</button></div><div class="canvasbox"><canvas id="c" width="700" height="700"></canvas></div><button class="send" id="send">📨 Publicar dibujo</button><div class="status" id="status"></div></div></div><script>const tg=window.Telegram.WebApp;tg.ready();tg.expand();const MID=__MID__;document.getElementById('title').textContent=__TITLE__;document.getElementById('prompt').textContent=__PROMPT__;const c=document.getElementById('c'),x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.lineCap='round';x.lineJoin='round';x.lineWidth=8;let color='#111',down=false,last=null,history=[],strokes=0;function snap(){if(history.length>20)history.shift();history.push(c.toDataURL())}snap();function pos(e){const r=c.getBoundingClientRect(),p=e.touches?e.touches[0]:e;return{x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}}function start(e){e.preventDefault();snap();down=true;strokes++;last=pos(e)}function move(e){if(!down)return;e.preventDefault();let p=pos(e);x.strokeStyle=color;x.beginPath();x.moveTo(last.x,last.y);x.lineTo(p.x,p.y);x.stroke();last=p}function end(){down=false}['mousedown','touchstart'].forEach(n=>c.addEventListener(n,start,{passive:false}));['mousemove','touchmove'].forEach(n=>c.addEventListener(n,move,{passive:false}));['mouseup','mouseleave','touchend','touchcancel'].forEach(n=>c.addEventListener(n,end));function setColor(v){color=v}function clearCanvas(){snap();x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height)}function undo(){let d=history.pop();if(!d)return;let im=new Image();im.onload=()=>{x.clearRect(0,0,c.width,c.height);x.drawImage(im,0,0)};im.src=d}document.getElementById('send').onclick=async()=>{const st=document.getElementById('status');if(!tg.initData){st.textContent='Abre este lienzo desde KiwBot.';return}st.textContent='Entregando...';try{const r=await fetch('/rpg/api/draw-submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:tg.initData,mission_id:MID,strokes:strokes,image:c.toDataURL('image/png')})});const j=await r.json();st.textContent=j.message||'Listo';if(j.ok){tg.HapticFeedback?.notificationOccurred('success');setTimeout(()=>tg.close(),1500)}}catch(e){st.textContent='No pude entregar el dibujo.'}};</script></body></html>'''
     return html.replace('__MID__',str(mid)).replace('__TITLE__',json.dumps(title)).replace('__PROMPT__',json.dumps(prompt))
 
 @app.route("/rpg/api/draw-submit", methods=["POST"])
@@ -12267,14 +12478,73 @@ def rpg_draw_submit():
         head,b64=data.split(',',1); raw=base64.b64decode(b64,validate=True)
         if not head.startswith('data:image/png') or len(raw)<1500 or len(raw)>4_000_000: raise ValueError('bad image')
     except Exception: return jsonify({'ok':False,'message':'El dibujo no parece una imagen válida.'}),400
-    ok,msg=_quick_finish(dict(row),uid)
-    if not ok: return jsonify({'ok':False,'message':'🥈 '+msg}),409
+    payload_state=_draw_payload(dict(row))
+    if int(payload_state.get('artist_id') or 0)!=uid:
+        return jsonify({'ok':False,'message':'Solo el artista que tomó el turno puede publicar este dibujo.'}),403
+    if payload_state.get('submitted'):
+        return jsonify({'ok':False,'message':'Este dibujo ya fue publicado. Ahora toca adivinar en el grupo.'}),409
+    payload_state['submitted']=True; payload_state['submitted_at']=int(time.time())
+    with db_lock:
+        conn=get_db(); locked=conn.execute("SELECT status,payload FROM rpg_quick_missions WHERE id=? FOR UPDATE",(mid,)).fetchone()
+        current=_draw_payload(dict(locked or {}))
+        if not locked or locked['status']!='active' or int(current.get('artist_id') or 0)!=uid or current.get('submitted'):
+            conn.rollback(); conn.close(); return jsonify({'ok':False,'message':'El turno ya no está disponible.'}),409
+        conn.execute("UPDATE rpg_quick_missions SET payload=? WHERE id=?",(json.dumps(payload_state,separators=(',',':')),mid)); conn.commit(); conn.close()
     try:
-        files={'photo':('dibujo.png',raw,'image/png')}; payload={'chat_id':str(int(row['chat_id'])),'caption':f"🎨 OBRA GANADORA — {row['title']}\n\n{msg}"}
-        if row.get('message_thread_id') is not None: payload['message_thread_id']=str(int(row['message_thread_id']))
-        TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendPhoto",data=payload,files=files,timeout=TELEGRAM_TIMEOUT)
-    except Exception: logger.exception('No pude publicar el dibujo ganador')
-    return jsonify({'ok':True,'message':'🏆 ¡Llegaste primero! Tu dibujo ganó la misión.'})
+        files={'photo':('dibujo.png',raw,'image/png')}; tg_payload={'chat_id':str(int(row['chat_id'])),'caption':"🎨 DIBUJA Y ADIVINA\n\nEl artista terminó. ¿Qué palabra representa este dibujo?\n💬 Escriban sus respuestas directamente en el chat.\n🏆 La primera respuesta correcta gana."}
+        if row.get('message_thread_id') is not None: tg_payload['message_thread_id']=str(int(row['message_thread_id']))
+        TELEGRAM_SESSION.post(f"{TELEGRAM_API}/sendPhoto",data=tg_payload,files=files,timeout=TELEGRAM_TIMEOUT)
+    except Exception: logger.exception('No pude publicar el dibujo para adivinar')
+    return jsonify({'ok':True,'message':'🎨 Dibujo publicado. Ahora el grupo debe adivinar la palabra.'})
+
+@app.route('/rpg/draw-global')
+def rpg_draw_global_page():
+    html="""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><title>Dibuja y Adivina</title><script src='https://telegram.org/js/telegram-web-app.js'></script><style>*{box-sizing:border-box}body{margin:0;background:#10120f;color:#eee;font-family:system-ui;overscroll-behavior:none}.wrap{max-width:950px;margin:auto;padding:10px}.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.choices,.tools{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.choices button,.tools button,.change{border:1px solid #5f674f;background:#252a20;color:#eee;border-radius:10px;padding:10px;font-weight:700}.change{background:#5d451b}.sw{width:31px;height:31px;border-radius:50%;border:2px solid #ddd;padding:0}.canvas{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 8px 30px #0008}canvas{display:block;width:100%;height:auto;touch-action:none}.status{padding:8px 0;color:#e7cf7a;font-weight:700}.hidden{display:none}input[type=range]{width:120px}</style></head><body><div class='wrap'><div class='bar'><b>🎨 Dibuja y Adivina</b><span id='status' class='status'>Cargando…</span></div><div id='choices' class='choices'></div><div id='tools' class='tools hidden'></div><div class='canvas'><canvas id='cv' width='900' height='650'></canvas></div></div><script>
+const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const qs=new URLSearchParams(location.search),chat=Number(qs.get('chat')||0),init=tg?.initData||'',cv=document.getElementById('cv'),ctx=cv.getContext('2d'),statusEl=document.getElementById('status'),choicesEl=document.getElementById('choices'),toolsEl=document.getElementById('tools');let artist=false,drawing=false,color='#111111',width=7,strokes=[],version=-1,syncing=false;const colors=['#111111','#ffffff','#e53935','#fb8c00','#fdd835','#43a047','#00a7a7','#1e88e5','#7e57c2','#ec407a','#795548'];async function api(action,data={}){const ac=new AbortController();const t=setTimeout(()=>ac.abort(),7000);try{let r=await fetch('/rpg/api/draw-global',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,body:JSON.stringify({init_data:init,chat_id:chat,action,...data})});return await r.json()}finally{clearTimeout(t)}}function render(){ctx.fillStyle='#fff';ctx.fillRect(0,0,900,650);ctx.lineCap='round';for(const s of strokes){ctx.strokeStyle=s.c;ctx.lineWidth=s.w;ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke()}}function showTools(){toolsEl.classList.remove('hidden');toolsEl.innerHTML=colors.map(c=>`<button class='sw' data-c='${c}' style='background:${c}'></button>`).join('')+`<input id='custom' type='color'><input id='size' type='range' min='2' max='36' value='7'><button id='eraser'>Goma</button><button id='undo'>Deshacer</button><button id='clear'>Borrar</button><button id='change' class='change'>🔄 Cambiar palabra</button>`;toolsEl.querySelectorAll('.sw').forEach(b=>b.onclick=()=>color=b.dataset.c);document.getElementById('custom').oninput=e=>color=e.target.value;document.getElementById('size').oninput=e=>width=+e.target.value;document.getElementById('eraser').onclick=()=>color='#ffffff';document.getElementById('undo').onclick=()=>{strokes.pop();render();sync()};document.getElementById('clear').onclick=()=>{strokes=[];render();sync()};document.getElementById('change').onclick=async()=>{let z=await api('change_word');if(z.ok){strokes=[];render();version=z.version;statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}}}function paintChoices(arr){choicesEl.innerHTML=(arr||[]).map((q,i)=>`<button data-i='${i}'>${q}</button>`).join('')+`<button id='reroll' class='change'>🔄 Otras palabras</button>`;choicesEl.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{let z=await api('choose',{choice:+b.dataset.i});if(z.ok){choicesEl.innerHTML='';drawing=true;showTools();statusEl.textContent='Palabra: '+z.word+' · '+z.left+'s'}});document.getElementById('reroll').onclick=async()=>{let z=await api('reroll');if(z.ok)paintChoices(z.choices)}}async function boot(){render();try{let j=await api('state');if(!j.ok){statusEl.textContent=j.message||'No disponible';return}artist=j.artist;version=j.version;strokes=j.strokes||[];render();if(j.status==='choosing'&&artist){statusEl.textContent='Elige palabra';paintChoices(j.choices)}else if(j.status==='drawing'){drawing=artist;if(artist){showTools();statusEl.textContent='Palabra: '+j.word+' · '+j.left+'s'}else statusEl.textContent='Adivina en Telegram · '+j.left+'s'}else statusEl.textContent='Esperando turno'}catch(e){statusEl.textContent='No pude conectar con KiwBot.'}}function pt(e){let r=cv.getBoundingClientRect();return[(e.clientX-r.left)*900/r.width,(e.clientY-r.top)*650/r.height]}let prev=null;cv.onpointerdown=e=>{if(!artist||!drawing)return;cv.setPointerCapture(e.pointerId);prev=pt(e)};cv.onpointermove=e=>{if(!prev||!artist||!drawing)return;let p=pt(e),s={a:prev[0],b:prev[1],d:p[0],e:p[1],c:color,w:width};strokes.push(s);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(s.a,s.b);ctx.lineTo(s.d,s.e);ctx.stroke();prev=p;if(strokes.length%10===0)sync()};cv.onpointerup=()=>{prev=null;sync()};cv.onpointercancel=()=>{prev=null};async function sync(){if(syncing||!artist||!drawing)return;syncing=true;try{let j=await api('stroke',{strokes});if(j.ok)version=j.version}finally{syncing=false}}setInterval(async()=>{if(document.hidden)return;try{let j=await api('state',{version});if(!j.ok)return;artist=j.artist;if(j.status==='drawing'){statusEl.textContent=artist?'Palabra: '+j.word+' · '+j.left+'s':'Adivina en Telegram · '+j.left+'s';if(j.version!==version){version=j.version;strokes=j.strokes||[];render()}}else if(j.status==='finished')statusEl.textContent='Ronda terminada'}catch(e){}},650);boot();</script></body></html>"""
+    return Response(html,mimetype='text/html')
+
+@app.route('/rpg/api/draw-global',methods=['POST'])
+def rpg_draw_global_api():
+    b=request.get_json(silent=True) or {}; chat_id=int(b.get('chat_id') or 0); action=str(b.get('action') or 'state'); now=int(time.time())
+    auth=validate_telegram_init_data(b.get('init_data','')) if b.get('init_data') else None; uid=int((auth or {}).get('user',{}).get('id') or 0)
+    if not chat_id: return jsonify(ok=False,message='Chat inválido'),400
+    with db_lock:
+        c=get_db(); row=c.execute('SELECT * FROM rpg_draw_global WHERE chat_id=? FOR UPDATE',(chat_id,)).fetchone()
+        if not row: c.rollback(); c.close(); return jsonify(ok=False,message='No hay partida activa'),404
+        artist=bool(uid and int(row['artist_id'] or 0)==uid)
+        if action=='reroll':
+            if not artist or row['status']!='choosing': c.rollback(); c.close(); return jsonify(ok=False,message='No eres el artista'),403
+            old=[q.get('word') for q in json.loads(row['choices'] or '[]')]; fresh=[{'word':w,'synonyms':sy} for w,sy in _drawg_choices(old)]
+            c.execute('UPDATE rpg_draw_global SET choices=?,updated_at=? WHERE chat_id=?',(json.dumps(fresh,ensure_ascii=False),now,chat_id)); c.commit(); c.close(); return jsonify(ok=True,choices=[q['word'] for q in fresh])
+        if action=='choose':
+            if not artist or row['status']!='choosing': c.rollback(); c.close(); return jsonify(ok=False,message='No eres el artista'),403
+            choices=json.loads(row['choices'] or '[]'); idx=int(b.get('choice',-1))
+            if idx<0 or idx>=len(choices): c.rollback(); c.close(); return jsonify(ok=False,message='Palabra inválida'),400
+            q=choices[idx]; end=now+RPG_DRAW_GLOBAL_SECONDS
+            c.execute("UPDATE rpg_draw_global SET word=?,synonyms=?,status='drawing',started_at=?,ends_at=?,strokes='[]',stroke_version=0,updated_at=? WHERE chat_id=?",(q['word'],json.dumps(q.get('synonyms',[]),ensure_ascii=False),now,end,now,chat_id)); c.commit(); topic=row.get('message_thread_id'); c.close()
+            old=get_current_message_thread_id(); set_current_message_thread_id(topic)
+            try: send_message(chat_id,f'🎨 ¡Comenzó el dibujo! Tienen {RPG_DRAW_GLOBAL_SECONDS} segundos.\n💬 Escriban sus respuestas directamente en el chat.')
+            finally: set_current_message_thread_id(old)
+            threading.Timer(RPG_DRAW_GLOBAL_SECONDS+1,lambda:_drawg_finish(chat_id,'time')).start(); return jsonify(ok=True,word=q['word'],left=RPG_DRAW_GLOBAL_SECONDS)
+        if action=='change_word':
+            if not artist or row['status']!='drawing': c.rollback(); c.close(); return jsonify(ok=False,message='No puedes cambiar palabra ahora'),403
+            w,sy=random.SystemRandom().choice(RPG_DRAW_GLOBAL_WORDS); ver=int(row['stroke_version'] or 0)+1; left=max(0,int(row['ends_at'] or 0)-now)
+            c.execute("UPDATE rpg_draw_global SET word=?,synonyms=?,strokes='[]',stroke_version=?,updated_at=? WHERE chat_id=?",(w,json.dumps(sy,ensure_ascii=False),ver,now,chat_id)); c.commit(); c.close(); return jsonify(ok=True,word=w,left=left,version=ver)
+        if action=='stroke':
+            if not artist or row['status']!='drawing' or int(row['ends_at'] or 0)<=now: c.rollback(); c.close(); return jsonify(ok=False,message='No puedes dibujar'),403
+            raw=b.get('strokes') or []
+            if not isinstance(raw,list) or len(raw)>RPG_DRAW_GLOBAL_MAX_STROKES: c.rollback(); c.close(); return jsonify(ok=False,message='Lienzo demasiado grande'),400
+            clean=[]
+            for q in raw:
+                try: clean.append({'a':max(0,min(900,float(q['a']))),'b':max(0,min(650,float(q['b']))),'d':max(0,min(900,float(q['d']))),'e':max(0,min(650,float(q['e']))),'c':str(q['c']) if re.fullmatch(r'#[0-9a-fA-F]{6}',str(q.get('c',''))) else '#111111','w':max(2,min(36,float(q['w'])))})
+                except Exception: pass
+            ver=int(row['stroke_version'] or 0)+1; c.execute('UPDATE rpg_draw_global SET strokes=?,stroke_version=?,updated_at=? WHERE chat_id=?',(json.dumps(clean,separators=(',',':')),ver,now,chat_id)); c.commit(); c.close(); return jsonify(ok=True,version=ver)
+        if row['status']=='drawing' and int(row['ends_at'] or 0)<=now:
+            c.rollback(); c.close(); _drawg_finish(chat_id); return jsonify(ok=True,status='finished',artist=False,strokes=[],version=0,left=0)
+        payload={'ok':True,'status':row['status'],'artist':artist,'strokes':json.loads(row['strokes'] or '[]'),'version':int(row['stroke_version'] or 0),'left':max(0,int(row['ends_at'] or 0)-now)}
+        if artist and row['status']=='choosing': payload['choices']=[q['word'] for q in json.loads(row['choices'] or '[]')]
+        if artist and row['status']=='drawing': payload['word']=row['word']
+        c.rollback(); c.close(); return jsonify(payload)
 
 @app.route("/rpg/create", methods=["GET"])
 def rpg_create_page():

@@ -6201,6 +6201,60 @@ def handle_rpg_dice(message):
     return False
 
 
+
+RPG_INVENTORY_PAGE_SIZE = 12
+
+def rpg_inventory_page(user_id, page=1):
+    """Inventory UI: stack consumables/materials, keep equipment/serialized objects individually manageable."""
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,i.acquired_at,
+                   x.item_key,x.name,x.rarity,x.equip_slot,x.item_type
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=?
+            ORDER BY i.acquired_at DESC,i.id DESC""",(int(user_id),world)).fetchall()
+        conn.close()
+    entries=[]; stacked={}
+    for rr in rows:
+        r=dict(rr); typ=str(r.get("item_type") or "")
+        stackable=typ in ("consumible","material") and r.get("serial_number") is None and not int(r.get("equipped") or 0)
+        if stackable:
+            key=str(r.get("item_key") or "")
+            if key not in stacked:
+                x=dict(r); x["quantity"]=0; stacked[key]=x; entries.append(x)
+            stacked[key]["quantity"] += int(r.get("quantity") or 0)
+        else:
+            entries.append(r)
+    total=len(entries)
+    pages=max(1,(total+RPG_INVENTORY_PAGE_SIZE-1)//RPG_INVENTORY_PAGE_SIZE)
+    try: page=int(page)
+    except Exception: page=1
+    page=max(1,min(page,pages))
+    start=(page-1)*RPG_INVENTORY_PAGE_SIZE
+    shown=entries[start:start+RPG_INVENTORY_PAGE_SIZE]
+    kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],
+        [{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
+    for r in shown:
+        serial=f" #{r['serial_number']}" if r.get('serial_number') else ""
+        eq=" 🟢" if int(r.get('equipped') or 0) else ""
+        part=_inventory_item_icon(r)
+        qty=int(r.get('quantity') or 0)
+        qtxt=f" ×{qty}" if qty>1 or str(r.get('item_type') or '') in ('consumible','material') else ""
+        kb.append([{"text":f"{part} {RPG_RARITY_ICON.get(r.get('rarity'),'⚪')} {r.get('name')}{serial}{qtxt}{eq}".strip(),"callback_data":f"rpg_item:{int(r['id'])}"}])
+    if pages>1:
+        nav=[]
+        if page>1: nav.append({"text":"⬅️ Anterior","callback_data":f"rpg_show_inventory:{page-1}"})
+        nav.append({"text":f"📖 {page}/{pages}","callback_data":f"rpg_show_inventory:{page}"})
+        if page<pages: nav.append({"text":"Siguiente ➡️","callback_data":f"rpg_show_inventory:{page+1}"})
+        kb.append(nav)
+    char=get_active_character(user_id)
+    if char and is_owner(user_id) and char['class_name']=='The Cleaner':
+        active=bool(char['secret_blades_active'])
+        kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
+    txt=(f"🎒 INVENTARIO — Página {page}/{pages}\n\nToca un objeto para verlo y administrarlo.\n📦 {total} tipos/piezas visibles." if total else "🎒 INVENTARIO\n\nTodavía está vacío.")
+    return txt,{"inline_keyboard":kb}
+
 def rpg_inventory_text(user_id):
     world=current_rpg_world()
     with db_lock:
@@ -12465,23 +12519,13 @@ def handle_rpg_callback(query):
         send_message(chat_id,msg2,reply_markup={"inline_keyboard":[[{"text":"🏪 Volver a la tienda","callback_data":"rpg_shop"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]}); return True
     if data=="rpg_show_equipment":
         send_message(chat_id,equipment_text(uid)); return True
-    if data=="rpg_show_inventory":
+    if data=="rpg_show_inventory" or data.startswith("rpg_show_inventory:"):
         if not _is_private_chat_obj(msg.get("chat")):
             send_message(chat_id,"🎒 Tu inventario se administra en privado con KiwBot.",reply_markup=_private_launch_keyboard("inventory")); return True
-        world=current_rpg_world()
-        with db_lock:
-            conn=get_db(); rows=conn.execute("""SELECT MIN(i.id) AS id, NULL::BIGINT AS serial_number, SUM(i.quantity) AS quantity, MAX(i.equipped) AS equipped, x.item_key,x.name,x.rarity,x.equip_slot,x.item_type,MAX(i.acquired_at) AS last_acquired FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? GROUP BY x.item_key,x.name,x.rarity,x.equip_slot,x.item_type ORDER BY last_acquired DESC,x.name""",(int(uid),world)).fetchall(); conn.close()
-        kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
-        for r in rows:
-            serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
-            part=_inventory_item_icon(dict(r))
-            kb.append([{"text":f"{part} {RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}".strip(),"callback_data":f"rpg_item:{r['id']}"}])
-        char=get_active_character(uid)
-        if _is_private_chat_obj(msg.get("chat")) and char and is_owner(uid) and char['class_name']=='The Cleaner':
-            active=bool(char['secret_blades_active'])
-            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
-        text_inv="🎒 INVENTARIO\n\nToca un objeto para administrarlo." if rows else "🎒 INVENTARIO\n\nTodavía está vacío."
-        send_message(chat_id,text_inv,reply_markup={"inline_keyboard":kb} if kb else None); return True
+        try: page=int(data.split(":",1)[1]) if ":" in data else 1
+        except Exception: page=1
+        text_inv,kb=rpg_inventory_page(uid,page)
+        send_message(chat_id,text_inv,reply_markup=kb); return True
     if data=="rpg_toggle_blades":
         char=get_active_character(uid)
         if not char or not is_owner(uid) or char['class_name']!='The Cleaner':
@@ -14093,20 +14137,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         user_id = message.get("from", {}).get("id")
         if chat.get("type")!="private":
             send_message(chat_id,"🎒 Tu inventario se administra en privado. Perfil, mascotas e intercambios siguen siendo públicos.",reply_markup=_private_launch_keyboard("inventory")); return True
-        world=current_rpg_world()
-        with db_lock:
-            conn=get_db(); rows=conn.execute("""SELECT MIN(i.id) AS id, NULL::BIGINT AS serial_number, SUM(i.quantity) AS quantity, MAX(i.equipped) AS equipped, x.item_key,x.name,x.rarity,x.equip_slot,x.item_type,MAX(i.acquired_at) AS last_acquired FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? GROUP BY x.item_key,x.name,x.rarity,x.equip_slot,x.item_type ORDER BY last_acquired DESC,x.name""",(int(user_id),world)).fetchall(); conn.close()
-        lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."] if rows else ["🎒 INVENTARIO","","Todavía está vacío."]
-        kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
-        for r in rows:
-            serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
-            part=_inventory_item_icon(dict(r))
-            kb.append([{"text":f"{part} {RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
-        char=get_active_character(user_id)
-        if chat.get("type")=="private" and char and is_owner(user_id) and char['class_name']=='The Cleaner':
-            active=bool(char['secret_blades_active'])
-            kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
-        send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
+        text_inv,kb=rpg_inventory_page(user_id,1)
+        send_message(chat_id,text_inv,reply_markup=kb)
         return True
 
     if command in ("/subirarma", "/mejorararma", "/armas"):

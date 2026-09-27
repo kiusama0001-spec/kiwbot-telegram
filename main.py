@@ -3931,54 +3931,59 @@ def transfer_kiwons(sender_id, receiver_id, amount, chat_id=None):
 
 
 def resolve_target_for_economy(message, text):
-    """Resuelve destinatario por reply, @username exacto o text_mention.
+    """Resuelve un destinatario económico sin confundir @Kiwbot_bot con el usuario.
 
-    Si el texto contiene @usuario, NO se usa un text_mention distinto: esto evita
-    que Telegram/clientes raros hagan que una propuesta termine apuntando al emisor.
+    Prioridad: reply explícito -> text_mention -> @username escrito DESPUÉS del
+    token del comando. Nunca devuelve al emisor ni al propio bot.
     """
     sender_id = int((message.get("from") or {}).get("id") or 0)
+    chat_id = int((message.get("chat") or {}).get("id") or 0)
 
-    # 1) Reply: Telegram entrega el ID real.
-    reply = message.get("reply_to_message")
-    if reply:
+    # 1) Reply real. En topics ignorar el reply implícito al mensaje raíz.
+    reply = message.get("reply_to_message") or {}
+    thread_id = int(message.get("message_thread_id") or 0)
+    reply_mid = int(reply.get("message_id") or 0)
+    if reply and not (thread_id and reply_mid == thread_id):
         u = reply.get("from") or {}
         if u.get("id") and not u.get("is_bot") and int(u.get("id")) != sender_id:
             return u
-        return None
 
-    # 2) @username escrito: buscar SOLO en los argumentos del comando.
-    # En grupos Telegram suele enviar /transferir@Kiwbot_bot 500 @usuario;
-    # buscar sobre todo el texto confundía @Kiwbot_bot con el destinatario.
-    raw_text = str(text or "").strip()
-    command_args = raw_text.split(maxsplit=1)[1] if len(raw_text.split(maxsplit=1)) > 1 else ""
-    match = re.search(r"(?:^|\s)@([A-Za-z0-9_]{3,32})(?=\s|$)", command_args)
-    if match:
-        username = match.group(1).lower()
-        chat_id = int((message.get("chat") or {}).get("id") or 0)
-        with db_lock:
-            conn=get_db()
-            row=conn.execute("""SELECT * FROM chat_users
-                                WHERE chat_id=? AND LOWER(username)=? AND user_id<>?
-                                ORDER BY updated_at DESC LIMIT 1""",
-                             (chat_id,username,sender_id)).fetchone()
-            if not row:
-                row=conn.execute("""SELECT * FROM chat_users
-                                    WHERE LOWER(username)=? AND user_id<>?
-                                    ORDER BY updated_at DESC LIMIT 1""",
-                                 (username,sender_id)).fetchone()
-            conn.close()
-        if row:
-            return {"id":int(row["user_id"]),"username":row["username"],
-                    "first_name":row["first_name"],"last_name":row["last_name"]}
-        return None
-
-    # 3) text_mention solo cuando no se escribió @username.
-    for entity in message.get("entities", []):
+    # 2) text_mention trae el ID real y es más fiable que una caché por username.
+    for entity in message.get("entities", []) or []:
         if entity.get("type") == "text_mention":
-            u=entity.get("user") or {}
+            u = entity.get("user") or {}
             if u.get("id") and not u.get("is_bot") and int(u.get("id")) != sender_id:
                 return u
-    return None
+
+    # 3) @username: mirar ÚNICAMENTE los argumentos, nunca /comando@Kiwbot_bot.
+    raw = str(text or "").strip()
+    pieces = raw.split(maxsplit=1)
+    args = pieces[1] if len(pieces) > 1 else ""
+    usernames = re.findall(r"@([A-Za-z0-9_]{3,32})", args)
+    if not usernames:
+        return None
+    username = usernames[-1].casefold()
+
+    with db_lock:
+        conn = get_db()
+        try:
+            row = conn.execute("""SELECT user_id,username,first_name,last_name
+                                  FROM chat_users
+                                  WHERE chat_id=? AND LOWER(username)=? AND user_id<>?
+                                  ORDER BY updated_at DESC LIMIT 1""",
+                               (chat_id, username, sender_id)).fetchone()
+            if not row:
+                row = conn.execute("""SELECT user_id,username,first_name,last_name
+                                      FROM chat_users
+                                      WHERE LOWER(username)=? AND user_id<>?
+                                      ORDER BY updated_at DESC LIMIT 1""",
+                                   (username, sender_id)).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None
+    return {"id": int(row["user_id"]), "username": row["username"],
+            "first_name": row["first_name"], "last_name": row["last_name"]}
 
 
 def _explicit_reply_user(message):
@@ -15158,12 +15163,14 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if msg2: send_message(chat_id,msg2)
         return True
 
-    if command in ("/transferir", "/pagar"):
+    if command in ("/transferir", "/tranferir", "/pagar"):
         user = message.get("from", {})
         ensure_player(user)
         ensure_owner_secret_character(user)
         target = resolve_target_for_economy(message, text)
         amount = parse_positive_amount(text)
+        logger.info("Transferencia solicitada | sender=%s | target=%s | amount=%s | text=%r",
+                    user.get("id"), (target or {}).get("id"), amount, str(text or "")[:120])
 
         if not target or not target.get("id"):
             send_message(

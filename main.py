@@ -10343,13 +10343,14 @@ def _quick_transcribe_voice(message):
         raw,path=_telegram_download_file_bytes(fid)
         if not raw or len(raw)>5_000_000:
             return "", "🎙️ No pude descargar esa nota de voz o pesa demasiado."
-        ext=Path(path).suffix or ".ogg"
-        # Enviar el audio como multipart directamente al endpoint compatible de Groq.
-        # Esto evita incompatibilidades del wrapper OpenAI con BytesIO/OGG.
+        # Telegram suele entregar las notas de voz como .oga (contenedor OGG/Opus).
+        # Groq acepta OGG/Opus, pero valida también la extensión del nombre multipart
+        # y rechaza .oga como unsupported_audio_format. Conservamos los bytes y
+        # enviamos un nombre .ogg, que representa correctamente el mismo contenedor.
         resp=TELEGRAM_SESSION.post(
             "https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization":f"Bearer {GROQ_API_KEY}"},
-            files={"file":(f"kiwbot_voice{ext}",raw,"audio/ogg")},
+            files={"file":("kiwbot_voice.ogg",raw,"audio/ogg")},
             data={"model":"whisper-large-v3-turbo","language":"es","temperature":"0","response_format":"json"},
             timeout=max(30,TELEGRAM_TIMEOUT)
         )
@@ -13018,7 +13019,7 @@ def rpg_welcome_keyboard(user_id):
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
-         "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
+         "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
          "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
@@ -13372,6 +13373,35 @@ def clear_personal_rpg_states(chat_id,user_id):
         except Exception: c.rollback(); c.close(); raise
     cleanup_combat_dice(cid,uid)
     return cleared,refunded
+
+def clear_all_personal_combat_states(chat_id, actor_id=None):
+    """Emergencia admin: libera TODOS los combates personales del chat.
+
+    No toca bosses, mazmorras ni eventos globales. Los duelos de dados activos
+    devuelven la apuesta a ambos participantes para no destruir Kiwons.
+    """
+    cid=int(chat_id); now=int(time.time()); counts={"pve":0,"pvp":0,"dice":0}; refunded=0
+    with db_lock:
+        c=get_db()
+        try:
+            counts["pve"]=int(c.execute("DELETE FROM rpg_battles WHERE chat_id=?",(cid,)).rowcount or 0)
+            counts["pvp"]=int(c.execute("UPDATE rpg_pvp_duels SET status='cancelled',turn_user_id=NULL,updated_at=? WHERE chat_id=? AND status IN ('open','pending','initiative','active')",(now,cid)).rowcount or 0)
+            dice=c.execute("SELECT * FROM rpg_dice_duels WHERE chat_id=? AND status IN ('pending','active') FOR UPDATE",(cid,)).fetchall()
+            for d in dice:
+                if str(d['status'])=='active' and int(d.get('wager') or 0)>0:
+                    w=int(d['wager'])
+                    for x in (int(d['challenger_id'] or 0),int(d['opponent_id'] or 0)):
+                        if x:
+                            c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(w,now,x)); refunded+=w
+                            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(x,w,'dice_duel_refund',actor_id,0,cid,f'Reembolso /limpiarcombates duelo #{int(d["id"])}',now))
+                c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(now,int(d['id'])))
+            counts["dice"]=len(dice)
+            c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+    # Limpia dados visuales/temporales conocidos de los usuarios del chat de forma defensiva.
+    return counts,refunded
+
 
 def _marriage_id_for_user(user_id):
     r=_marriage_row(user_id,("active",)); return int(r['id']) if r else 0
@@ -15167,6 +15197,18 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if chat.get("type")!="private":
             send_message(chat_id,"📖 Tu historia y sus decisiones son privadas. Ábrela con KiwBot para continuar tu aventura.",reply_markup=_private_launch_keyboard("story")); return True
         txt,kb=rpg_personal_story_text(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/limpiarcombates", "/resetcombates", "/borrarcombates"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede limpiar todos los combates del chat."); return True
+        counts,refunded=clear_all_personal_combat_states(chat_id,message.get("from",{}).get("id"))
+        msg=(f"🧹 LIMPIEZA GLOBAL COMPLETA\n\n"
+             f"⚔️ PvE eliminados: {counts['pve']}\n"
+             f"🏆 PvP cancelados: {counts['pvp']}\n"
+             f"🎲 Duelos de dados cancelados: {counts['dice']}")
+        if refunded: msg+=f"\n🪙 Apuestas devueltas: {refunded:,} KW"
+        msg+="\n\nTodos pueden volver a iniciar combates. No se tocaron Bosses, mazmorras ni eventos globales."
+        send_message(chat_id,msg); return True
 
     if command in ("/salirtodo", "/salircombate", "/liberarme"):
         cleared,refunded=clear_personal_rpg_states(chat_id,user_id)

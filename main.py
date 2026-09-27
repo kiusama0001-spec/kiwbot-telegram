@@ -3955,22 +3955,49 @@ def resolve_target_for_economy(message, text):
     return None
 
 
-def resolve_target_for_marriage(message, text):
-    """Objetivo estricto para /casar: sólo reply real o @username escrito.
+def _explicit_reply_user(message):
+    """Devuelve el usuario de un reply REAL, ignorando el reply implícito al inicio de un topic.
 
-    Nunca infiere destinatarios desde otras entidades/cachés. Esto evita que un
-    /casar sin objetivo termine creando una propuesta para otra persona.
+    En supergrupos con Topics Telegram puede adjuntar el mensaje raíz del tema como
+    reply_to_message aunque el usuario sólo haya escrito el comando. Para acciones
+    sensibles como /casar eso NO debe convertirse en un destinatario automático.
+    """
+    reply = message.get("reply_to_message") or {}
+    if not reply:
+        return None
+    thread_id = int(message.get("message_thread_id") or 0)
+    reply_mid = int(reply.get("message_id") or 0)
+    # El mensaje raíz/servicio del topic no cuenta como selección explícita.
+    if thread_id and reply_mid == thread_id:
+        return None
+    if reply.get("forum_topic_created") or reply.get("forum_topic_closed") or reply.get("forum_topic_reopened"):
+        return None
+    return reply.get("from") or None
+
+
+def _command_argument_text(text):
+    """Texto después del primer token del comando; ignora /comando@NombreDelBot."""
+    raw = str(text or "").strip()
+    parts = raw.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def resolve_target_for_marriage(message, text):
+    """Objetivo estricto para /casar: sólo reply explícito o @username como argumento.
+
+    Nunca usa el @NombreDelBot del propio comando ni el reply implícito de un topic.
+    Por tanto, /casar y /casar@Kiwbot_bot sin argumentos JAMÁS eligen a alguien.
     """
     sender_id = int((message.get("from") or {}).get("id") or 0)
 
-    reply = message.get("reply_to_message")
-    if reply:
-        u = reply.get("from") or {}
-        if u.get("id") and not u.get("is_bot") and int(u.get("id")) != sender_id:
-            return u
+    reply_user = _explicit_reply_user(message)
+    if reply_user:
+        if reply_user.get("id") and not reply_user.get("is_bot") and int(reply_user.get("id")) != sender_id:
+            return reply_user
         return None
 
-    match = re.search(r"@([A-Za-z0-9_]{3,})", str(text or ""))
+    args = _command_argument_text(text)
+    match = re.search(r"(?:^|\s)@([A-Za-z0-9_]{3,})(?=\s|$)", args)
     if not match:
         return None
 
@@ -3989,6 +4016,45 @@ def resolve_target_for_marriage(message, text):
         return None
     return {"id": int(row["user_id"]), "username": row["username"],
             "first_name": row["first_name"], "last_name": row["last_name"]}
+
+
+def resolve_marriage_reset_target(message, text):
+    """Objetivo de /resetmatrimonio. Sin objetivo = Kiu mismo; permite @self y reply."""
+    sender = message.get("from") or {}
+    sender_id = int(sender.get("id") or 0)
+    args = _command_argument_text(text)
+
+    # Si se escribió @usuario, éste manda. A diferencia de /casar, @self sí es válido.
+    match = re.search(r"(?:^|\s)@([A-Za-z0-9_]{3,})(?=\s|$)", args)
+    if match:
+        username = match.group(1).lower()
+        if str(sender.get("username") or "").lower() == username:
+            return sender
+        chat_id = int((message.get("chat") or {}).get("id") or 0)
+        with db_lock:
+            conn = get_db()
+            row = conn.execute(
+                """SELECT * FROM chat_users WHERE chat_id=? AND LOWER(username)=?
+                   ORDER BY updated_at DESC LIMIT 1""", (chat_id, username)
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    """SELECT * FROM chat_users WHERE LOWER(username)=?
+                       ORDER BY updated_at DESC LIMIT 1""", (username,)
+                ).fetchone()
+            conn.close()
+        if not row:
+            return None
+        return {"id": int(row["user_id"]), "username": row["username"],
+                "first_name": row["first_name"], "last_name": row["last_name"]}
+
+    # Sin argumento, un reply explícito a otra persona permite repararla.
+    reply_user = _explicit_reply_user(message)
+    if reply_user and reply_user.get("id") and not reply_user.get("is_bot"):
+        return reply_user
+
+    # /resetmatrimonio a secas SIEMPRE repara al propio Kiu.
+    return sender if sender_id else None
 
 
 def parse_positive_amount(text):
@@ -13008,12 +13074,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
 
     if command in ("/resetmatrimonio", "/resetboda"):
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de reparación."); return True
-        raw_parts=str(text or '').strip().split(maxsplit=1)
-        target=None
-        if len(raw_parts)>1 or (message.get('reply_to_message') or {}).get('from'):
-            target=resolve_target_for_economy(message,text)
-            if not target: send_message(chat_id,"🧹 No pude identificar al jugador. Usa /resetmatrimonio @usuario o responde a su mensaje."); return True
-        target_id=int(target.get('id')) if target else int(user_id)
+        target=resolve_marriage_reset_target(message,text)
+        if not target:
+            send_message(chat_id,"🧹 No pude identificar al jugador. Usa /resetmatrimonio @usuario o responde a su mensaje."); return True
+        target_id=int(target.get('id') or user_id)
         n=admin_reset_marriage_pending(target_id)
         send_message(chat_id,f"🧹 Matrimonio reparado para {_player_name_by_id(target_id)}.\nPropuestas pendientes limpiadas: {n}.\n💍 Anillos reservados restaurados.\n✅ Los matrimonios activos NO fueron modificados.")
         return True

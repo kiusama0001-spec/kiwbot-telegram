@@ -9866,18 +9866,18 @@ def marriage_answer(marriage_id,user_id,accept=True):
             conn.rollback(); conn.close(); raise
 
 
-def divorce_marriage(user_id,target_id=0):
+def divorce_marriage(user_id,target_id=0,ended_by_id=0):
     uid=int(user_id); row=_marriage_row(uid,("active",))
     if not row: return False,"No tienes un matrimonio activo.",None
     pid=_marriage_partner_id(row,uid)
     if target_id and int(target_id)!=pid: return False,"Esa persona no es tu pareja actual.",None
-    now=int(time.time())
+    now=int(time.time()); ended_by=int(ended_by_id or uid)
     with db_lock:
         conn=get_db()
         try:
             locked=conn.execute("SELECT * FROM rpg_marriages WHERE id=? AND status='active' FOR UPDATE",(int(row['id']),)).fetchone()
             if not locked: conn.rollback(); conn.close(); return False,"Ese matrimonio ya no está activo.",None
-            conn.execute("UPDATE rpg_marriages SET status='divorced',ended_at=?,ended_by=? WHERE id=?",(now,uid,int(row['id']))); out=dict(locked); out['ended_by']=uid
+            conn.execute("UPDATE rpg_marriages SET status='divorced',ended_at=?,ended_by=? WHERE id=?",(now,ended_by,int(row['id']))); out=dict(locked); out['ended_by']=ended_by
             a,b,rem=_split_marriage_bank_locked(conn,out,now); out['_split_each']=a; out['_split_remainder']=rem
             conn.commit(); conn.close(); return True,"divorced",out
         except Exception:
@@ -13625,11 +13625,26 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         return True
 
     if command in ("/divorcio", "/divorciar"):
-        target=resolve_target_for_economy(message,text)
-        tid=int(target.get('id')) if target else 0
-        ok,state,row=divorce_marriage(user_id,tid)
+        # Sin argumento, /divorcio SIEMPRE actúa sobre el matrimonio del propio usuario.
+        # Así un reply implícito de los topics de Telegram nunca se interpreta como pareja.
+        args=_command_argument_text(text)
+        explicit=_explicit_reply_user(message)
+        target=None
+        if args:
+            target=resolve_marriage_reset_target(message,text)
+        elif explicit and is_owner(user_id):
+            target=explicit
+
+        divorce_uid=int(user_id); expected_partner=0; forced=False
+        if is_owner(user_id) and target and int(target.get('id') or 0)!=int(user_id):
+            # Kiu puede separar una boda atascada apuntando a cualquiera de los dos cónyuges.
+            divorce_uid=int(target['id']); forced=True
+        elif target:
+            expected_partner=int(target.get('id') or 0)
+
+        ok,state,row=divorce_marriage(divorce_uid,expected_partner,user_id if forced else 0)
         if not ok: send_message(chat_id,state); return True
-        pid=_marriage_partner_id(row,user_id); a=_player_name_by_id(user_id); b=_player_name_by_id(pid)
+        pid=_marriage_partner_id(row,divorce_uid); a=_player_name_by_id(divorce_uid); b=_player_name_by_id(pid)
         send_message(chat_id,
             f"🥀 UN CAMINO LLEGA A SU FIN\n\n{a} y {b} ya no continúan como pareja.\n\n"
             "Enamorarse no es prometer que dos personas caminarán para siempre. Es compartir un trayecto, construir recuerdos y, "
@@ -14138,7 +14153,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command in ("/subirarma", "/mejorararma", "/armas", "/mejorarequipo"):
         user_id=message.get("from",{}).get("id")
         if chat.get("type")!="private":
-            send_message(chat_id,"🔨 Las mejoras de equipo se administran en privado con KiwBot.",reply_markup=_private_launch_keyboard("upgrade_weapons")); return True
+            send_message(chat_id,"🔨 Abre directo el menú para mejorar tu equipo en privado.",reply_markup=_private_launch_keyboard("upgrade_weapons")); return True
         txt,kb=forge_weapon_upgrade_text_keyboard(user_id)
         send_message(chat_id,txt,reply_markup=kb); return True
 

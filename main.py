@@ -7668,7 +7668,7 @@ def forge_keyboard(user_id):
     return {"inline_keyboard":rows}
 
 def forge_weapon_upgrade_text_keyboard(user_id):
-    """Menú directo de armas poseídas para reforzarlas sin pasar por recetas."""
+    """Menú directo de todo el equipo equipable poseído para reforzarlo sin pasar por recetas."""
     char=get_active_character(user_id)
     if not char:
         return "Necesitas un personaje activo para mejorar armas.", None
@@ -7677,13 +7677,13 @@ def forge_weapon_upgrade_text_keyboard(user_id):
         conn=get_db()
         rows=conn.execute("""SELECT i.id,i.quantity,i.forge_level,i.equipped,x.name,x.rarity,x.equip_slot
             FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
-            WHERE i.user_id=? AND i.world_id=? AND x.equip_slot='arma'
+            WHERE i.user_id=? AND i.world_id=? AND x.equip_slot IS NOT NULL AND x.equip_slot<>''
             ORDER BY i.equipped DESC,i.forge_level DESC,i.acquired_at DESC,i.id DESC""",
             (int(user_id),world)).fetchall()
         conn.close()
     if not rows:
-        return "⚔️ MEJORAR ARMAS\n\nNo tienes armas disponibles para reforzar todavía.", {"inline_keyboard":[[{"text":"🔥 Ir a la Forja","callback_data":"forge_home"}],[{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]}
-    lines=["⚔️ MEJORAR ARMAS","","Elige el arma que quieres reforzar. Máximo +15.","El intento usa Polvo de Forja + KW; el arma nunca se rompe ni baja de nivel.",""]
+        return "🔨 MEJORAR EQUIPO\n\nNo tienes equipo disponible para reforzar todavía.", {"inline_keyboard":[[{"text":"🔥 Ir a la Forja","callback_data":"forge_home"}],[{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]}
+    lines=["🔨 MEJORAR EQUIPO","","Elige la pieza que quieres reforzar. Máximo +15.","El intento usa Polvo de Forja + KW; el arma nunca se rompe ni baja de nivel.",""]
     kb=[]
     for r in rows:
         lv=int(r.get('forge_level') or 0)
@@ -12735,7 +12735,7 @@ def rpg_commands_text(user_id=0):
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE.\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; hasta 20,000 KW.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; hasta 20,000 KW.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Inventario de ambos.\n/compartiritem — Entrega un objeto.\n/divorcio — Termina el matrimonio.\n\n"
@@ -13436,14 +13436,8 @@ def process_command(
             elif parts[1]=="titles":
                 txt,kb=chronicles_titles_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="inventory":
-                uid=user.get("id"); world=current_rpg_world()
-                with db_lock:
-                    cc=get_db(); rows=cc.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot,x.item_type FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); cc.close()
-                lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."] if rows else ["🎒 INVENTARIO","","Todavía está vacío."]
-                kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
-                for r in rows:
-                    serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""; part=_inventory_item_icon(dict(r)); kb.append([{"text":f"{part} {RPG_RARITY_ICON.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}{eq}","callback_data":f"rpg_item:{r['id']}"}])
-                send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
+                txt,kb=rpg_inventory_page(user.get("id"),1)
+                send_message(chat_id,txt,reply_markup=kb)
             else:
                 send_message(chat_id,mission_board_text(user.get("id")),reply_markup=mission_board_keyboard(user.get("id")))
             return True
@@ -14141,11 +14135,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,text_inv,reply_markup=kb)
         return True
 
-    if command in ("/subirarma", "/mejorararma", "/armas"):
+    if command in ("/subirarma", "/mejorararma", "/armas", "/mejorarequipo"):
         user_id=message.get("from",{}).get("id")
-        if chat.get("type")!="private":
-            send_message(chat_id,"⚔️ Abre directo el menú de mejora de armas en privado.",reply_markup=_private_launch_keyboard("upgrade_weapons")); return True
-        txt,kb=forge_weapon_upgrade_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+        txt,kb=forge_weapon_upgrade_text_keyboard(user_id)
+        send_message(chat_id,txt,reply_markup=kb); return True
 
     if command in ("/forja", "/forge", "/forjador", "/mejorar"):
         user_id=message.get("from",{}).get("id")

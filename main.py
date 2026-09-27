@@ -5366,6 +5366,9 @@ def _legacy_npc_history_text(user_id,key):
 
 def world_npc_keyboard(key):
     rows=[]
+    # Todos los viajeros pueden involucrar al jugador en el Mundo Vivo.
+    # La misión se genera al pedirla; no es un botón decorativo.
+    rows.append([{'text':'📜 Pedir misión','callback_data':f'wnpc:{key}:mission'}])
     if key=='eira': rows.append([{'text':'❤️ Curarme','callback_data':'wnpc:eira:heal'}])
     elif key=='elias': rows += [[{'text':'⚔️ Mejores armas','callback_data':'wnpc:elias:weapons'},{'text':'🛡️ Mejor armadura','callback_data':'wnpc:elias:armor'}],[{'text':'🗺️ Dónde conseguirlas','callback_data':'wnpc:elias:where'},{'text':'💡 Consejo','callback_data':'wnpc:elias:tip'}],[{'text':'🕯️ Rumor','callback_data':'wnpc:elias:rumor'}]]
     elif key=='orin': rows += [[{'text':'🗝️ Mostrar objetos extraños','callback_data':'wnpc:orin:items'}],[{'text':'💍 Reliquia limitada','callback_data':'wnpc:orin:shop'}]]
@@ -5419,6 +5422,55 @@ def _buy_limited_vendor(user_id,chat_id,vendor,key):
         except Exception:
             c.rollback(); c.close(); raise
 
+# Misiones propias de los viajeros. Cada encuentro puede ofrecer trabajo real que
+# alimenta reputación, afinidad, memoria, cartas y futuras consecuencias.
+WORLD_NPC_MISSIONS={
+ 'eira': [('Manos que todavía pueden salvarse','Derrota {goal} criaturas para despejar el camino de los heridos.','pve_win',3,1500,3),('Hierbas bajo amenaza','Causa {goal} de daño en encuentros para recuperar una ruta de suministros.','pve_damage',900,1700,2)],
+ 'brok': [('Prueba de acero','Mejora equipo en la Forja {goal} vez/veces y demuestra que sabes cuidar una buena pieza.','forge',2,1600,2),('Material de campo','Consigue {goal} objetos durante tus aventuras para que Brok estudie su calidad.','item_gain',3,1500,1)],
+ 'elias': [('Una historia digna','Vence {goal} enemigos para que Elías pueda registrar cómo peleas.','pve_win',4,1700,2),('Crónica del peligro','Inflige {goal} de daño en combate y deja una hazaña que valga la tinta.','pve_damage',1200,1900,2)],
+ 'orin': [('Piezas sin nombre','Consigue {goal} objetos; Orin busca algo que los demás pasarían por alto.','item_gain',3,1800,1),('La llave y la bestia','Derrota {goal} criaturas. Una de ellas podría custodiar lo que Orin busca.','pve_win',3,1700,1)],
+ 'erick': [('Ecos en el metal','Forja {goal} vez/veces. Erick quiere observar cómo cambia la memoria de tus piezas.','forge',2,1800,2),('Resonancia de batalla','Inflige {goal} de daño para cargar de recuerdos tu equipo.','pve_damage',1000,1900,2)],
+ 'mara': [('Camino seguro para la caravana','Derrota {goal} criaturas que rondan la ruta de suministros de Mara.','pve_win',3,1600,3),('Provisiones perdidas','Consigue {goal} objetos durante tus viajes y ayuda a reponer la caravana.','item_gain',3,1500,2)],
+ 'nox': [('Ruta que no existe','Completa {goal} victorias PvE siguiendo las indicaciones ambiguas de Nox.','pve_win',4,1900,1),('Carga sin preguntas','Consigue {goal} objetos para un paquete cuyo destino Nox no explica.','item_gain',3,2100,-1)],
+ 'lyra': [('Frontera sin mapa','Derrota {goal} criaturas en territorio peligroso para que Lyra pueda cartografiarlo.','pve_win',4,1800,2),('Abrir el sendero','Inflige {goal} de daño despejando una nueva ruta.','pve_damage',1100,1800,2)],
+ 'kael': [('Un rival que valga la pena','Derrota {goal} enemigos. Kael quiere comprobar si tus victorias respaldan tu fama.','pve_win',5,2100,2),('Golpes que enseñan','Inflige {goal} de daño en combate. Kael juzgará tu progreso por los resultados.','pve_damage',1500,2200,1)],
+ 'vesper': [('Rumores con precio','Consigue {goal} objetos que puedan servir como prueba para una información de Vesper.','item_gain',3,2100,-1),('Silenciar testigos','Derrota {goal} enemigos antes de que cierta noticia llegue al camino principal.','pve_win',3,2300,-2)],
+ 'torven': [('Escolta del camino','Derrota {goal} criaturas que amenazan a viajeros indefensos.','pve_win',4,1900,3),('Mantener la línea','Inflige {goal} de daño protegiendo una ruta comercial.','pve_damage',1300,2000,3)],
+ 'selene': [('Señal bajo las estrellas','Consigue {goal} objetos durante tus viajes; Selene cree que uno aparecerá donde marca su carta astral.','item_gain',3,1900,1),('Constelación de guerra','Derrota {goal} enemigos antes de que termine la señal que Selene observó.','pve_win',4,2000,1)],
+ 'darius': [('Contrato limpio','Derrota {goal} criaturas incluidas en un contrato legítimo.','pve_win',4,2200,2),('Prueba del cazador','Inflige {goal} de daño para demostrar que puedes terminar un encargo difícil.','pve_damage',1400,2200,1)],
+ 'nyra': [('Ingredientes peligrosos','Consigue {goal} objetos para un experimento de Nyra.','item_gain',4,1900,1),('Ensayo de campo','Derrota {goal} criaturas mientras Nyra recopila resultados indirectamente.','pve_win',3,1800,1)],
+ 'ivar': [('Caza responsable','Derrota {goal} bestias o enemigos sin abandonar el camino a medias.','pve_win',4,2000,2),('Rastro fresco','Inflige {goal} de daño siguiendo las marcas que Ivar encontró.','pve_damage',1300,2100,1)],
+ 'seraph': [('Ruinas inquietas','Derrota {goal} criaturas cerca de un santuario olvidado.','pve_win',4,2100,3),('Ofrendas antiguas','Consigue {goal} objetos durante tus viajes para restaurar un altar.','item_gain',3,2000,3)],
+ 'valka': [('Trabajo carmesí','Derrota {goal} enemigos por un contrato que Valka no piensa explicar en público.','pve_win',4,2500,-2),('Sin dejar fuerza para perseguir','Inflige {goal} de daño cumpliendo el encargo de Valka.','pve_damage',1600,2600,-2)],
+ 'aurel': [('Deber sin reino','Derrota {goal} criaturas que amenazan a gente que no puede defenderse.','pve_win',5,2300,4),('El peso del escudo','Inflige {goal} de daño defendiendo los caminos de Aeternus.','pve_damage',1500,2400,4)],
+ 'malkor': [('Mercancía problemática','Consigue {goal} objetos para Malkor. Es mejor no preguntar quién los pidió.','item_gain',4,2600,-2),('Cobro pendiente','Derrota {goal} enemigos relacionados con una deuda de Malkor.','pve_win',4,2700,-3)],
+}
+
+def _npc_offer_mission(user_id,chat_id,key):
+    uid=int(user_id); cid=int(chat_id); now=int(time.time())
+    pool=WORLD_NPC_MISSIONS.get(str(key)) or []
+    if not pool: return '📜 Este viajero no tiene encargos disponibles ahora.'
+    _ensure_world_memory_db()
+    # No apilar encargos del mismo NPC: primero termina/acepta el que ya te ofreció.
+    with db_lock:
+        c=get_db(); active=c.execute("SELECT id,title,status,progress,goal FROM rpg_exclusive_missions WHERE target_user_id=? AND npc_key=? AND status IN ('open','active') ORDER BY id DESC LIMIT 1",(uid,str(key))).fetchone(); c.close()
+    if active:
+        st='esperando que la aceptes' if str(active['status'])=='open' else f"en progreso {int(active.get('progress') or 0)}/{int(active.get('goal') or 1)}"
+        return f"📜 {WORLD_NPCS.get(key,(key,0))[0]} ya te confió «{active['title']}» · {st}."
+    title,body,event,goal,reward,rep=random.choice(pool)
+    body=str(body).format(goal=int(goal))
+    # La clave lleva una ventana temporal: el mismo NPC puede volver a ofrecer trabajo
+    # en encuentros futuros, pero no spamear misiones en el mismo momento.
+    event_key=f"npc_job:{key}:{uid}:{now//1200}"
+    made=_world_create_exclusive_mission(uid,cid,event_key,str(key),title,body,int(reward),int(rep),event_type=str(event),goal=int(goal))
+    if not made: return '📜 No apareció un encargo nuevo. Termina primero cualquier asunto pendiente con este viajero.'
+    npc_record_event(uid,str(key),f"mission_offer:{event_key}",f"Te ofreció la misión «{title}».",1)
+    sign='+' if int(rep)>=0 else ''
+    return (f"📜 {WORLD_NPCS.get(key,(key,0))[0]} te ofreció «{title}».\n"
+            f"🎯 Objetivo: {body}\n"
+            f"🪙 {int(reward):,} KW · ⚖️ reputación al completar: {sign}{int(rep)}\n\n"
+            "La misión exclusiva apareció en el chat para que la aceptes.")
+
 def world_npc_callback(uid,chat_id,thread_id,key,action):
     now=int(time.time()); tid=int(thread_id or 0)
     with db_lock:
@@ -5427,6 +5479,7 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
         c.close()
         _npc_remember(uid,key,action)
         if action=='history': return npc_history_text(uid,key)
+        if action=='mission': return _npc_offer_mission(uid,chat_id,key)
         c=get_db()
         if action=='shop' and key in ('brok','nox','orin'):
             c.close(); return _limited_vendor_offer(key)
@@ -5828,6 +5881,11 @@ def techniques_text_keyboard(user_id):
     return "\n".join(lines),({"inline_keyboard":kb} if kb else None)
 
 def _rpg_get_ability_for_user(user_id,class_name,key):
+    if str(key).startswith('gacha_skill_'):
+        ability=_equipped_gacha_weapon_ability(user_id,ability_key=key)
+        if not ability: return None
+        ability=dict(ability); ability['technique_level']=1
+        return ability
     if str(key)=="hidden_blade":
         if has_special_technique(user_id,"hidden_blade"):
             ability=dict(HIDDEN_BLADE_ABILITY)
@@ -5878,7 +5936,8 @@ def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, h
          {"text":"🎒 Inventario","url":f"https://t.me/{get_bot_identity().get('username','')}?start=inventory"},
          {"text":"🏃 Huir","callback_data":"rpg_flee"}]
     ]}
-    return _append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
+    kb=_append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
+    return _append_gacha_weapon_skill_button(kb,user_id,"rpg_attack")
 
 def _rpg_get_ability(class_name, key):
     for a in rpg_abilities_for(class_name):
@@ -7155,6 +7214,9 @@ def _pvp_keyboard(duel, viewer_turn=True):
     if mode!='ranked' and _technique_owned(turn,char['class_name'],'hidden_blade'):
         hb=_duel_ability_for_mode(turn,char['class_name'],'hidden_blade',mode); htxt=f"🗡️ Hidden Blade · ×{float(hb['power']):.2f}" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
         rows.append([{'text':htxt,'callback_data':(f"pvp_atk:{duel['id']}:hidden_blade" if hcd<=0 else f"pvp_wait:{duel['id']}:hidden_blade:{hcd}")}])
+    if mode!='ranked':
+        wab=_equipped_gacha_weapon_ability(turn,char_id)
+        if wab: rows.append([{'text':f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}",'callback_data':f"pvp_atk:{duel['id']}:{wab['key']}"}])
     rows.append([{'text':defend_text,'callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}])
     return {'inline_keyboard':rows}
 
@@ -7275,8 +7337,8 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         mode=str(d.get('duel_mode') or 'friendly')
         # Hidden Blade está totalmente prohibida en el PvP clasificatorio.
         # En /duelo amistoso sigue disponible solo para quien la haya desbloqueado.
-        if ability_key=='hidden_blade' and mode=='ranked':
-            conn.rollback(); conn.close(); return False,'🏆 Hidden Blade no está permitida en PvP clasificatorio.'
+        if mode=='ranked' and (ability_key=='hidden_blade' or str(ability_key).startswith('gacha_skill_')):
+            conn.rollback(); conn.close(); return False,'🏆 Las técnicas especiales de equipo no están permitidas en PvP clasificatorio.'
         if ability_key=='hidden_blade' and not _technique_owned(uid,char['class_name'],'hidden_blade'):
             conn.rollback(); conn.close(); return False,'🗡️ No tienes Hidden Blade desbloqueada.'
         ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
@@ -7293,8 +7355,8 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         if int(d['turn_user_id'] or 0)!=uid: conn.rollback(); conn.close(); return False,'Ese turno ya fue consumido.'
         is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); mode=str(d.get('duel_mode') or 'friendly')
         # Revalidar también después del dado para evitar callbacks manipulados o cambios concurrentes.
-        if ability_key=='hidden_blade' and mode=='ranked':
-            conn.rollback(); conn.close(); return False,'🏆 Hidden Blade no está permitida en PvP clasificatorio.'
+        if mode=='ranked' and (ability_key=='hidden_blade' or str(ability_key).startswith('gacha_skill_')):
+            conn.rollback(); conn.close(); return False,'🏆 Las técnicas especiales de equipo no están permitidas en PvP clasificatorio.'
         if ability_key=='hidden_blade' and not _technique_owned(uid,char['class_name'],'hidden_blade'):
             conn.rollback(); conn.close(); return False,'🗡️ No tienes Hidden Blade desbloqueada.'
         ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
@@ -7473,6 +7535,182 @@ def pvp_surrender(duel_id, uid):
     send_message(d['chat_id'],f"🏳️ {_pvp_name(uid)} se rinde.\n🏆 {_pvp_name(winner)} gana el duelo.\n\n" + ("Resultado registrado en la clasificatoria." if d.get("duel_mode")=="ranked" else "Duelo amistoso: sin pérdida de HP, EXP ni KW.")); return True,''
 
 # =========================================================
+# GACHA DE ARMAS — ROTACIÓN MENSUAL
+# =========================================================
+RPG_WEAPON_GACHA_COST=10_000
+RPG_WEAPON_GACHA_BRANCHES=[
+    ("ceniza","Filo de Ceniza"),("luna","Hoja de Luna"),("tormenta","Arma de la Tormenta"),
+    ("abismo","Filo del Abismo"),("dragon","Colmillo de Dragón"),("solar","Arma del Sol"),
+    ("sangre","Hoja Carmesí"),("astral","Filo Astral"),("runa","Arma Rúnica"),
+    ("caos","Filo del Caos"),("invierno","Arma del Invierno"),("eterno","Arma Eterna")]
+RPG_WEAPON_GACHA_TIERS={
+    'raro':('🔵',70.0,22,3,30), 'ultra_raro':('🟣',24.0,30,5,45),
+    'legendario':('🟡',5.0,40,8,70), 'mitico':('🌟',1.0,58,12,110)}
+
+# Cada rotación mensual tiene DOS armas míticas destacadas. Septiembre 2026
+# inaugura el sistema con las dos espadas de Kirito. Las demás ramas usan dos
+# variantes propias hasta que se sustituyan por nuevos diseños mensuales.
+RPG_WEAPON_GACHA_MONTHLY_MYTHICS={
+    (2026,9):[
+        ('elucidator','Elucidator',64,10,105,'starburst_stream','⚔️','Starburst Stream',1.34,0.28),
+        ('dark_repulser','Dark Repulser',56,18,130,'vorpal_strike','💠','Vorpal Strike',1.29,0.38),
+        ('blackwyrm_coat','Abrigo Negro de Kirito',18,38,180,'sonic_leap','🖤','Sonic Leap',1.25,0.32),
+    ]
+}
+
+GACHA_WEAPON_SKILL_DEFAULTS={
+    1:('corte_eclipse','🌘','Corte de Eclipse',1.30,0.25),
+    2:('ruptura_gemela','✨','Ruptura Gemela',1.27,0.35),
+    3:('asalto_legendario','💥','Asalto Legendario',1.25,0.30),
+}
+
+def _weapon_gacha_month_key():
+    t=time.localtime(); return f"{t.tm_year:04d}-{t.tm_mon:02d}"
+
+def _weapon_gacha_branch():
+    t=time.localtime(); return RPG_WEAPON_GACHA_BRANCHES[(t.tm_mon-1)%len(RPG_WEAPON_GACHA_BRANCHES)]
+
+def _weapon_gacha_monthly_mythics():
+    t=time.localtime(); branch,name=_weapon_gacha_branch()
+    explicit=RPG_WEAPON_GACHA_MONTHLY_MYTHICS.get((t.tm_year,t.tm_mon))
+    if explicit: return explicit
+    out=[]
+    for idx in (1,2,3):
+        sk,em,sn,pow_,pen=GACHA_WEAPON_SKILL_DEFAULTS[idx]
+        if idx==1: atk,de,hp=62,11,105
+        elif idx==2: atk,de,hp=55,18,125
+        else: atk,de,hp=18,36,170
+        out.append((f"{branch}_{idx}",f"{name} Mítica {'I' if idx==1 else 'II'}",atk,de,hp,sk,em,sn,pow_,pen))
+    return out
+
+def _ensure_weapon_gacha_items():
+    branch,name=_weapon_gacha_branch(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        # Cada rareza normal puede entregar arma O ropa/armadura. Así el gacha es de equipo,
+        # no una colección formada únicamente por espadas.
+        for rarity,(icon,weight,atk,de,hp) in RPG_WEAPON_GACHA_TIERS.items():
+            if rarity=='mitico': continue
+            for kind in ('arma','ropa'):
+                if kind=='arma':
+                    key=f"gacha_weapon_{branch}_{rarity}"
+                    nm=name+" "+rarity.replace('_',' ').title()
+                    slot='arma'; iatk,idef,ihp=atk,de,hp
+                    desc=f"Arma universal de la rotación mensual {name}. Puede equiparla cualquier clase."
+                else:
+                    key=f"gacha_outfit_{branch}_{rarity}"
+                    nm=f"Atuendo {name} "+rarity.replace('_',' ').title()
+                    slot='armadura'; iatk,idef,ihp=max(0,atk//3),de+max(3,atk//3),hp+25
+                    desc=f"Ropa/armadura universal de la rotación mensual {name}. Puede equiparla cualquier clase."
+                c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                    VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,1)
+                    ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,item_type=EXCLUDED.item_type,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes='',min_level=1""",
+                    (key,nm,rarity,kind,desc,iatk,idef,ihp,now,slot,''))
+        # Las míticas del mes pueden ser armas o ropa. Septiembre añade las dos espadas
+        # de Kirito y su abrigo negro como tercera pieza destacada.
+        for idx,m in enumerate(_weapon_gacha_monthly_mythics(),1):
+            slug,nm,atk,de,hp,skill_key,skill_emoji,skill_name,power,pen=m
+            is_outfit=(slug=='blackwyrm_coat' or 'coat' in slug or 'abrigo' in slug or 'armadura' in slug)
+            slot='armadura' if is_outfit else 'arma'; kind='ropa' if is_outfit else 'arma'
+            key=f"gacha_weapon_{branch}_mitico_{idx}"
+            desc=(f"{'Ropa/armadura' if is_outfit else 'Arma'} mítica universal de la rotación {name}. Al equiparla desbloquea {skill_name} "
+                  f"mientras permanezca equipada. La habilidad no funciona en PvP clasificatorio.")
+            c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,1)
+                ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,item_type=EXCLUDED.item_type,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes='',min_level=1""",
+                (key,nm,'mitico',kind,desc,atk,de,hp,now,slot,''))
+        c.commit(); c.close()
+
+def weapon_gacha_text(user_id):
+    branch,name=_weapon_gacha_branch(); bal=get_kiwons(user_id); myths=_weapon_gacha_monthly_mythics()
+    featured=" · ".join(f"{m[1]} → {m[7]}" for m in myths)
+    return (f"🎰 GACHA DE EQUIPO — {name.upper()}\n\n🪙 Tirada: {RPG_WEAPON_GACHA_COST:,} KW · Saldo: {bal:,} KW\n"
+            "🔵 Rara 70% · 🟣 Ultra rara 24% · 🟡 Legendaria 5% · 🌟 Mítica 1%\n\n"
+            f"🌟 MÍTICAS DEL MES: {featured}\n"
+            "Cada mes hay piezas Míticas UNIVERSALES (armas y ropa) y cada una añade una habilidad mientras esté equipada.\n"
+            "🏆 Las habilidades de arma están desactivadas SOLO en /duelopvp clasificatorio.\n🔄 La rama cambia automáticamente cada mes; las armas obtenidas no desaparecen.")
+
+def weapon_gacha_keyboard():
+    return {'inline_keyboard':[[{'text':f'🎲 TIRAR — {RPG_WEAPON_GACHA_COST:,} KW','callback_data':'weapon_gacha_open'}],[{'text':'🎒 Inventario','callback_data':'rpg_inventory:1'}]]}
+
+def open_weapon_gacha(user_id):
+    char=get_active_character(user_id)
+    if not char: return False,'Primero necesitas un personaje activo.'
+    _ensure_weapon_gacha_items()
+    ok,balance,err=change_kiwons(user_id,-RPG_WEAPON_GACHA_COST,'weapon_gacha',note='Tirada gacha de armas')
+    if not ok: return False,f"🪙 Necesitas {RPG_WEAPON_GACHA_COST:,} KW. Saldo: {get_kiwons(user_id):,} KW."
+    tiers=list(RPG_WEAPON_GACHA_TIERS); weights=[RPG_WEAPON_GACHA_TIERS[x][1] for x in tiers]
+    rarity=random.choices(tiers,weights=weights,k=1)[0]; branch,name=_weapon_gacha_branch()
+    if rarity=='mitico':
+        myths=_weapon_gacha_monthly_mythics(); myth_idx=random.randint(1,len(myths))
+        item_key=f"gacha_weapon_{branch}_mitico_{myth_idx}"
+    else:
+        item_key=(f"gacha_weapon_{branch}_{rarity}" if random.random()<0.5 else f"gacha_outfit_{branch}_{rarity}")
+    item=grant_rpg_item(user_id,int(char['id']),item_key,source=f"weapon_gacha:{_weapon_gacha_month_key()}")
+    if not item:
+        change_kiwons(user_id,RPG_WEAPON_GACHA_COST,'weapon_gacha_refund',note='Reembolso por fallo de entrega')
+        return False,'⚠️ No pude entregar el equipo. La tirada fue reembolsada.'
+    icon=RPG_WEAPON_GACHA_TIERS[rarity][0]
+    jackpot="\n🔥 ¡JACKPOT MÍTICO! Equipo universal de estadísticas excepcionales." if rarity=='mitico' else ''
+    return True,(f"🎰 GACHA DE EQUIPO\n\n{icon} {item['name']} — {rarity.replace('_',' ').upper()}\n"
+                 f"⚔️ +{item.get('atk_bonus',0)} · 🛡️ +{item.get('def_bonus',0)} · ❤️ +{item.get('hp_bonus',0)}"
+                 f"{jackpot}\n\n🪙 Saldo: {get_kiwons(user_id):,} KW")
+
+
+def _gacha_ability_from_equipped_row(row):
+    key=str(row['item_key'])
+    try: idx=int(key.rsplit('_',1)[-1])
+    except Exception: idx=1
+    permanent={
+        'Elucidator':('⚔️','Starburst Stream',1.34,0.28),
+        'Dark Repulser':('💠','Vorpal Strike',1.29,0.38),
+        'Abrigo Negro de Kirito':('🖤','Sonic Leap',1.25,0.32),
+    }
+    if str(row['name']) in permanent:
+        emoji,skill_name,power,pen=permanent[str(row['name'])]
+        return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True}
+    branch,_=_weapon_gacha_branch(); current_prefix=f"gacha_weapon_{branch}_mitico_"
+    if key.startswith(current_prefix):
+        myths=_weapon_gacha_monthly_mythics()
+        if 1 <= idx <= len(myths):
+            m=myths[idx-1]; _,_,_,_,_,skill_key,emoji,skill_name,power,pen=m
+            return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True}
+    default=GACHA_WEAPON_SKILL_DEFAULTS.get(idx,GACHA_WEAPON_SKILL_DEFAULTS[1])
+    sk,emoji,skill_name,power,pen=default
+    return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True}
+
+def _equipped_gacha_weapon_abilities(user_id, character_id=None):
+    """Todas las habilidades concedidas por piezas míticas de gacha equipadas."""
+    if not user_id: return []
+    if character_id is None:
+        ch=get_active_character(user_id)
+        if not ch: return []
+        character_id=int(ch['id'])
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT x.item_key,x.name FROM rpg_inventory i
+            JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.character_id=? AND i.equipped=1
+              AND x.rarity='mitico' AND x.item_key LIKE 'gacha_weapon_%_mitico_%'
+            ORDER BY i.id DESC""",(int(user_id),int(character_id))).fetchall(); c.close()
+    return [_gacha_ability_from_equipped_row(r) for r in rows]
+
+def _equipped_gacha_weapon_ability(user_id, character_id=None, ability_key=None):
+    abilities=_equipped_gacha_weapon_abilities(user_id,character_id)
+    if ability_key is not None:
+        return next((a for a in abilities if str(a.get('key'))==str(ability_key)),None)
+    return abilities[0] if abilities else None
+
+def _append_gacha_weapon_skill_button(kb,user_id,prefix,context_id=None):
+    abilities=_equipped_gacha_weapon_abilities(user_id)
+    if not abilities: return kb
+    rows=list((kb or {}).get('inline_keyboard') or [])
+    pos=max(0,len(rows)-1)
+    for ab in abilities:
+        cb=(f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}")
+        rows.insert(pos,[{'text':f"{ab['emoji']} {ab['name']} · {ab['weapon_name']} · ×{ab['power']:.2f}",'callback_data':cb}]); pos+=1
+    return {'inline_keyboard':rows}
+
+# =========================================================
 # KIWRPG V6.1 — MASCOTAS / GACHA
 # =========================================================
 
@@ -7580,7 +7818,7 @@ def pet_gacha_text(user_id):
     return (f"🎰 COFRE DE FAMILIAR\n\n🦷 Coste: {RPG_GACHA_FANG_COST} Colmillos de Ceniza\n"
             f"🎒 Tienes: {_fang_count(user_id)}\n\n"
             "⚪ Común 65% · 🔵 Rara 25% · 🟣 Épica 8%\n🟡 Legendaria 1.8% · 🔴 Mítica 0.2%\n\n"
-            "Las mascotas son permanentes. Solo una puede estar equipada.\n"
+            "🔄 La selección destacada cambia automáticamente cada mes.\nLas mascotas son permanentes. Solo una puede estar equipada.\n"
             "Los duplicados se convierten en ✨ Esencia de mascota.")
 
 
@@ -7699,7 +7937,14 @@ def open_pet_gacha(user_id):
     if _fang_count(user_id)<RPG_GACHA_FANG_COST:
         return False,f"🦷 Necesitas {RPG_GACHA_FANG_COST} Colmillos de Ceniza. Tienes {_fang_count(user_id)}."
     if not _consume_fangs(user_id,RPG_GACHA_FANG_COST): return False,"No pude consumir los colmillos. Inténtalo otra vez."
-    keys=list(RPG_PETS); weights=[RPG_PETS[k]['weight'] for k in keys]; key=random.choices(keys,weights=weights,k=1)[0]; cfg=RPG_PETS[key]
+    # Rotación mensual: cambia la selección disponible sin borrar mascotas ya obtenidas.
+    all_keys=list(RPG_PETS); seed=int(time.strftime('%Y%m'))
+    rr=random.Random(seed); by_rarity={}
+    for k in all_keys: by_rarity.setdefault(RPG_PETS[k]['rarity'],[]).append(k)
+    keys=[]
+    for group in by_rarity.values():
+        shuffled=list(group); rr.shuffle(shuffled); keys.extend(shuffled[:max(1,(len(shuffled)+1)//2)])
+    weights=[RPG_PETS[k]['weight'] for k in keys]; key=random.choices(keys,weights=weights,k=1)[0]; cfg=RPG_PETS[key]
     now=int(time.time())
     with db_lock:
         conn=get_db(); old=conn.execute("SELECT copies FROM rpg_pets_owned WHERE user_id=? AND pet_key=? FOR UPDATE",(int(user_id),key)).fetchone()
@@ -8383,7 +8628,8 @@ def _omega_keyboard(event,user_id):
         [{"text":"⚡ ENTRAR / VER MI BATALLA","callback_data":f"omega_join:{event['id']}"}],
         [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
     ]}
-    return _append_hidden_blade_button(kb,user_id,"omega_atk",hc,event['id'])
+    kb=_append_hidden_blade_button(kb,user_id,"omega_atk",hc,event['id'])
+    return _append_gacha_weapon_skill_button(kb,user_id,"omega_atk",event['id'])
 
 def spawn_omega(chat_id):
     old=_omega_active(chat_id)
@@ -8820,6 +9066,8 @@ def _boss_keyboard_base(b,user_id):
     if has_special_technique(user_id,"hidden_blade"):
         htxt="🗡️ Hidden Blade" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
         rows.insert(2,[{"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"}])
+    wab=_equipped_gacha_weapon_ability(user_id,int(char['id'])) if char else None
+    if wab: rows.insert(max(0,len(rows)-1),[{"text":f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}","callback_data":f"boss_atk:{b['id']}:{wab['key']}"}])
     if char and is_owner(user_id) and char['class_name']=='The Cleaner':
         active=bool(char['secret_blades_active']); rows.append([{"text":"🗡️🗡️ Guardar Espadas" if active else "🗡️🗡️ Sacar Espadas","callback_data":f"boss_blades:{b['id']}"}])
     return {"inline_keyboard":rows}
@@ -9005,11 +9253,47 @@ def _boss_grant_loot(b,p):
         if row: got.append((dict(row),actual))
     return got
 
+def _boss_final_hit_boxes(b, user_id):
+    """Golpe final: abre una Caja de Armas y una Caja de Accesorios y entrega una pieza de cada una."""
+    uid=int(user_id); char=get_active_character(uid)
+    if not char: return []
+    cid=int(char['id']); world=current_rpg_world(); rewards=[]
+    with db_lock:
+        conn=get_db()
+        weapons=conn.execute("""SELECT item_key,name,rarity FROM rpg_items
+            WHERE equip_slot='arma' AND COALESCE(max_global_copies,999999)>0
+              AND rarity IN ('raro','ultra_raro','legendario','mitico')
+              AND (COALESCE(allowed_classes,'')='' OR allowed_classes LIKE ?)
+            ORDER BY RANDOM() LIMIT 1""",(f"%{char['class_name']}%",)).fetchall()
+        accessories=conn.execute("""SELECT item_key,name,rarity FROM rpg_items
+            WHERE equip_slot='accesorio' AND COALESCE(max_global_copies,999999)>0
+              AND rarity IN ('raro','ultra_raro','legendario','mitico')
+              AND (COALESCE(allowed_classes,'')='' OR allowed_classes LIKE ?)
+            ORDER BY RANDOM() LIMIT 1""",(f"%{char['class_name']}%",)).fetchall()
+        conn.close()
+    for label,rows in (("📦 Caja de Armas",weapons),("💎 Caja de Accesorios",accessories)):
+        if not rows: continue
+        row=dict(rows[0]); item=grant_rpg_item(uid,cid,row['item_key'],source=f"boss_final:{b.get('boss_key','boss')}:{label}")
+        if item: rewards.append((label,item))
+    if rewards:
+        lines=["🏆 PREMIO POR GOLPE FINAL",""]
+        for label,item in rewards:
+            lines.append(f"{label} → {RPG_RARITY_ICON.get(item.get('rarity'),'✨')} {item.get('name')}")
+        try: send_private_message(uid,"\n".join(lines))
+        except Exception: pass
+    return rewards
+
+
 def _boss_reward_all(b):
+    """Recompensa garantizada de Boss: KW + EXP + loot para todo participante con daño."""
     with db_lock:
         conn=get_db(); rows=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(b['id']),)).fetchall(); conn.close()
+    rewarded=[]
     for p in rows:
-        uid=int(p['user_id']); dmg=int(p['damage']); boss_level=max(1,int(b.get('level') or 1)); kw=1500+(boss_level*100)+min(5000,dmg*2); exp=500+(boss_level*30)+min(2500,dmg)
+        uid=int(p['user_id']); dmg=int(p['damage']); boss_level=max(1,int(b.get('level') or 1))
+        # Premio reforzado: siempre significativo y escala con nivel + contribución.
+        kw=5000+(boss_level*250)+min(15000,dmg*3)
+        exp=1000+(boss_level*60)+min(6000,dmg*2)
         exp_pct=_pet_bonus(uid,'exp'); kw_pct=_pet_bonus(uid,'kiwons')
         if exp_pct: exp=max(1,int(round(exp*(1.0+exp_pct/100.0))))
         if kw_pct: kw=max(1,int(round(kw*(1.0+kw_pct/100.0))))
@@ -9018,20 +9302,13 @@ def _boss_reward_all(b):
             if exists: conn.close(); continue
             conn.execute("INSERT INTO rpg_boss_rewards(boss_id,user_id,kw,exp,rewarded_at) VALUES(?,?,?,?,?)",(int(b['id']),uid,kw,exp,int(time.time()))); conn.commit(); conn.close()
         change_kiwons(uid,kw,'boss_reward',note=f"Boss {b['name']}"); grant_rpg_exp(int(p['character_id']),exp)
-        loot=_boss_grant_loot(b,p)
-        if loot:
-            parts=[]
-            for item,qty in loot:
-                icon=RPG_RARITY_ICON.get(item.get("rarity"),"⚪")
-                parts.append(f"{icon} {item.get('name','Objeto')} ×{qty}")
-            try:
-                send_private_message(uid,
-                    f"🎁 BOTÍN DE BOSS — {b['name']}\n\n"+
-                    "\n".join(parts)+
-                    "\n\n🔥 Estos materiales pueden usarse en la Forja.")
-            except Exception as exc:
-                print(f"[BOSS DROP] DM falló user={uid} boss={b.get('boss_key')}: {exc}")
-    return len(rows)
+        loot=_boss_grant_loot(b,p); rewarded.append((uid,kw,exp,loot))
+        parts=[f"🪙 +{kw:,} KW",f"✨ +{exp:,} EXP"]
+        for item,qty in loot:
+            parts.append(f"{RPG_RARITY_ICON.get(item.get('rarity'),'⚪')} {item.get('name','Objeto')} ×{qty}")
+        try: send_private_message(uid,f"🏆 RECOMPENSA DE BOSS — {b['name']}\n\n"+"\n".join(parts))
+        except Exception as exc: print(f"[BOSS REWARD] DM falló user={uid}: {exc}")
+    return len(rewarded)
 
 def _boss_claim_turn_for_action(boss_id,user_id):
     """Atomically claims the current turn before network/DB-heavy combat work.
@@ -9206,6 +9483,7 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
             with db_lock:
                 conn=get_db(); dead=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=?",(int(boss_id),)).fetchone(); conn.close()
             dead=dict(dead); n=_boss_reward_all(dead)
+            final_boxes=_boss_final_hit_boxes(dead,user_id)
             extra=''
             if str(dead.get('boss_key') or '')=='will_trial':
                 with db_lock:
@@ -9217,7 +9495,7 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
                         try: send_hidden_blade_unlock_video(int(_p['user_id']))
                         except Exception: pass
                 extra=f"\n🔥 Will peleó a su lado. Hidden Blade fue entregada a {unlocked} aventurero(s) que aún no la tenían."
-            send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes."+extra)
+            send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🪙 Todos los participantes con daño recibieron KW + EXP + botín.\n📦 Golpe final: Caja de Armas + Caja de Accesorios ({len(final_boxes)}/2 entregadas).\n🎁 Recompensas entregadas a {n} participantes."+extra)
             _queue_boss_mission_events(user_id,mission_dmg)
             if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel': send_one_winged_angel_finisher(chat_id)
             cleanup_combat_dice(chat_id,user_id)
@@ -10788,6 +11066,8 @@ def dungeon_keyboard(dungeon,user_id):
     if has_special_technique(uid,'hidden_blade'):
         hcd=cds['hidden']; lvl=levels.get('hidden_blade',1); power=float(HIDDEN_BLADE_ABILITY['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
         rows.append([{"text":f"⏳ Hidden Blade ({hcd})" if hcd>0 else f"🗡️ Hidden Blade · ×{power:.2f}","callback_data":f"dungeon_atk:{did}:hidden_blade" if hcd<=0 else f"dungeon_wait:{did}"}])
+    wab=_equipped_gacha_weapon_ability(uid,int(char['id']))
+    if wab: rows.append([{"text":f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}","callback_data":f"dungeon_atk:{did}:{wab['key']}"}])
     rows.append([{"text":"🛡️ Defender","callback_data":f"dungeon_def:{did}"},{"text":"🔄 Actualizar","callback_data":f"dungeon_refresh:{did}"}])
     return {'inline_keyboard':rows}
 
@@ -12383,7 +12663,7 @@ def handle_rpg_callback(query):
         _other_gameplay_prefixes=('tavern:','qm:','micro:','wnpc:','limitedbuy:','mission_select:','exclusive_accept:',
                                   'forge_make:','forge_upgrade:','rpg_buy:','rpg_shop_item:','rpg_dungeon_enter:',
                                   'boss_join:','boss_atk:','boss_def:','boss_potion:','boss_potions:','omega_join:','omega_atk:',
-                                  'event_buy:','pet_equip:','pet_level:','pet_public_level:','tech_up:','trade_accept:','trade_pick:',
+                                  'event_buy:','weapon_gacha_open','pet_gacha_open','pet_equip:','pet_level:','pet_public_level:','tech_up:','trade_accept:','trade_pick:',
                                   'marry_accept:','clan_join:','story_choice:')
         if (not _allowed) and data.startswith(_other_gameplay_prefixes):
             send_message(chat_id,_combat_lock_message(_busy_state))
@@ -12800,6 +13080,10 @@ def handle_rpg_callback(query):
             send_message(chat_id,"🔒 La tienda de KiwRPG se abre en privado.",reply_markup=_private_launch_keyboard("shop")); return True
         balance,kb=rpg_shop_keyboard(uid)
         send_message(chat_id,f"🏪 TIENDA RPG\n\nCompra consumibles y equipo básico con Kiwons.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb); return True
+    if data=="weapon_gacha_open":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 El gacha de armas se abre en privado.",reply_markup=_private_launch_keyboard("weapon_gacha")); return True
+        ok,notice=open_weapon_gacha(uid); send_message(chat_id,notice,reply_markup=weapon_gacha_keyboard()); return True
     if data=="pet_gacha":
         if not _is_private_chat_obj(msg.get("chat")):
             send_message(chat_id,"🔒 El gacha y tus mascotas se administran en privado.",reply_markup=_private_launch_keyboard("pets")); return True
@@ -13049,7 +13333,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🌎 Reiniciar mundo","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -13058,7 +13342,7 @@ def rpg_commands_text(user_id=0):
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
          "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
-         "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar.\n\n"
+         "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
@@ -13159,14 +13443,14 @@ def _world_queue_letter(user_id,event_key,npc_key,subject,body):
         except Exception: logger.exception("No pude entregar carta automática")
     return created
 
-def _world_create_exclusive_mission(user_id,chat_id,event_key,npc_key,title,body,reward,rep_delta):
+def _world_create_exclusive_mission(user_id,chat_id,event_key,npc_key,title,body,reward,rep_delta,event_type='pve_win',goal=3):
     if not chat_id or int(chat_id)>0: return False
     _ensure_world_memory_db(); uid=int(user_id); now=int(time.time())
     with db_lock:
         c=get_db()
         old=c.execute("SELECT 1 FROM rpg_decision_log WHERE user_id=? AND event_key=?",(uid,'exclusive:'+event_key)).fetchone()
         if old: c.close(); return False
-        r=c.execute("INSERT INTO rpg_exclusive_missions(target_user_id,chat_id,npc_key,title,body,status,reward,rep_delta,created_at) VALUES(?,?,?,?,?,'open',?,?,?) RETURNING id",(uid,int(chat_id),npc_key,title,body,int(reward),int(rep_delta),now)).fetchone()
+        r=c.execute("INSERT INTO rpg_exclusive_missions(target_user_id,chat_id,npc_key,title,body,status,reward,rep_delta,event_type,goal,progress,created_at) VALUES(?,?,?,?,?,'open',?,?,?,?,0,?) RETURNING id",(uid,int(chat_id),npc_key,title,body,int(reward),int(rep_delta),str(event_type),max(1,int(goal)),now)).fetchone()
         mid=int(r['id']); c.execute("INSERT INTO rpg_decision_log(user_id,event_key,event_type,description,rep_delta,npc_key,created_at) VALUES(?,?, 'unlock', ?,0,?,?)",(uid,'exclusive:'+event_key,f"Desbloqueaste la misión exclusiva «{title}».",npc_key,now)); c.commit(); c.close()
     who=_world_user_mention(uid,chat_id)
     kb={"inline_keyboard":[[{"text":"🔒 Aceptar misión","callback_data":f"exclusive_accept:{mid}"}]]}
@@ -13416,7 +13700,7 @@ COMBAT_LOCKED_COMMANDS = {
     '/misiones','/tablon','/misionesrpg','/misionrapida','/testmision','/minijuego',
     '/omega','/kennyomega','/invocaromega','/spawnomega','/boss','/bossevento',
     '/invocarboss','/spawnboss','/intercambiar','/trade','/casar','/proponer',
-    '/gacha','/cofre','/testmazmorra','/testvoz','/testmisionvoz','/testmundo'
+    '/gacha','/cofre','/gachaarma','/gachaarmas','/testmazmorra','/testvoz','/testmisionvoz','/testmundo'
 }
 
 def clear_personal_rpg_states(chat_id,user_id):
@@ -14233,13 +14517,15 @@ def process_command(
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
             txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
-        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story"):
+        if len(parts)>1 and parts[1] in ("shop","pets","weapon_gacha","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
                 balance,kb=rpg_shop_keyboard(user.get("id")); send_message(chat_id,f"🏪 TIENDA RPG\n\nConsumibles y equipo básico.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb)
             elif parts[1]=="pets":
                 send_message(chat_id,pet_gacha_text(user.get("id")),reply_markup=pet_gacha_keyboard())
+            elif parts[1]=="weapon_gacha":
+                _ensure_weapon_gacha_items(); send_message(chat_id,weapon_gacha_text(user.get("id")),reply_markup=weapon_gacha_keyboard())
             elif parts[1]=="forge":
                 send_message(chat_id,forge_text(user.get("id")),reply_markup=forge_keyboard(user.get("id")))
             elif parts[1]=="upgrade_weapons":
@@ -14967,6 +15253,11 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         user_id=message.get("from",{}).get("id")
         if chat.get("type")!="private": send_message(chat_id,"🔒 La colección completa se administra en privado. Usa /mascota para presumir la equipada aquí.",reply_markup=_private_launch_keyboard("pets")); return True
         txt,kb=pets_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/gachaarmas", "/gachaarma"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private": send_message(chat_id,"🔒 El Gacha de Armas se abre en privado.",reply_markup=_private_launch_keyboard("weapon_gacha")); return True
+        _ensure_weapon_gacha_items(); send_message(chat_id,weapon_gacha_text(user_id),reply_markup=weapon_gacha_keyboard()); return True
 
     if command in ("/gacha", "/cofre"):
         user_id=message.get("from",{}).get("id")

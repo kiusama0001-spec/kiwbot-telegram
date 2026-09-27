@@ -6,6 +6,7 @@ import hashlib
 import hmac
 from urllib.parse import parse_qsl
 import os
+import io
 import random
 import re
 import psycopg
@@ -4095,7 +4096,7 @@ def _mx_day_key(now=None):
     return time.strftime("%Y-%m-%d",time.gmtime(ts))
 
 
-def attempt_robbery(chat_id, thief, target):
+def _legacy_attempt_robbery(chat_id, thief, target):
     uid=int(thief.get("id") or 0); tid=int(target.get("id") or 0)
     if not uid or not tid: return False,"No encontré a ese jugador."
     if uid==tid: return False,"🥷 No puedes robarte a ti mismo. 😂"
@@ -4345,9 +4346,10 @@ def send_rpg_image(chat_id, asset_key, caption="", reply_markup=None):
     if not path or not TELEGRAM_API:
         # Nunca bloqueamos un combate esperando a Cloudflare. Si falta el arte de un
         # monstruo real, se prepara en segundo plano y se usará en la próxima aparición.
-        if TELEGRAM_API and str(asset_key or "").startswith("enemy:"):
+        if TELEGRAM_API and str(asset_key or "").startswith(("enemy:","npc:")):
             try:
-                _queue_enemy_art_generation(asset_key)
+                if str(asset_key).startswith("enemy:"): _queue_enemy_art_generation(asset_key)
+                else: _queue_universal_art_generation(asset_key)
             except Exception as e:
                 logger.exception("No pude encolar arte RPG %s: %s", asset_key, e)
         return None
@@ -4659,6 +4661,38 @@ RPG_ENEMIES = [
     {"key":"mimico_hambriento","name":"Mímico Hambriento","hp":67,"atk":18,"def":6,"exp":38,"kw":30},
     {"key":"verdugo_sin_rostro","name":"Verdugo sin Rostro","hp":78,"atk":17,"def":7,"exp":40,"kw":31},
     {"key":"bestia_eclipse","name":"Bestia del Eclipse","hp":84,"atk":16,"def":8,"exp":41,"kw":32},
+    {"key":"salteador_camino","name":"Salteador del Camino","hp":66,"atk":15,"def":5,"exp":30,"kw":25},
+    {"key":"bandido_veterano","name":"Bandido Veterano","hp":76,"atk":17,"def":7,"exp":38,"kw":32},
+    {"key":"verdugo_camino","name":"Verdugo del Camino","hp":84,"atk":18,"def":8,"exp":44,"kw":38},
+    {"key":"capitan_bandido","name":"Capitán Bandido","hp":92,"atk":20,"def":9,"exp":52,"kw":46},
+    {"key":"jefe_bandidos","name":"Jefe de Bandidos","hp":108,"atk":22,"def":10,"exp":64,"kw":60},
+    {"key":"mercenario_hierro","name":"Mercenario de Hierro","hp":86,"atk":18,"def":9,"exp":45,"kw":39},
+    {"key":"asesino_velado","name":"Asesino Velado","hp":70,"atk":22,"def":6,"exp":48,"kw":42},
+    {"key":"cazador_renegado","name":"Cazador Renegado","hp":74,"atk":20,"def":7,"exp":44,"kw":38},
+    {"key":"gladiador_exiliado","name":"Gladiador Exiliado","hp":96,"atk":20,"def":9,"exp":54,"kw":48},
+    {"key":"caballero_caido","name":"Caballero Caído","hp":102,"atk":20,"def":11,"exp":58,"kw":50},
+    {"key":"cultista_abismo","name":"Cultista del Abismo","hp":72,"atk":21,"def":6,"exp":45,"kw":38},
+    {"key":"invocador_carmesi","name":"Invocador Carmesí","hp":78,"atk":23,"def":6,"exp":52,"kw":44},
+    {"key":"nigromante_errante","name":"Nigromante Errante","hp":80,"atk":24,"def":7,"exp":56,"kw":48},
+    {"key":"orco_merodeador","name":"Orco Merodeador","hp":94,"atk":19,"def":9,"exp":48,"kw":40},
+    {"key":"orco_campeon","name":"Campeón Orco","hp":112,"atk":22,"def":11,"exp":62,"kw":54},
+    {"key":"goblin_chaman","name":"Chamán Goblin","hp":68,"atk":21,"def":5,"exp":43,"kw":36},
+    {"key":"caudillo_goblin","name":"Caudillo Goblin","hp":96,"atk":21,"def":9,"exp":57,"kw":49},
+    {"key":"troll_puente","name":"Troll del Puente","hp":120,"atk":20,"def":10,"exp":62,"kw":52},
+    {"key":"lobo_alfa","name":"Lobo Alfa de Ceniza","hp":88,"atk":20,"def":7,"exp":46,"kw":38},
+    {"key":"arana_reina","name":"Araña Reina Umbría","hp":98,"atk":21,"def":8,"exp":56,"kw":46},
+    {"key":"espectro_vengativo","name":"Espectro Vengativo","hp":82,"atk":23,"def":7,"exp":54,"kw":45},
+    {"key":"golem_runico","name":"Gólem Rúnico","hp":126,"atk":19,"def":13,"exp":66,"kw":56},
+    {"key":"elemental_fuego","name":"Elemental de Fuego","hp":92,"atk":23,"def":8,"exp":58,"kw":48},
+    {"key":"elemental_hielo","name":"Elemental de Hielo","hp":98,"atk":21,"def":10,"exp":58,"kw":48},
+    {"key":"demonio_menor","name":"Demonio Menor","hp":104,"atk":24,"def":9,"exp":64,"kw":54},
+    {"key":"quimera_salvaje","name":"Quimera Salvaje","hp":118,"atk":25,"def":10,"exp":72,"kw":62},
+    {"key":"wyvern_ceniza","name":"Wyvern de Ceniza","hp":124,"atk":26,"def":11,"exp":78,"kw":68},
+    {"key":"aventurero_rival","name":"Aventurero Rival","hp":90,"atk":21,"def":9,"exp":54,"kw":45},
+    {"key":"espadachin_errante","name":"Espadachín Errante","hp":94,"atk":22,"def":9,"exp":58,"kw":48},
+    {"key":"arquera_frontera","name":"Arquera de la Frontera","hp":80,"atk":24,"def":7,"exp":55,"kw":46},
+    {"key":"mago_duelista","name":"Mago Duelista","hp":78,"atk":25,"def":7,"exp":58,"kw":48},
+    {"key":"paladin_desterrado","name":"Paladín Desterrado","hp":116,"atk":21,"def":13,"exp":68,"kw":58},
 ]
 
 # =========================================================
@@ -4675,7 +4709,7 @@ CHRONICLES_ACHIEVEMENTS = {
     "hunter_50": ("☠️ Cincuenta Sombras", "Derrota 50 monstruos.", "sin_piedad", "Sin Piedad"),
     "discover_5": ("📖 Primeras Páginas", "Descubre 5 criaturas diferentes.", "cronista", "Cronista"),
     "discover_12": ("🧭 Medio Mundo", "Descubre 12 criaturas diferentes.", "explorador", "Explorador"),
-    "discover_all": ("👁️ Los Conozco a Todos", "Descubre las 24 criaturas del Bestiario base.", "maestro_bestiario", "Maestro del Bestiario"),
+    "discover_all": ("👁️ Los Conozco a Todos", "Descubre todas las criaturas del Bestiario.", "maestro_bestiario", "Maestro del Bestiario"),
     "legendary_sighting": ("🌟 Eso no era normal", "Derrota una variante legendaria.", "testigo_legendario", "Testigo Legendario"),
 }
 CHRONICLES_KEY_ITEMS = {
@@ -5251,19 +5285,86 @@ def erick_enchant(user_id,target_id,sac_id):
             c.rollback(); c.close(); raise
 
 WORLD_NPCS={
- 'eira':('🩺 Eira, la Sanadora',25), 'brok':('🔨 Brok, Maestro de Armas',18),
- 'elias':('📚 Elías, el Cronista',18), 'orin':('🗝️ Orin, el Coleccionista',16),
- 'erick':('✨ Erick, el Encantador',12), 'mara':('🍲 Mara, la Cocinera',7), 'nox':('🧳 Nox, el Viajero',4)
+ 'eira':('🩺 Eira, la Sanadora',18), 'brok':('🔨 Brok, Maestro de Armas',13),
+ 'elias':('📚 Elías, el Cronista',13), 'orin':('🗝️ Orin, el Coleccionista',11),
+ 'erick':('✨ Erick, el Encantador',9), 'mara':('🍲 Mara, la Cocinera',7), 'nox':('🧳 Nox, el Viajero',5),
+ 'lyra':('🏹 Lyra, Exploradora de Frontera',7), 'kael':('⚔️ Kael, Espada Errante',6),
+ 'vesper':('🕯️ Vesper, la Informante',5), 'torven':('🛡️ Torven, Guardia Retirado',6),
+ 'selene':('🌙 Selene, Astróloga',5), 'darius':('📜 Darius, Cazarrecompensas',5),
+ 'nyra':('🧪 Nyra, Alquimista',5), 'ivar':('🐺 Ivar, Cazador de Bestias',4),
+ 'seraph':('⛪ Seraph, Peregrino Gris',3), 'valka':('🩸 Valka, Mercenaria Carmesí',3),
+ 'aurel':('👑 Aurel, Caballero sin Reino',2), 'malkor':('🧳 Malkor, Mercader de Reliquias',3),
 }
 
+WORLD_NPC_HISTORY={
+ 'eira':'Eira aprendió a curar durante una guerra que prefiere no nombrar. Desde entonces viaja sin bandera y atiende primero a quien todavía puede salvarse.',
+ 'brok':'Brok fue armero de una casa noble desaparecida. Reconoce técnicas de forja que casi nadie recuerda y evita explicar por qué abandonó su antigua fragua.',
+ 'elias':'Elías recopila historias porque asegura que Aeternus ya olvidó una vez su propio pasado. Algunas páginas de su crónica están deliberadamente arrancadas.',
+ 'orin':'Orin compra objetos que otros consideran basura. Dice que las llaves siempre encuentran una puerta tarde o temprano.',
+ 'erick':'Erick estudia cómo los objetos conservan parte de quienes los usaron. Sus encantamientos funcionan, aunque nunca explica qué escucha cuando una pieza se rompe.',
+ 'mara':'Mara recorrió caminos de guerra alimentando caravanas y refugiados. Conoce rumores porque la gente habla demasiado frente a un plato caliente.',
+ 'nox':'Nox aparece desde caminos que no figuran en ningún mapa. Nunca confirma de dónde viene y rara vez permanece dos veces en el mismo lugar.',
+ 'lyra':'Lyra cartografía las fronteras cambiantes de Aeternus. Ha visto senderos aparecer de noche y desaparecer antes del amanecer.',
+ 'kael':'Kael busca rivales capaces de obligarlo a mejorar. No sirve a ningún reino y recuerda perfectamente cada derrota.',
+ 'vesper':'Vesper comercia con información, no con objetos. Para ella un secreto solo vale mientras alguien tema que salga a la luz.',
+ 'torven':'Torven dejó la guardia después de sobrevivir a una orden que considera imperdonable. Ahora protege viajeros cuando cree que la causa lo merece.',
+ 'selene':'Selene interpreta estrellas que, según ella, cambiaron de posición cuando Aeternus despertó. Sus predicciones nunca son completamente claras.',
+ 'darius':'Darius persigue monstruos y personas por contrato. Tiene una regla: siempre pregunta por qué existe la recompensa antes de aceptar.',
+ 'nyra':'Nyra prueba remedios con ingredientes que otros alquimistas ni tocarían. Sus mejores fórmulas nacieron de errores que casi la matan.',
+ 'ivar':'Ivar conoce hábitos de criaturas que aún no aparecen en los bestiarios. Respeta más a quien entiende una bestia que a quien simplemente la mata.',
+ 'seraph':'Seraph camina entre ruinas buscando santuarios anteriores a los reinos actuales. Cree que algo bajo Aeternus está volviendo a respirar.',
+ 'valka':'Valka vende su espada, pero no su lealtad. Ha roto contratos cuando el trabajo cruzó una línea que solo ella conoce.',
+ 'aurel':'Aurel conserva modales de noble aunque ya no tenga reino. Su escudo lleva un blasón raspado a propósito.',
+ 'malkor':'Malkor comercia con reliquias cuya procedencia rara vez explica. Siempre parece saber quién necesita un objeto antes de que esa persona lo sepa.',
+}
+
+WORLD_NPC_VISUALS={
+ 'eira':('young traveling healer with auburn braid, practical cream-and-green robes, leather medical satchel and herb bundles','roadside field clinic at dusk'),
+ 'brok':('broad middle-aged master blacksmith with braided beard, soot-stained apron, heavy gloves and engraved forging hammer','open traveling forge glowing with orange coals'),
+ 'elias':('lean elderly chronicler with silver hair, layered blue-gray coat, enormous weathered book and ink-stained fingers','ancient roadside archive beneath hanging lanterns'),
+ 'orin':('eccentric collector in patchwork burgundy coat covered in keys, pockets of odd relics and monocle','crowded relic wagon filled with locked boxes'),
+ 'erick':('elegant male enchanter in dark teal robes, crystal tools and luminous runic threads around his hands','small arcane workshop under a night canopy'),
+ 'mara':('warm sturdy traveling cook with rolled sleeves, copper pans, scarf and wooden ladle','busy caravan kitchen with steaming cauldron'),
+ 'nox':('mysterious hooded traveler in layered black travel cloak, weathered boots and unusual foreign packs','lonely moonlit crossroads with distant mountains'),
+ 'lyra':('athletic female frontier scout with short cloak, recurved bow, map case and climbing gear','windy cliff overlooking unmapped forest'),
+ 'kael':('young wandering swordsman with dark hair, travel-worn half armor and elegant longsword','ruined stone bridge at sunrise'),
+ 'vesper':('sharp-eyed female informant in elegant dark coat, gloves and subtle silver jewelry','shadowed tavern balcony overlooking a crowded market'),
+ 'torven':('older retired guard with gray beard, battered shield, simple chainmail and blue cloak','quiet village gate in evening rain'),
+ 'selene':('mysterious female astrologer in midnight robes with brass astrolabe and star charts','hilltop observatory beneath vivid stars'),
+ 'darius':('weathered male bounty hunter with crossbow, sword, contract scrolls and long brown coat','frontier notice board outside a fortified inn'),
+ 'nyra':('energetic female alchemist with goggles, stained apron, potion bandolier and glass vials','colorful cluttered alchemy cart'),
+ 'ivar':('rugged beast hunter with fur mantle, spear, traps and monster claw trophies','pine forest camp with enormous tracks nearby'),
+ 'seraph':('solemn gray-cloaked pilgrim carrying a lantern staff and ancient prayer tablets','forgotten ruined shrine in pale morning fog'),
+ 'valka':('scarred female mercenary in crimson brigandine, heavy sword and confident stance','muddy mercenary camp under red banners'),
+ 'aurel':('noble knight without a kingdom in worn silver armor, deliberately erased heraldry and blue cape','abandoned throne road lined with broken statues'),
+ 'malkor':('lean middle-aged traveling merchant with sharp amber eyes, dark auburn hair, charcoal-and-burgundy coat and relic-filled satchel','cramped night bazaar stall packed with charms and relic crates'),
+}
+
+def _ensure_npc_memory_db():
+    c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_memory(user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,affinity BIGINT DEFAULT 0,interactions BIGINT DEFAULT 0,last_action TEXT DEFAULT '',last_seen_at BIGINT DEFAULT 0,memory_text TEXT DEFAULT '',PRIMARY KEY(user_id,npc_key))"""); c.commit(); c.close()
+
+def _npc_remember(user_id,key,action,note=''):
+    _ensure_npc_memory_db(); now=int(time.time()); c=get_db()
+    c.execute("""INSERT INTO rpg_npc_memory(user_id,npc_key,affinity,interactions,last_action,last_seen_at,memory_text) VALUES(?,?,0,1,?,?,?) ON CONFLICT(user_id,npc_key) DO UPDATE SET interactions=rpg_npc_memory.interactions+1,last_action=EXCLUDED.last_action,last_seen_at=EXCLUDED.last_seen_at,memory_text=CASE WHEN EXCLUDED.memory_text<>'' THEN EXCLUDED.memory_text ELSE rpg_npc_memory.memory_text END""",(int(user_id),str(key),str(action),now,str(note)[:500])); c.commit(); c.close()
+
+def _legacy_npc_history_text(user_id,key):
+    _ensure_npc_memory_db(); name=WORLD_NPCS.get(key,(key,0))[0]; hist=WORLD_NPC_HISTORY.get(key,'Todavía se sabe muy poco de este viajero.')
+    c=get_db(); row=c.execute("SELECT * FROM rpg_npc_memory WHERE user_id=? AND npc_key=?",(int(user_id),str(key))).fetchone(); c.close()
+    if not row: return f"📖 {name}\n\n{hist}\n\nTodavía no tiene recuerdos personales contigo."
+    extra=f"\n\n🧠 Te recuerda: {int(row.get('interactions') or 0)} encuentro(s)."
+    if row.get('memory_text'): extra+=f"\n💭 Recuerdo: {row['memory_text']}"
+    return f"📖 {name}\n\n{hist}{extra}"
+
 def world_npc_keyboard(key):
-    if key=='eira': return {'inline_keyboard':[[{'text':'❤️ Curarme','callback_data':'wnpc:eira:heal'}]]}
-    if key=='elias': return {'inline_keyboard':[[{'text':'⚔️ Mejores armas','callback_data':'wnpc:elias:weapons'},{'text':'🛡️ Mejor armadura','callback_data':'wnpc:elias:armor'}],[{'text':'🗺️ Dónde conseguirlas','callback_data':'wnpc:elias:where'},{'text':'💡 Consejo','callback_data':'wnpc:elias:tip'}],[{'text':'🕯️ Rumor','callback_data':'wnpc:elias:rumor'}]]}
-    if key=='orin': return {'inline_keyboard':[[{'text':'🗝️ Mostrar objetos extraños','callback_data':'wnpc:orin:items'}],[{'text':'💍 Reliquia limitada','callback_data':'wnpc:orin:shop'}]]}
-    if key=='brok': return {'inline_keyboard':[[{'text':'🔨 Analizar mi equipo','callback_data':'wnpc:brok:gear'}],[{'text':'⚒️ Consejo de Forja','callback_data':'wnpc:brok:forge'}],[{'text':'🛡️ Pieza limitada','callback_data':'wnpc:brok:shop'}]]}
-    if key=='erick': return {'inline_keyboard':[[{'text':'✨ Encantar mi equipo','callback_data':'wnpc:erick:enchant'}],[{'text':'❓ Cómo funciona','callback_data':'wnpc:erick:help'}]]}
-    if key=='nox': return {'inline_keyboard':[[{'text':'🧳 Ver mercancía limitada','callback_data':'wnpc:nox:shop'}]]}
-    return None
+    rows=[]
+    if key=='eira': rows.append([{'text':'❤️ Curarme','callback_data':'wnpc:eira:heal'}])
+    elif key=='elias': rows += [[{'text':'⚔️ Mejores armas','callback_data':'wnpc:elias:weapons'},{'text':'🛡️ Mejor armadura','callback_data':'wnpc:elias:armor'}],[{'text':'🗺️ Dónde conseguirlas','callback_data':'wnpc:elias:where'},{'text':'💡 Consejo','callback_data':'wnpc:elias:tip'}],[{'text':'🕯️ Rumor','callback_data':'wnpc:elias:rumor'}]]
+    elif key=='orin': rows += [[{'text':'🗝️ Mostrar objetos extraños','callback_data':'wnpc:orin:items'}],[{'text':'💍 Reliquia limitada','callback_data':'wnpc:orin:shop'}]]
+    elif key=='brok': rows += [[{'text':'🔨 Analizar mi equipo','callback_data':'wnpc:brok:gear'}],[{'text':'⚒️ Consejo de Forja','callback_data':'wnpc:brok:forge'}],[{'text':'🛡️ Pieza limitada','callback_data':'wnpc:brok:shop'}]]
+    elif key=='erick': rows += [[{'text':'✨ Encantar mi equipo','callback_data':'wnpc:erick:enchant'}],[{'text':'❓ Cómo funciona','callback_data':'wnpc:erick:help'}]]
+    elif key=='nox': rows.append([{'text':'🧳 Ver mercancía limitada','callback_data':'wnpc:nox:shop'}])
+    rows.append([{'text':'📖 Su historia','callback_data':f'wnpc:{key}:history'}])
+    return {'inline_keyboard':rows}
 
 def spawn_world_npc(chatrow,now=None,rng=random):
     now=int(now or time.time()); cid=int(chatrow['chat_id']); tid=int(chatrow.get('message_thread_id') or 0)
@@ -5271,7 +5372,10 @@ def spawn_world_npc(chatrow,now=None,rng=random):
     with db_lock:
         c=get_db(); c.execute("UPDATE rpg_world_npcs SET status='gone' WHERE chat_id=? AND thread_id=? AND status='active'",(cid,tid)); c.execute("INSERT INTO rpg_world_npcs(chat_id,thread_id,npc_key,status,spawned_at,expires_at,message_id) VALUES(?,?,?,'active',?,?,0) ON CONFLICT(chat_id,thread_id,npc_key) DO UPDATE SET status='active',spawned_at=EXCLUDED.spawned_at,expires_at=EXCLUDED.expires_at",(cid,tid,key,now,now+20*60)); c.commit(); c.close()
     old=get_current_message_thread_id(); set_current_message_thread_id(tid or None)
-    try: send_message(cid,f"🌒 VIAJERO DEL MUNDO\n\n{name} ha aparecido.\n⏳ Se quedará 20 minutos.",reply_markup=world_npc_keyboard(key))
+    try:
+        caption=f"🌒 VIAJERO DEL MUNDO\n\n{name} ha aparecido.\n⏳ Se quedará 20 minutos."
+        if not send_rpg_image(cid,f"npc:{key}",caption,reply_markup=world_npc_keyboard(key)):
+            send_message(cid,caption,reply_markup=world_npc_keyboard(key))
     finally: set_current_message_thread_id(old)
 
 def _limited_vendor_offer(vendor):
@@ -5311,6 +5415,10 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
     with db_lock:
         c=get_db(); npc=c.execute("SELECT * FROM rpg_world_npcs WHERE chat_id=? AND thread_id=? AND npc_key=? AND status='active' AND expires_at>?",(int(chat_id),tid,key,now)).fetchone()
         if not npc: c.close(); return '🌫️ Ese viajero ya se marchó.'
+        c.close()
+        _npc_remember(uid,key,action)
+        if action=='history': return npc_history_text(uid,key)
+        c=get_db()
         if action=='shop' and key in ('brok','nox','orin'):
             c.close(); return _limited_vendor_offer(key)
         if key=='eira' and action=='heal':
@@ -5808,6 +5916,26 @@ def _rpg_enemy_damage(battle, eff, defending=False):
     return enemy_roll, dmg
 
 
+def _reserve_manual_encounter(user_id):
+    """Reserva atómicamente uno de los 15 /encuentro diarios del jugador."""
+    day=_mx_day_key(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_encounter_daily(user_id BIGINT NOT NULL,day_key TEXT NOT NULL,uses BIGINT DEFAULT 0,updated_at BIGINT NOT NULL,PRIMARY KEY(user_id,day_key))""")
+            row=c.execute("SELECT uses FROM rpg_encounter_daily WHERE user_id=? AND day_key=? FOR UPDATE",(int(user_id),day)).fetchone(); used=int((row or {}).get('uses') or 0)
+            if used>=15: c.rollback(); c.close(); return False,used
+            if row: c.execute("UPDATE rpg_encounter_daily SET uses=uses+1,updated_at=? WHERE user_id=? AND day_key=?",(now,int(user_id),day))
+            else: c.execute("INSERT INTO rpg_encounter_daily(user_id,day_key,uses,updated_at) VALUES(?,?,1,?)",(int(user_id),day,now))
+            c.commit(); c.close(); return True,used+1
+        except Exception:
+            c.rollback(); c.close(); raise
+
+def _refund_manual_encounter(user_id):
+    day=_mx_day_key()
+    with db_lock:
+        c=get_db(); c.execute("UPDATE rpg_encounter_daily SET uses=GREATEST(0,uses-1),updated_at=? WHERE user_id=? AND day_key=?",(int(time.time()),int(user_id),day)); c.commit(); c.close()
+
 def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0, dungeon_event_id=0, dungeon_room=0):
     char = get_active_character(user_id)
     if not char:
@@ -5820,7 +5948,8 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
     level = int(char["level"])
     base = next((x for x in RPG_ENEMIES if x["key"]==forced_enemy_key), None) if forced_enemy_key else None
     if not base:
-        base = random.choice(RPG_ENEMIES)
+        # Selección por amenaza: evita que un Nv.1 vea con la misma frecuencia un slime y una wyvern.
+        base = _select_enemy_for_level(level)
     rarity = roll_world_encounter_rarity()
     encounter_number = register_world_encounter(rarity)
     rd = RPG_ENCOUNTER_RARITY_DATA[rarity]
@@ -6096,7 +6225,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                         nr=dungeon_room+1
                         with db_lock:
                             dc=get_db(); dc.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND user_id=?",(nr,int(time.time()),dungeon_id,int(user_id))); dc.commit(); dc.close()
-                        e2=random.choice(RPG_ENEMIES); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
+                        e2=_select_enemy_for_level(int(get_active_character(user_id).get("level") or 1)); ok2,msg2=start_rpg_encounter(chat_id,user_id,forced_enemy_key=e2["key"],dungeon_event_id=dungeon_id,dungeon_room=nr)
                         if ok2: send_message(chat_id,f"🚪 Sala {dungeon_room} superada. Avanzas a la sala {nr}/{RPG_DUNGEON_ROOMS}.\n\n{msg2}",reply_markup=rpg_battle_keyboard(char["class_name"],0,0,user_id))
                     else:
                         with db_lock:
@@ -7119,7 +7248,13 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         conn.rollback(); conn.close()
     dr=send_dice(d['chat_id'],'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
     with db_lock:
-        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone(); is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); mode=str(d.get('duel_mode') or 'friendly'); ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode); duel_level=_pvp_equal_level(char,opp); eff=_duel_stats_for_mode(char,duel_level,mode); oe=_duel_stats_for_mode(opp,duel_level,mode)
+        conn=get_db(); d=conn.execute('SELECT * FROM rpg_pvp_duels WHERE id=? FOR UPDATE',(int(duel_id),)).fetchone()
+        # Revalidación DESPUÉS del dado: otro callback pudo consumir el turno mientras Telegram respondía.
+        if not d or d['status']!='active': conn.rollback(); conn.close(); return False,'Ese duelo ya no está activo.'
+        if int(d['turn_user_id'] or 0)!=uid: conn.rollback(); conn.close(); return False,'Ese turno ya fue consumido.'
+        is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); mode=str(d.get('duel_mode') or 'friendly'); ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
+        if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
+        duel_level=_pvp_equal_level(char,opp); eff=_duel_stats_for_mode(char,duel_level,mode); oe=_duel_stats_for_mode(opp,duel_level,mode)
         target_hp=int(d['opponent_hp'] if is_ch else d['challenger_hp']); defending=int(d['opponent_defending'] if is_ch else d['challenger_defending']); dmg=0; heal=0
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*PVP_DICE_MULT[roll])-(oe['defense']*(1.0-float(ab.get('pen',0)))*0.36); dmg=max(1,int(round(raw*0.78)))
@@ -9664,7 +9799,7 @@ def marriage_boss_multiplier(user_id):
     return 1.10 if _marriage_row(user_id,("active",)) else 1.0
 
 
-def marriage_shared_inventory_text(user_id):
+def _legacy_marriage_shared_inventory_text(user_id):
     row=_marriage_row(user_id,("active",))
     if not row: return "💞 No tienes una pareja en KiwRPG."
     uid=int(user_id); pid=_marriage_partner_id(row,uid); world=current_rpg_world()
@@ -9937,6 +10072,13 @@ RPG_QUICK_MISSIONS = [
     {"key":"text_boss","type":"text","title":"👑 Últimas palabras del boss","prompt":"Escribe exactamente esta frase en el chat:\n«Podrán quedarse con el loot, pero volveré con más fases.»","answer":"Podrán quedarse con el loot, pero volveré con más fases.","kw":950,"exp":100},
     {"key":"text_tavern","type":"text","title":"🍺 Rumor de taberna","prompt":"Escribe exactamente esta frase en el chat:\n«Dicen que Malkor sí hace descuentos, pero nadie ha sobrevivido para probarlo.»","answer":"Dicen que Malkor sí hace descuentos, pero nadie ha sobrevivido para probarlo.","kw":1000,"exp":105},
 
+    # 🎙️ Nota de voz: KiwBot transcribe con Groq Whisper y valida la frase.
+    {"key":"voice_oath","type":"voice","title":"🎙️ Juramento del aventurero","prompt":"Envía una NOTA DE VOZ diciendo exactamente: «El mundo recuerda mis decisiones.»","answer":"El mundo recuerda mis decisiones.","kw":1050,"exp":110},
+    {"key":"voice_bandits","type":"voice","title":"🏴 Mensaje para los bandidos","prompt":"Envía una NOTA DE VOZ diciendo exactamente: «Díganle al jefe de los bandidos que voy por él.»","answer":"Díganle al jefe de los bandidos que voy por él.","kw":1150,"exp":120},
+    {"key":"voice_malkor","type":"voice","title":"🧳 Recado para Malkor","prompt":"Envía una NOTA DE VOZ diciendo exactamente: «Malkor, esta vez quiero un descuento de verdad.»","answer":"Malkor, esta vez quiero un descuento de verdad.","kw":1000,"exp":105},
+    {"key":"voice_dragon","type":"voice","title":"🐉 Valor frente al dragón","prompt":"Envía una NOTA DE VOZ diciendo exactamente: «Si el dragón despierta, pelearemos hasta el final.»","answer":"Si el dragón despierta, pelearemos hasta el final.","kw":1100,"exp":115},
+    {"key":"voice_goblin","type":"voice","title":"👺 Diplomacia goblin","prompt":"Envía una NOTA DE VOZ diciendo exactamente: «No pienso negociar mi queso con un goblin.»","answer":"No pienso negociar mi queso con un goblin.","kw":950,"exp":100},
+
     # 🎨 Dibujo: el bot valida que llegue una imagen/foto; el contenido es por honor aventurero.
     {"key":"draw_slime","type":"draw","title":"🎨 Dibuja un slime","prompt":"Pulsa «🎨 Tomar reto y dibujar». Se abrirá el lienzo de KiwBot. Dibuja tu slime y entrégalo: el PRIMERO que envíe un dibujo válido gana.","kw":1000,"exp":105},
     {"key":"draw_sword","type":"draw","title":"🗡️ Diseña una espada ridícula","prompt":"Pulsa «🎨 Tomar reto y dibujar». Diseña en el lienzo la espada más absurda que usaría un héroe. La PRIMERA entrega válida gana.","kw":1100,"exp":115},
@@ -10059,6 +10201,8 @@ def _quick_finish(m,user_id):
         if not row or row['status']!='active' or int(row['expires_at'])<=int(time.time()): conn.rollback(); conn.close(); return False,"Llegaste tarde. La misión ya terminó."
         conn.execute("UPDATE rpg_quick_missions SET status='completed',winner_id=? WHERE id=?",(int(user_id),int(m['id']))); conn.commit(); conn.close()
     reward=_quick_reward(dict(row),user_id)
+    try: record_world_decision(user_id,f"quick:{int(row['id'])}",f"Completaste la misión «{row['title']}».",1,traits={"honorable":1})
+    except Exception: logger.exception("No pude registrar la misión en la memoria del mundo")
     return True,f"🏆 {_pvp_name(user_id)} completó «{row['title']}» primero.\n{reward}"
 
 def _quick_attempt(m,user_id):
@@ -10117,6 +10261,63 @@ def _quick_normalize_text(value):
             if v.startswith(left) and v.endswith(right):
                 v=v[len(left):len(v)-len(right)].strip().rstrip(' .').strip(); changed=True; break
     return v.casefold()
+
+
+def _telegram_download_file_bytes(file_id):
+    """Descarga un archivo de Telegram sin persistirlo. Devuelve (bytes, file_path)."""
+    if not TELEGRAM_API or not file_id:
+        return b"", ""
+    meta=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/getFile",params={"file_id":str(file_id)},timeout=TELEGRAM_TIMEOUT).json()
+    path=str(((meta.get("result") or {}).get("file_path") or ""))
+    if not path:
+        return b"", ""
+    res=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/file/bot{TELEGRAM_TOKEN}/{path}",timeout=TELEGRAM_TIMEOUT)
+    if not res.ok:
+        return b"", path
+    return bytes(res.content), path
+
+
+def _quick_transcribe_voice(message):
+    """Transcribe una nota de voz para misiones relámpago. No guarda el audio."""
+    voice=(message or {}).get("voice") or {}
+    fid=str(voice.get("file_id") or "")
+    if not fid:
+        return "", "Esa misión necesita una nota de voz de Telegram."
+    if int(voice.get("duration") or 0)>25:
+        return "", "🎙️ La nota es demasiado larga. Máximo 25 segundos."
+    if not groq_client:
+        return "", "🎙️ No puedo validar voz ahora mismo porque el transcriptor no está disponible."
+    try:
+        raw,path=_telegram_download_file_bytes(fid)
+        if not raw or len(raw)>5_000_000:
+            return "", "🎙️ No pude descargar esa nota de voz o pesa demasiado."
+        ext=Path(path).suffix or ".ogg"
+        audio=io.BytesIO(raw); audio.name=f"kiwbot_voice{ext}"
+        out=groq_client.audio.transcriptions.create(model="whisper-large-v3-turbo",file=audio,language="es",temperature=0)
+        text_out=str(getattr(out,"text","") or "").strip()
+        return text_out, ""
+    except Exception:
+        logger.exception("Error transcribiendo misión de voz")
+        return "", "🎙️ No pude entender la nota. Intenta otra vez; no consumí la misión."
+
+
+def handle_quick_mission_voice(message):
+    """Valida misiones de voz y premia sólo a la primera transcripción correcta."""
+    chat_id=(message.get('chat') or {}).get('id'); uid=(message.get('from') or {}).get('id')
+    if not chat_id or not uid or not message.get('voice'):
+        return False
+    m=_quick_active(chat_id,message_thread_id=message.get('message_thread_id'))
+    if not m or str(m.get('mission_type') or '')!='voice':
+        return False
+    spoken,err=_quick_transcribe_voice(message)
+    if err:
+        send_message(chat_id,err,reply_to_message_id=message.get('message_id')); return True
+    expected=str(m.get('answer') or '')
+    if _quick_normalize_text(spoken)!=_quick_normalize_text(expected):
+        send_message(chat_id,f"🎙️ Escuché: «{spoken[:180]}»\nNo coincide exactamente con la frase del reto. Intenta otra vez.",reply_to_message_id=message.get('message_id')); return True
+    ok,msg=_quick_finish(dict(m),uid)
+    send_message(chat_id,msg,reply_to_message_id=message.get('message_id'))
+    return True
 
 
 def handle_quick_mission_text(message,text):
@@ -10205,6 +10406,7 @@ def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
     if m['mission_type']=='draw': how="\n\n🎨 Pulsa «Abrir lienzo», dibuja y toca «Entregar dibujo».\n🏁 Abrirlo no reserva nada: gana la PRIMERA entrega válida."
     elif m['mission_type']=='text': how=f"\n\n✍️ Escribe EXACTAMENTE esta frase en el chat:\n«{m['answer']}»"
     elif m['mission_type']=='mention': how="\n\n👥 Menciona con @ a otra persona del grupo."
+    elif m['mission_type']=='voice': how=f"\n\n🎙️ Envía una NOTA DE VOZ diciendo exactamente:\n«{m['answer']}»\n🔊 KiwBot la transcribirá y validará automáticamente."
     card=f"⚡ MISIÓN RELÁMPAGO\n\n{m['title']}\n{m['prompt']}{how}\n\n🏆 El primero en completarla gana.\n🎁 {prize}\n⏳ 10 minutos."
     old=get_current_message_thread_id(); set_current_message_thread_id(topic)
     try:
@@ -10387,7 +10589,7 @@ def _dungeon_spawn_shared_enemy(conn,dungeon,room):
         if c:
             levels.append(int(c['level']))
             if int(c.get('hp') or 0)>0: living.append(int(m['user_id']))
-    level=max(levels or [1]); base=random.choice(RPG_ENEMIES); scale=max(0,level-1)
+    level=max(levels or [1]); base=_select_enemy_for_level(level); scale=max(0,level-1)
     # Cooperativa: más vida según participantes, pero un solo objetivo compartido.
     party=max(1,len(members)); hp_mult=1.0+0.55*(party-1)
     hp=max(1,int(round((base['hp']+scale*10)*hp_mult)))
@@ -10852,17 +11054,15 @@ def spawn_will_epic_event(chatrow, now=None):
     return True
 
 def _pause_regular_spawns_for_boss(chat_id, now=None):
-    """Mientras haya Boss, retira monstruos/misiones pendientes y aplaza sus siguientes spawns."""
+    """Un Boss puede coexistir con monstruos normales; solo pausa misiones relámpago para no saturar el chat."""
     now=int(now or time.time()); mids=[]
     with db_lock:
         c=get_db()
-        pending=c.execute("SELECT id,message_id FROM rpg_auto_encounters WHERE chat_id=? AND status='pending'",(int(chat_id),)).fetchall()
         quick=c.execute("SELECT id,message_id FROM rpg_quick_missions WHERE chat_id=? AND status='active'",(int(chat_id),)).fetchall()
-        for r in list(pending)+list(quick):
+        for r in quick:
             if int(r.get('message_id') or 0): mids.append(int(r['message_id']))
-        c.execute("UPDATE rpg_auto_encounters SET status='boss_paused' WHERE chat_id=? AND status='pending'",(int(chat_id),))
         c.execute("UPDATE rpg_quick_missions SET status='boss_paused' WHERE chat_id=? AND status='active'",(int(chat_id),))
-        c.execute("UPDATE rpg_auto_chats SET next_spawn_at=?,next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+RPG_AUTO_ENCOUNTER_INTERVAL,now+RPG_QUICK_MISSION_INTERVAL,now,int(chat_id)))
+        c.execute("UPDATE rpg_auto_chats SET next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+RPG_QUICK_MISSION_INTERVAL,now,int(chat_id)))
         c.commit(); c.close()
     for mid in mids:
         try: delete_message(int(chat_id),mid)
@@ -12099,7 +12299,7 @@ def handle_rpg_callback(query):
             if not _is_private_chat_obj(msg.get("chat")):
                 send_message(chat_id,"📜 La guía completa de comandos se abre en privado para no llenar el chat del juego.",reply_markup=_private_launch_keyboard("commands")); return True
             send_message(chat_id,rpg_commands_text(uid)); return True
-        if act=="how": send_message(chat_id,"❓ CÓMO JUGAR\n\n1. Crea un personaje.\n2. Usa /encuentro para combatir y /misiones para progresar.\n3. Equipa y mejora objetos.\n4. Visita /taberna, Bosses, eventos y NPC viajeros.\n5. No esperes que todos los misterios se anuncien: Mundo Vivo observa lo que ocurre."); return True
+        if act=="how": send_message(chat_id,"❓ CÓMO JUGAR\n\n1. Crea un personaje.\n2. Usa /encuentro para combatir y /misiones para progresar.\n3. Equipa y mejora objetos.\n4. Visita /taberna, Bosses, eventos y NPC viajeros.\n5. El mundo recuerda: tus decisiones cambian reputación, NPC, cartas y oportunidades.\n6. Los NPC pueden recordar cómo los trataste y reaccionar después.\n7. /encuentro tiene 15 usos personales al día; los eventos automáticos son independientes."); return True
         if act=="create": send_character_creator(chat_id,uid,origin_chat_id=chat_id); return True
         if act=="switch":
             rows=get_characters(uid); kb={"inline_keyboard":[[{"text":f"{'⭐ ' if int(r['is_active']) else ''}{r['name']} · Nv.{r['level']}","callback_data":f"rpg_switch:{int(r['id'])}"}] for r in rows]} if rows else None
@@ -12148,6 +12348,9 @@ def handle_rpg_callback(query):
         try:
             _,nk,act=data.split(":",2)
             out=world_npc_callback(uid,chat_id,(msg or {}).get("message_thread_id"),nk,act)
+            if act != "history":
+                try: npc_record_event(uid,nk,"interaction",f"Interactuaste con {WORLD_NPCS.get(nk,(nk,0))[0]}: {act}.",1 if act in ("heal","tip","help","gear","forge","weapons","armor","where","rumor","items","shop") else 0)
+                except Exception: logger.exception("No pude guardar recuerdo NPC")
             if isinstance(out,tuple): send_message(chat_id,out[0],reply_markup=out[1])
             else: send_message(chat_id,out)
         except Exception:
@@ -12733,12 +12936,12 @@ def rpg_welcome_keyboard(user_id):
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
-         "⚔️ COMBATE\n/encuentro — Combate PvE.\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
+         "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; hasta 20,000 KW.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar.\n\n"
-         "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Inventario de ambos.\n/compartiritem — Entrega un objeto.\n/divorcio — Termina el matrimonio.\n\n"
+         "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
         txt += ("\n\n👑 KIU / PRUEBAS\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
@@ -12770,6 +12973,223 @@ def grand_opening_start(chat_id,user_id):
         if hid: grant_first_tester(hid)
     except Exception: logger.exception("No pude conceder Los Primeros a Head")
     return True,("🎆 GRAN APERTURA — AETERNUS DESPIERTA\n\nDurante años las puertas permanecieron cerradas mientras los caminos se llenaban de historias que nadie podía comprobar. Esta noche dejaron de ser historias.\n\nLas murallas de Aeternus se han abierto. Criaturas vuelven a recorrer el mundo, antiguas mazmorras responden otra vez y viajeros de lugares desconocidos comienzan a llegar. Nadie sabe todavía qué provocó el despertar.\n\n⚔️ Desde este momento comienza oficialmente KiwRPG.\n🎉 Festival de Apertura 2026 activo.\n✨ Bonificaciones inaugurales y desafíos especiales.\n🏅 Los primeros aventureros dejarán su marca en la historia.\n🌎 Crónicas y Mundo Vivo ya observan lo que ocurra.\n\nNo todos los secretos aparecerán como una misión. No todas las puertas dirán que pueden abrirse. Y quizá algunas cosas lleven mucho tiempo esperando exactamente a que alguien las encuentre.\n\n🦅 Bienvenidos a Aeternus. Ahora sí: escriban su historia.")
+
+# =========================================================
+# MUNDO QUE RECUERDA · REPUTACIÓN · MEMORIA · PAREJA COMPARTIDA
+# =========================================================
+
+RPG_REP_TIERS=((60,"Héroe"),(25,"Respetado"),(-24,"Neutral"),(-59,"Dudoso"),(-99,"Temido"),(-10**9,"Villano"))
+RPG_ENEMY_THREAT_HINTS={
+ "slime":1,"rata":1,"lobo":3,"goblin":4,"bandido":5,"salteador":8,"esqueleto":8,"araña":9,
+ "bandido_veterano":12,"mercenario":14,"cultista":15,"orco":16,"capitan_bandido":20,"asesino":22,
+ "nigromante":24,"troll":25,"jefe_bandidos":28,"caballero_caido":30,"golem":32,"demonio":36,
+ "quimera":42,"wyvern":48,"paladin_desterrado":50
+}
+
+def _ensure_world_memory_db():
+    with db_lock:
+        c=get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_reputation(user_id BIGINT PRIMARY KEY,score BIGINT DEFAULT 0,merciful BIGINT DEFAULT 0,cruel BIGINT DEFAULT 0,greedy BIGINT DEFAULT 0,protector BIGINT DEFAULT 0,honorable BIGINT DEFAULT 0,opportunist BIGINT DEFAULT 0,updated_at BIGINT DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_decision_log(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,event_key TEXT NOT NULL,event_type TEXT DEFAULT '',description TEXT DEFAULT '',rep_delta BIGINT DEFAULT 0,npc_key TEXT DEFAULT '',created_at BIGINT NOT NULL,UNIQUE(user_id,event_key))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_events(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,event_key TEXT NOT NULL,description TEXT DEFAULT '',affinity_delta BIGINT DEFAULT 0,created_at BIGINT NOT NULL,UNIQUE(user_id,npc_key,event_key))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_story_progress(user_id BIGINT PRIMARY KEY,chapter BIGINT DEFAULT 1,scene BIGINT DEFAULT 1,path TEXT DEFAULT 'wanderer',updated_at BIGINT DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_letters(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',subject TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'unread',created_at BIGINT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_marriage_shared_inventory(id BIGSERIAL PRIMARY KEY,marriage_id BIGINT NOT NULL,item_key TEXT NOT NULL,quantity BIGINT DEFAULT 1,serial_number BIGINT DEFAULT 0,deposited_by BIGINT NOT NULL,original_inventory_id BIGINT DEFAULT 0,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL)""")
+        c.commit(); c.close()
+
+def reputation_tier(score):
+    score=int(score or 0)
+    for floor,name in RPG_REP_TIERS:
+        if score>=floor:return name
+    return "Neutral"
+
+def get_reputation(user_id):
+    _ensure_world_memory_db()
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT * FROM rpg_reputation WHERE user_id=?",(int(user_id),)).fetchone(); c.close()
+    return dict(r) if r else {"user_id":int(user_id),"score":0,"merciful":0,"cruel":0,"greedy":0,"protector":0,"honorable":0,"opportunist":0}
+
+def record_world_decision(user_id,event_key,description,rep_delta=0,npc_key='',traits=None):
+    _ensure_world_memory_db(); now=int(time.time()); traits=traits or {}
+    with db_lock:
+        c=get_db()
+        try:
+            exists=c.execute("SELECT 1 FROM rpg_decision_log WHERE user_id=? AND event_key=?",(int(user_id),str(event_key))).fetchone()
+            if exists: c.rollback(); c.close(); return False
+            c.execute("INSERT INTO rpg_decision_log(user_id,event_key,event_type,description,rep_delta,npc_key,created_at) VALUES(?,?,?,?,?,?,?)",(int(user_id),str(event_key),"choice",str(description)[:700],int(rep_delta),str(npc_key),now))
+            c.execute("INSERT INTO rpg_reputation(user_id,score,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET score=rpg_reputation.score+EXCLUDED.score,updated_at=EXCLUDED.updated_at",(int(user_id),int(rep_delta),now))
+            allowed={"merciful","cruel","greedy","protector","honorable","opportunist"}
+            for k,v in traits.items():
+                if k in allowed and int(v): c.execute(f"UPDATE rpg_reputation SET {k}={k}+? WHERE user_id=?",(int(v),int(user_id)))
+            c.commit(); c.close(); return True
+        except Exception:
+            c.rollback(); c.close(); raise
+
+def npc_record_event(user_id,npc_key,event_key,description,affinity_delta=0):
+    _ensure_world_memory_db(); now=int(time.time()); unique=f"{event_key}:{now//60}" if event_key=="interaction" else str(event_key)
+    with db_lock:
+        c=get_db()
+        try:
+            exists=c.execute("SELECT 1 FROM rpg_npc_events WHERE user_id=? AND npc_key=? AND event_key=?",(int(user_id),str(npc_key),unique)).fetchone()
+            if exists: c.rollback(); c.close(); return False
+            c.execute("INSERT INTO rpg_npc_events(user_id,npc_key,event_key,description,affinity_delta,created_at) VALUES(?,?,?,?,?,?)",(int(user_id),str(npc_key),unique,str(description)[:700],int(affinity_delta),now))
+            c.execute("INSERT INTO rpg_npc_memory(user_id,npc_key,affinity,interactions,last_action,last_seen_at,memory_text) VALUES(?,?,?,1,?,?,?) ON CONFLICT(user_id,npc_key) DO UPDATE SET affinity=rpg_npc_memory.affinity+EXCLUDED.affinity,interactions=rpg_npc_memory.interactions+1,last_action=EXCLUDED.last_action,last_seen_at=EXCLUDED.last_seen_at,memory_text=EXCLUDED.memory_text",(int(user_id),str(npc_key),int(affinity_delta),str(event_key),now,str(description)[:500]))
+            c.commit(); c.close(); return True
+        except Exception:
+            c.rollback(); c.close(); raise
+
+def npc_history_text(user_id,key):
+    _ensure_world_memory_db(); name=WORLD_NPCS.get(key,(key,0))[0]; hist=WORLD_NPC_HISTORY.get(key,'Todavía se sabe muy poco de este viajero.')
+    with db_lock:
+        c=get_db(); mem=c.execute("SELECT * FROM rpg_npc_memory WHERE user_id=? AND npc_key=?",(int(user_id),str(key))).fetchone(); ev=c.execute("SELECT description FROM rpg_npc_events WHERE user_id=? AND npc_key=? ORDER BY created_at DESC,id DESC LIMIT 4",(int(user_id),str(key))).fetchall(); c.close()
+    lines=[f"📖 {name}","",hist]
+    if mem: lines += ["",f"🤝 Afinidad contigo: {int(mem.get('affinity') or 0):+d}",f"🧠 Encuentros recordados: {int(mem.get('interactions') or 0)}"]
+    if ev: lines += ["","💭 Lo que recuerda de ti:"]+[f"• {x['description']}" for x in ev]
+    else: lines += ["","Todavía no tiene una historia personal contigo."]
+    return "\n".join(lines)
+
+def _moral_title(r):
+    score=int(r.get("score") or 0); tier=reputation_tier(score)
+    if int(r.get("merciful") or 0)>=8:return "El Misericordioso"
+    if int(r.get("protector") or 0)>=8:return "Guardián de los Inocentes"
+    if int(r.get("cruel") or 0)>=10:return "El Verdugo"
+    if tier=="Villano":return "La Escoria del Reino"
+    if tier=="Temido":return "Sin Remordimientos"
+    if tier=="Héroe":return "Héroe del Reino"
+    return "—"
+
+def rpg_reputation_profile_line(user_id):
+    r=get_reputation(user_id); title=_moral_title(r); extra=f" · 🎖️ {title}" if title!="—" else ""; return f"⚖️ Reputación: {reputation_tier(r['score'])} ({int(r['score']):+d}){extra}"
+
+def rpg_reputation_text(user_id):
+    r=get_reputation(user_id); score=int(r['score']); tier=reputation_tier(score)
+    traits=[("Misericordioso",r.get('merciful',0)),("Cruel",r.get('cruel',0)),("Codicioso",r.get('greedy',0)),("Protector",r.get('protector',0)),("Honorable",r.get('honorable',0)),("Oportunista",r.get('opportunist',0))]
+    traits=sorted(traits,key=lambda x:int(x[1] or 0),reverse=True); visible=[f"• {n}: {int(v)}" for n,v in traits if int(v or 0)>0][:3]
+    return f"⚖️ REPUTACIÓN\n\nRango: {tier}\nHuella: {score:+d}\nTítulo moral: {_moral_title(r)}\n\nRasgos que el mundo ha observado:\n"+("\n".join(visible) if visible else "• Aún no hay un patrón claro.")+"\n\nTus actos pueden mejorar o empeorar esta fama. El mundo recuerda patrones, no una sola decisión."
+
+def rpg_decisions_text(user_id):
+    _ensure_world_memory_db()
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT description,rep_delta FROM rpg_decision_log WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 12",(int(user_id),)).fetchall(); c.close()
+    return "🧠 HUELLAS DEL MUNDO\n\n"+("\n".join(f"• {r['description']} ({int(r['rep_delta']):+d})" for r in rows) if rows else "Todavía no has dejado decisiones importantes registradas.")
+
+def rpg_richest_text():
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT user_id,display_name,kiwons FROM players ORDER BY kiwons DESC,user_id ASC LIMIT 10").fetchall(); c.close()
+    lines=["💰 LOS MÁS RICOS DE AETERNUS",""]
+    for i,r in enumerate(rows,1): lines.append(f"{i}. {r.get('display_name') or ('Jugador '+str(r['user_id']))} — {int(r['kiwons'] or 0):,} KW"+(" · 👑 Magnate del Reino" if i==1 else ""))
+    return "\n".join(lines)
+
+def _robbery_rules_for_victim(user_id):
+    tier=reputation_tier(get_reputation(user_id)['score'])
+    return {"Héroe":(.50,20000),"Respetado":(.50,20000),"Neutral":(.50,20000),"Dudoso":(.55,22500),"Temido":(.60,25000),"Villano":(.65,30000)}[tier]+(tier,)
+
+def attempt_robbery(chat_id, thief, target):
+    uid=int(thief.get("id") or 0); tid=int(target.get("id") or 0)
+    if not uid or not tid:return False,"No encontré a ese jugador."
+    if uid==tid:return False,"🥷 No puedes robarte a ti mismo. 😂"
+    ensure_player(thief); ensure_player(target); _ensure_world_memory_db(); day=_mx_day_key(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            a=c.execute("SELECT attempts FROM rpg_robbery_daily WHERE user_id=? AND day_key=? FOR UPDATE",(uid,day)).fetchone(); used=int(a['attempts'] or 0) if a else 0
+            if used>=3:c.rollback();c.close();return False,"🥷 Ya usaste tus 3 intentos de robo de hoy."
+            victim=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(tid,)).fetchone(); c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            bal=int(victim['kiwons'] or 0) if victim else 0
+            if bal<=0:c.rollback();c.close();return False,"🥷 Esa persona no tiene Kiwons que puedas robar."
+            rr=c.execute("SELECT score FROM rpg_reputation WHERE user_id=? FOR UPDATE",(tid,)).fetchone(); tier=reputation_tier(int((rr or {}).get('score') or 0)); chance,cap={"Héroe":(.50,20000),"Respetado":(.50,20000),"Neutral":(.50,20000),"Dudoso":(.55,22500),"Temido":(.60,25000),"Villano":(.65,30000)}[tier]
+            if a:c.execute("UPDATE rpg_robbery_daily SET attempts=attempts+1,updated_at=? WHERE user_id=? AND day_key=?",(now,uid,day))
+            else:c.execute("INSERT INTO rpg_robbery_daily(user_id,day_key,attempts,updated_at) VALUES(?,?,1,?)",(uid,day,now))
+            success=random.random()<chance; amount=random.randint(1,min(cap,bal)) if success else 0
+            if success:
+                c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(amount,now,tid)); c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(amount,now,uid))
+                c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(tid,-amount,'robbery_victim',uid,uid,int(chat_id),'Robo',now)); c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(uid,amount,'robbery_success',uid,tid,int(chat_id),'Robo',now))
+            c.commit(); c.close()
+        except Exception:c.rollback();c.close();raise
+    # El robo deja huella; robar a alguien de mala fama pesa menos que atacar a un héroe.
+    penalty={"Héroe":-6,"Respetado":-5,"Neutral":-4,"Dudoso":-3,"Temido":-2,"Villano":-1}[tier]
+    record_world_decision(uid,f"robbery:{day}:{used+1}",f"Intentaste robar a alguien con fama {tier}.",penalty,traits={"greedy":1,"opportunist":1})
+    left=2-used
+    if success:return True,f"🥷 ROBO EXITOSO\n\n{player_display_name(thief)} robó {amount:,} KW.\n⚖️ Fama de la víctima: {tier} · éxito {int(chance*100)}% · tope {cap:,} KW\n🎟️ Intentos restantes: {left}"
+    return True,f"🚨 ROBO FALLIDO\n\nTe descubrieron.\n⚖️ Fama de la víctima: {tier} · éxito {int(chance*100)}%\n🎟️ Intentos restantes: {left}"
+
+def _enemy_threat(enemy):
+    k=str(enemy.get('key') or '')
+    for hint,lvl in RPG_ENEMY_THREAT_HINTS.items():
+        if hint in k:return lvl
+    hp=int(enemy.get('hp') or 1); atk=int(enemy.get('atk') or 1); return max(1,min(60,int((hp/20+atk)/2)))
+
+def _select_enemy_for_level(level,rng=random):
+    level=max(1,int(level)); candidates=[]; weights=[]
+    for e in RPG_ENEMIES:
+        t=_enemy_threat(e); distance=abs(t-level)
+        # Cercanos dominan; encuentros por encima del nivel siguen siendo posibles pero raros.
+        w=max(1,80-distance*5)
+        if t>level+15:w=max(1,w//8)
+        candidates.append(e); weights.append(w)
+    return rng.choices(candidates,weights=weights,k=1)[0]
+
+def rpg_letters_text(user_id):
+    _ensure_world_memory_db(); rep=get_reputation(user_id); tier=reputation_tier(rep['score']); now=int(time.time())
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT * FROM rpg_letters WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 8",(int(user_id),)).fetchall()
+        if not rows:
+            if tier in ('Temido','Villano'): npc,subject,body='valka','Contrato sin preguntas','Tu reputación llegó a oídos de gente que paga por trabajos que otros no aceptarían.'
+            elif tier in ('Héroe','Respetado'): npc,subject,body='aurel','Una petición de auxilio','He oído cómo actúas cuando nadie te obliga. Hay personas que necesitan esa clase de ayuda.'
+            else:npc,subject,body='malkor','Una oportunidad','No eres santo ni monstruo todavía. Eso te hace interesante. Tengo una propuesta.'
+            c.execute("INSERT INTO rpg_letters(user_id,npc_key,subject,body,status,created_at) VALUES(?,?,?,?, 'unread',?)",(int(user_id),npc,subject,body,now)); c.commit(); rows=c.execute("SELECT * FROM rpg_letters WHERE user_id=? ORDER BY id DESC LIMIT 8",(int(user_id),)).fetchall()
+        c.close()
+    return "✉️ CARTAS PRIVADAS\n\n"+"\n\n".join(f"#{r['id']} · {r['subject']}\n{r['body']}" for r in rows)
+
+def rpg_personal_story_text(user_id):
+    _ensure_world_memory_db(); r=get_reputation(user_id); tier=reputation_tier(r['score'])
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT * FROM rpg_story_progress WHERE user_id=?",(int(user_id),)).fetchone()
+        if not row:c.execute("INSERT INTO rpg_story_progress(user_id,chapter,scene,path,updated_at) VALUES(?,1,1,'wanderer',?)",(int(user_id),int(time.time())));c.commit();row={'chapter':1,'scene':1,'path':'wanderer'}
+        c.close()
+    return f"📖 TU HISTORIA EN AETERNUS\n\nCapítulo {int(row['chapter'])} · Escena {int(row['scene'])}\nCamino: {row['path']}\nReputación actual: {tier}\n\nTus decisiones, robos, contratos y relaciones con viajeros quedan registrados. Las próximas escenas y cartas pueden reaccionar a esas huellas."
+
+def _marriage_id_for_user(user_id):
+    r=_marriage_row(user_id,("active",)); return int(r['id']) if r else 0
+
+def marriage_shared_deposit(user_id,inventory_id):
+    _ensure_world_memory_db(); uid=int(user_id); iid=int(inventory_id or 0); mid=_marriage_id_for_user(uid)
+    if not mid:return False,"💞 Necesitas estar casado."
+    if not iid:return False,"Usa /depositaritempareja ID."
+    world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            r=c.execute("SELECT i.*,x.name FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE",(iid,uid,world)).fetchone()
+            if not r:c.rollback();c.close();return False,"No encontré ese objeto."
+            if int(r.get('equipped') or 0) or int(r.get('locked') or 0):c.rollback();c.close();return False,"Desequipa/desbloquea el objeto primero."
+            qty=int(r.get('quantity') or 1); c.execute("INSERT INTO rpg_marriage_shared_inventory(marriage_id,item_key,quantity,serial_number,deposited_by,original_inventory_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(mid,r['item_key'],qty,int(r.get('serial_number') or 0),uid,iid,now,now)); c.execute("DELETE FROM rpg_inventory WHERE id=?",(iid,)); c.commit(); name=r['name']; c.close(); return True,f"💞 {name} ×{qty} quedó en el almacén compartido."
+        except Exception:c.rollback();c.close();raise
+
+def marriage_shared_withdraw(user_id,shared_id):
+    _ensure_world_memory_db(); uid=int(user_id); sid=int(shared_id or 0); mid=_marriage_id_for_user(uid); char=get_active_character(uid)
+    if not mid:return False,"💞 Necesitas estar casado."
+    if not char:return False,"Necesitas personaje activo."
+    if not sid:return False,"Usa /retiraritempareja ID."
+    now=int(time.time()); world=current_rpg_world()
+    with db_lock:
+        c=get_db()
+        try:
+            r=c.execute("SELECT s.*,x.name FROM rpg_marriage_shared_inventory s JOIN rpg_items x ON x.item_key=s.item_key WHERE s.id=? AND s.marriage_id=? FOR UPDATE",(sid,mid)).fetchone()
+            if not r:c.rollback();c.close();return False,"Ese objeto ya no está en el almacén."
+            c.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES(?,?,?,?,?,0,0,?,'marriage_shared',?,?)",(uid,int(char['id']),r['item_key'],int(r.get('serial_number') or 0),int(r.get('quantity') or 1),now,world,int(r.get('deposited_by') or uid))); c.execute("DELETE FROM rpg_marriage_shared_inventory WHERE id=?",(sid,)); c.commit(); name=r['name'];c.close();return True,f"🎒 Retiraste {name} del almacén compartido."
+        except Exception:c.rollback();c.close();raise
+
+def marriage_shared_inventory_text(user_id):
+    _ensure_world_memory_db(); uid=int(user_id); mid=_marriage_id_for_user(uid)
+    if not mid:return "💞 No tienes una pareja en KiwRPG."
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT s.id,s.quantity,s.deposited_by,x.name,x.rarity FROM rpg_marriage_shared_inventory s JOIN rpg_items x ON x.item_key=s.item_key WHERE s.marriage_id=? ORDER BY s.id DESC LIMIT 80",(mid,)).fetchall(); c.close()
+    lines=["💞 ALMACÉN MATRIMONIAL COMPARTIDO","","Los dos pueden depositar y retirar. Cada movimiento cambia propiedad de forma transaccional.",""]
+    if not rows:lines.append("— Vacío —")
+    for r in rows:lines.append(f"#{r['id']} · {r['name']} ×{int(r['quantity'] or 1)} · dejó {_player_name_by_id(int(r['deposited_by']))}")
+    lines += ["","Depositar: /depositaritempareja ID de tu inventario","Retirar: /retiraritempareja ID mostrado aquí"]
+    return "\n".join(lines)
 
 # =========================================================
 # COMANDOS
@@ -12877,6 +13297,38 @@ _RPG_ENEMY_VISUALS = {
     "mimico_hambriento": "a classic treasure-chest mimic monster, wooden chest body, huge toothed mouth and tongue",
     "verdugo_sin_rostro": "a towering faceless executioner in heavy dark hood and brutal medieval armor",
     "bestia_eclipse": "a colossal quadrupedal eclipse beast, black fur, crescent-like horns, cosmic shadow aura",
+    "salteador_camino":"human roadside robber in patched leather, short sword and stolen satchel, wary ambush stance",
+    "bandido_veterano":"scarred veteran human bandit in layered leather armor, battered longsword and red scarf",
+    "verdugo_camino":"brutal masked highway executioner with heavy cleaver, chainmail scraps and trophy belts",
+    "capitan_bandido":"commanding human bandit captain in reinforced dark leather, saber, crossbow and stolen officer cloak",
+    "jefe_bandidos":"large charismatic outlaw chief in mismatched trophy armor, massive axe, wolf-fur mantle and many stolen rings",
+    "mercenario_hierro":"disciplined human mercenary in dark iron brigandine, poleaxe and dented contract shield",
+    "asesino_velado":"slender masked assassin in layered charcoal cloth, twin daggers, poison vials and trailing veil",
+    "cazador_renegado":"rugged renegade hunter with longbow, skinning knife, fur mantle and monster trophies",
+    "gladiador_exiliado":"powerful exiled arena gladiator with scarred bare arms, bronze half-armor, spear and round shield",
+    "caballero_caido":"fallen human knight in tarnished plate, broken heraldry, black cape and chipped greatsword",
+    "cultista_abismo":"hooded abyss cultist in black-violet robes, bone charms and a floating void flame",
+    "invocador_carmesi":"human crimson summoner with ritual staff, glowing sigils and spectral hands emerging around him",
+    "nigromante_errante":"gaunt wandering necromancer in weathered robes, bone staff and pale green soul lantern",
+    "orco_merodeador":"broad green-skinned orc raider in hide and iron scraps, heavy cleaver, tusks and war paint",
+    "orco_campeon":"towering orc champion in black iron armor, huge two-handed axe and ritual scars",
+    "goblin_chaman":"small goblin shaman with crooked antler staff, charms, feathers and sickly green magic",
+    "caudillo_goblin":"armored goblin warlord on foot, oversized stolen crown, jagged saber and scrap-metal shield",
+    "troll_puente":"massive hunched troll with mossy gray skin, stone club and ropes of stolen toll tokens",
+    "lobo_alfa":"huge ash-gray alpha wolf, quadrupedal canine anatomy, scarred muzzle and ember eyes",
+    "arana_reina":"enormous black-purple spider queen, eight legs, armored abdomen and luminous venom fangs",
+    "espectro_vengativo":"violent translucent ghost in torn ancient armor, floating with spectral chains and cold blue fire",
+    "golem_runico":"massive rune golem of dark stone blocks, bright blue carved glyphs and crystal core",
+    "elemental_fuego":"pure fire elemental shaped like a roaring humanoid flame, molten core and ember trail",
+    "elemental_hielo":"jagged ice elemental with crystalline humanoid silhouette, frozen mist and translucent blue core",
+    "demonio_menor":"lean horned lesser demon with charcoal skin, ember cracks, claws and ragged wings",
+    "quimera_salvaje":"feral chimera with lion body, goat head rising from back, serpent tail and torn batlike wings",
+    "wyvern_ceniza":"large ash wyvern with two hind legs and two wing-arms, volcanic scales and smoky breath",
+    "aventurero_rival":"confident human rival adventurer with practical mixed armor, sword, backpack and guild tokens",
+    "espadachin_errante":"wandering human swordsman in travel cloak, elegant longsword and weathered scabbard",
+    "arquera_frontera":"human frontier archer in layered leather, recurved bow, hood and multiple field quivers",
+    "mago_duelista":"human battle mage in fitted arcane coat, wand-sword and compact rotating spell sigils",
+    "paladin_desterrado":"exiled human paladin in scratched silver plate, broken sun emblem, tower shield and warhammer",
 }
 
 
@@ -13043,8 +13495,9 @@ def _rpg_ai_asset_info(asset_key):
         camera,lighting,scene=_rpg_art_variant("pet_"+key)
         visual=_RPG_PET_VISUALS.get(key,f"a unique collectible fantasy companion named {cfg.get('name',key)}, visually themed around {cfg.get('rarity','fantasy')} rarity")
         return {"canonical":f"pet:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":scene,"camera":camera,"lighting":lighting}
-    if kind=="npc" and key=="malkor":
-        return {"canonical":"npc:malkor","kind":kind,"key":key,"name":"Malkor","visual":"Malkor, lean middle-aged traveling merchant with sharp amber eyes, dark auburn hair, layered charcoal-and-burgundy merchant coat, leather satchel overflowing with strange relics, rings and keys, one gloved hand presenting a suspicious glowing artifact, sly knowing half-smile","scene":"cramped night bazaar stall packed with hanging charms, potion bottles and relic crates","camera":"waist-up three-quarter merchant portrait","lighting":"warm lantern light against cool blue night"}
+    if kind=="npc" and key in WORLD_NPCS:
+        visual,scene=WORLD_NPC_VISUALS.get(key,(f"distinctive dark fantasy traveler named {WORLD_NPCS[key][0]}","busy fantasy crossroads"))
+        return {"canonical":f"npc:{key}","kind":kind,"key":key,"name":WORLD_NPCS[key][0],"visual":visual,"scene":scene,"camera":"three-quarter environmental character portrait, full readable silhouette","lighting":"cinematic natural fantasy lighting"}
     if kind in ("event","eventboss"):
         if key=="opening_2026": cfg=_opening_cfg()
         else:
@@ -13228,6 +13681,34 @@ def _queue_enemy_art_generation(asset_key):
         _RPG_AI_IMAGE_PENDING.add(canonical)
     executor.submit(_background_generate_enemy_art,canonical)
     return True
+
+def _background_generate_universal_art(asset_key):
+    canonical=str(asset_key or "").strip().lower()
+    try:
+        info=_rpg_ai_asset_info(canonical)
+        if not info or _rpg_asset_get(f"img:{canonical}"): return
+        lock=_rpg_ai_lock(canonical)
+        with lock:
+            if _rpg_asset_get(f"img:{canonical}"): return
+            raw,ctype=cloudflare_generate_rpg_asset_image(canonical)
+            data,fid=_upload_generated_enemy_art(OWNER_TELEGRAM_ID,info['key'],raw,ctype)
+            _rpg_asset_set(f"img:{canonical}",fid)
+            mid=int(((data.get("result") or {}).get("message_id") or 0))
+            if mid:
+                try: delete_message(OWNER_TELEGRAM_ID,mid)
+                except Exception: logger.warning("No pude borrar staging de arte IA %s",canonical)
+    except Exception as e:
+        logger.exception("Falló generación background universal %s: %s",canonical,e)
+    finally:
+        with _RPG_AI_IMAGE_LOCKS_GUARD: _RPG_AI_IMAGE_PENDING.discard(canonical)
+
+def _queue_universal_art_generation(asset_key):
+    canonical=str(asset_key or "").strip().lower()
+    if not _rpg_ai_asset_info(canonical) or _rpg_asset_get(f"img:{canonical}"): return False
+    with _RPG_AI_IMAGE_LOCKS_GUARD:
+        if canonical in _RPG_AI_IMAGE_PENDING: return False
+        _RPG_AI_IMAGE_PENDING.add(canonical)
+    executor.submit(_background_generate_universal_art,canonical); return True
 
 def send_photo_bytes(chat_id, raw, caption="", message_thread_id=None, content_type="image/png"):
     payload = {"chat_id": str(int(chat_id))}
@@ -13981,7 +14462,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             "🧙 Clases":[f"class:{k}" for k in ("guerrero","mago","picaro","paladin","arquero","the_cleaner")],
             "👹 Bosses":[f"boss:{k}" for k in RPG_BOSSES.keys()],
             "🐾 Mascotas":[f"pet:{k}" for k in RPG_PETS.keys()],
-            "🧑 NPC":["npc:malkor"],
+            "🧑 NPC":[f"npc:{k}" for k in WORLD_NPCS.keys()],
             "🎊 Eventos":["event:opening_2026"]+[f"event:event_{y}_{m:02d}" for y in (2026,2027,2028) for m in range(1,13)],
             "👑 Bosses de evento":["eventboss:opening_2026"]+[f"eventboss:event_{y}_{m:02d}" for y in (2026,2027,2028) for m in range(1,13)],
         }
@@ -14089,8 +14570,13 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         ensure_player(user)
         ensure_owner_secret_character(user)
         register_rpg_auto_chat(chat_id, chat.get("type"), message.get("message_thread_id"))
+        reserved,enc_used=_reserve_manual_encounter(user.get("id"))
+        if not reserved:
+            send_message(chat_id,"💤 Ya agotaste tus 15 encuentros de hoy. Los encuentros automáticos del Mundo Vivo no consumen este límite."); return True
         ok, result = start_rpg_encounter(chat_id, user.get("id"))
+        if not ok: _refund_manual_encounter(user.get("id"))
         if ok:
+            result += f"\n\n🎟️ Encuentros de hoy: {enc_used}/15"
             char=get_active_character(user.get("id"))
             battle=get_rpg_battle(chat_id, user.get("id"))
             kb=rpg_battle_keyboard(char["class_name"],0,0,user.get("id"))
@@ -14315,7 +14801,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             f"Kiwons: {balance:,} KW\n"
             f"{marriage_profile_line(user_id)}\n"
             f"{clan_profile_line(user_id)}\n"
-            f"{chronicles_profile_title_line(user_id)}\n\n"
+            f"{chronicles_profile_title_line(user_id)}\n"
+            f"{rpg_reputation_profile_line(user_id)}\n\n"
             f"{rpg_text}"
         )
         return True
@@ -14424,6 +14911,29 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not target or not target.get("id"):
             send_message(chat_id,"🥷 Uso: responde al mensaje de alguien con /robo o usa /robo @usuario."); return True
         ok,msg2=attempt_robbery(chat_id,user,target); send_message(chat_id,msg2); return True
+
+    if command in ("/reputacion", "/fama"):
+        send_message(chat_id,rpg_reputation_text(user_id)); return True
+
+    if command in ("/decisiones", "/recuerdos"):
+        send_message(chat_id,rpg_decisions_text(user_id)); return True
+
+    if command in ("/ricos", "/rankingdinero"):
+        send_message(chat_id,rpg_richest_text()); return True
+
+    if command in ("/cartas", "/correo"):
+        send_message(chat_id,rpg_letters_text(user_id)); return True
+
+    if command in ("/historiapersonal", "/aventura"):
+        send_message(chat_id,rpg_personal_story_text(user_id)); return True
+
+    if command in ("/depositaritempareja", "/guardarpareja"):
+        parts=str(text or '').split(); iid=int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 0
+        ok,msg2=marriage_shared_deposit(user_id,iid); send_message(chat_id,msg2); return True
+
+    if command in ("/retiraritempareja", "/sacarpareja"):
+        parts=str(text or '').split(); sid=int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 0
+        ok,msg2=marriage_shared_withdraw(user_id,sid); send_message(chat_id,msg2); return True
 
     if command in ("/peleadados", "/duelodados"):
         user=message.get("from",{}); wager=parse_positive_amount(text)
@@ -15476,6 +15986,9 @@ def process_update(
         except Exception: logger.exception("Error observando Misterios del Mundo")
 
         if handle_chronicles_secret_text(message, text):
+            return
+
+        if handle_quick_mission_voice(message):
             return
 
         if handle_quick_mission_text(message, text):

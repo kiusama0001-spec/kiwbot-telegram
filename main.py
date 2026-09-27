@@ -7098,8 +7098,9 @@ def _pvp_hidden_ability():
 def _duel_ability_for_mode(user_id, class_name, key, duel_mode):
     """Ranked usa potencia competitiva Nv.1; amistoso usa la técnica real del jugador."""
     if str(duel_mode)=="ranked":
+        # Hidden Blade está prohibida en /duelopvp clasificatorio: todos compiten con 3 habilidades.
         if str(key)=="hidden_blade":
-            return _pvp_hidden_ability() if has_special_technique(user_id,'hidden_blade') else None
+            return None
         return _pvp_base_ability(class_name,key)
     return _rpg_get_ability_for_user(user_id,class_name,key)
 
@@ -7150,7 +7151,8 @@ def _pvp_keyboard(duel, viewer_turn=True):
     rows=[
       [{'text':basic,'callback_data':f"pvp_atk:{duel['id']}:{abilities[0]['key']}"}, {'text':st,'callback_data':f"pvp_atk:{duel['id']}:{abilities[1]['key']}"}],
       [{'text':ut,'callback_data':f"pvp_atk:{duel['id']}:{abilities[2]['key']}"}]]
-    if has_special_technique(turn,'hidden_blade'):
+    # Hidden Blade solo existe en /duelo amistoso. En /duelopvp clasificatorio se prohíbe por equilibrio (3 vs 3).
+    if mode!='ranked' and _technique_owned(turn,char['class_name'],'hidden_blade'):
         hb=_duel_ability_for_mode(turn,char['class_name'],'hidden_blade',mode); htxt=f"🗡️ Hidden Blade · ×{float(hb['power']):.2f}" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
         rows.append([{'text':htxt,'callback_data':(f"pvp_atk:{duel['id']}:hidden_blade" if hcd<=0 else f"pvp_wait:{duel['id']}:hidden_blade:{hcd}")}])
     rows.append([{'text':defend_text,'callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}])
@@ -7270,7 +7272,14 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
             conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_defending=1,{pref}_defends_used={pref}_defends_used+1,{pref}_special_cd=?,{pref}_ultimate_cd=?,{pref}_hidden_cd=?,turn_user_id=?,updated_at=? WHERE id=?",(nsc,nuc,nhc,other,int(time.time()),int(duel_id))); conn.commit(); conn.close()
             nd=_pvp_get(duel_id); remaining=max(0,3-int(nd[pref+'_defends_used']))
             send_message(d['chat_id'],f"🛡️ {_pvp_name(uid)} adopta una postura defensiva. ({remaining}/3 restantes)\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
-        mode=str(d.get('duel_mode') or 'friendly'); ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
+        mode=str(d.get('duel_mode') or 'friendly')
+        # Hidden Blade está totalmente prohibida en el PvP clasificatorio.
+        # En /duelo amistoso sigue disponible solo para quien la haya desbloqueado.
+        if ability_key=='hidden_blade' and mode=='ranked':
+            conn.rollback(); conn.close(); return False,'🏆 Hidden Blade no está permitida en PvP clasificatorio.'
+        if ability_key=='hidden_blade' and not _technique_owned(uid,char['class_name'],'hidden_blade'):
+            conn.rollback(); conn.close(); return False,'🗡️ No tienes Hidden Blade desbloqueada.'
+        ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
         if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
         if ability_key=='hidden_blade' and hcd>0: conn.rollback(); conn.close(); return False,f"⏳ Hidden Blade estará disponible en {hcd} turnos."
         if ab.get('special') and scd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {scd} turnos."
@@ -7282,7 +7291,13 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         # Revalidación DESPUÉS del dado: otro callback pudo consumir el turno mientras Telegram respondía.
         if not d or d['status']!='active': conn.rollback(); conn.close(); return False,'Ese duelo ya no está activo.'
         if int(d['turn_user_id'] or 0)!=uid: conn.rollback(); conn.close(); return False,'Ese turno ya fue consumido.'
-        is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); mode=str(d.get('duel_mode') or 'friendly'); ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
+        is_ch=uid==int(d['challenger_id']); cid=int(d['challenger_character_id'] if is_ch else d['opponent_character_id']); oid=int(d['opponent_character_id'] if is_ch else d['challenger_character_id']); char=_pvp_char(cid); opp=_pvp_char(oid); mode=str(d.get('duel_mode') or 'friendly')
+        # Revalidar también después del dado para evitar callbacks manipulados o cambios concurrentes.
+        if ability_key=='hidden_blade' and mode=='ranked':
+            conn.rollback(); conn.close(); return False,'🏆 Hidden Blade no está permitida en PvP clasificatorio.'
+        if ability_key=='hidden_blade' and not _technique_owned(uid,char['class_name'],'hidden_blade'):
+            conn.rollback(); conn.close(); return False,'🗡️ No tienes Hidden Blade desbloqueada.'
+        ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
         if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
         duel_level=_pvp_equal_level(char,opp); eff=_duel_stats_for_mode(char,duel_level,mode); oe=_duel_stats_for_mode(opp,duel_level,mode)
         target_hp=int(d['opponent_hp'] if is_ch else d['challenger_hp']); defending=int(d['opponent_defending'] if is_ch else d['challenger_defending']); dmg=0; heal=0

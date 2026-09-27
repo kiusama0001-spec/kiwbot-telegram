@@ -10118,12 +10118,77 @@ def _dungeon_member_name(uid):
     except Exception: return f'Jugador {uid}'
 
 
+def _dungeon_party_status(dungeon_id):
+    """Devuelve las vidas actuales/máximas del grupo con pocas consultas.
+
+    El HP actual vive en ``characters.hp``. Para el máximo reconstruimos sólo
+    los bonos que pueden modificar HP (equipo/forja/encanto, Los Primeros y
+    Poción de Vitalidad), evitando llamar ``effective_character_stats`` una
+    vez por jugador y mantener rápidos los turnos cooperativos.
+    """
+    did=int(dungeon_id or 0)
+    if did<=0: return [],{}
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        members=conn.execute("""SELECT m.user_id,m.joined_at,c.id AS character_id,c.name AS character_name,c.hp,c.max_hp,
+                                      COALESCE(NULLIF(p.display_name,''),c.name,CAST(m.user_id AS TEXT)) AS display_name
+                               FROM rpg_dungeon_party_members m
+                               LEFT JOIN characters c ON c.user_id=m.user_id AND c.is_active=1
+                               LEFT JOIN players p ON p.user_id=m.user_id
+                               WHERE m.dungeon_id=? AND m.completed=0
+                               ORDER BY m.joined_at,m.user_id""",(did,)).fetchall()
+        if not members:
+            conn.close(); return [],{}
+        char_ids=[int(r['character_id']) for r in members if r.get('character_id')]
+        user_ids=[int(r['user_id']) for r in members]
+        equip_rows=[]; founder_rows=[]; potion_rows=[]
+        if char_ids:
+            marks=','.join('?' for _ in char_ids)
+            equip_rows=conn.execute(f"""SELECT i.character_id,x.hp_bonus,x.equip_slot,i.forge_level,i.enchant_hp
+                                         FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+                                         WHERE i.equipped=1 AND i.character_id IN ({marks})""",tuple(char_ids)).fetchall()
+        if user_ids:
+            marks=','.join('?' for _ in user_ids)
+            founder_rows=conn.execute(f"SELECT user_id FROM rpg_chronicle_titles WHERE title_key='los_primeros' AND user_id IN ({marks})",tuple(user_ids)).fetchall()
+            potion_rows=conn.execute(f"""SELECT user_id,magnitude FROM rpg_combat_potion_effects
+                                          WHERE effect_key='hp' AND expires_at>? AND user_id IN ({marks})""",(now,*user_ids)).fetchall()
+        conn.close()
+
+    equip_hp={}
+    for r in equip_rows:
+        cid=int(r['character_id']); forge=_forge_level_bonus(r.get('equip_slot'),r.get('forge_level') or 0)
+        equip_hp[cid]=equip_hp.get(cid,0)+int(r.get('hp_bonus') or 0)+int(forge.get('hp') or 0)+int(r.get('enchant_hp') or 0)
+    founders={int(r['user_id']) for r in founder_rows}
+    potion_hp={}
+    for r in potion_rows:
+        uid=int(r['user_id']); potion_hp[uid]=max(potion_hp.get(uid,0),int(r.get('magnitude') or 0))
+
+    lines=[]; names={}
+    for r in members:
+        uid=int(r['user_id']); name=str(r.get('display_name') or r.get('character_name') or f'Jugador {uid}')
+        names[uid]=name
+        if not r.get('character_id'):
+            lines.append(f"{_player_color_marker(uid)} {name} — sin personaje activo")
+            continue
+        cid=int(r['character_id']); base_max=int(r.get('max_hp') or 1)
+        pre_max=base_max+equip_hp.get(cid,0)+(30 if uid in founders else 0)
+        max_hp=pre_max+int(round(pre_max*potion_hp.get(uid,0)/100.0))
+        hp=max(0,int(r.get('hp') or 0)); state=' 💀' if hp<=0 else ''
+        lines.append(f"{_player_color_marker(uid)} {name} ❤️ {hp}/{max(1,max_hp)}{state}")
+    return lines,names
+
+
 def dungeon_card(dungeon):
     if not dungeon: return "🏰 La mazmorra ya no está activa."
-    turn=int(dungeon.get('turn_user_id') or 0); tname=_dungeon_member_name(turn) if turn else 'Esperando aventureros'
+    turn=int(dungeon.get('turn_user_id') or 0)
+    party_lines,names=_dungeon_party_status(int(dungeon.get('id') or 0))
+    tname=names.get(turn) or (_dungeon_member_name(turn) if turn else 'Esperando aventureros')
+    party_block=("\n\n👥 AVENTUREROS\n"+"\n".join(party_lines)) if party_lines else ""
     return (f"🏰 {dungeon['dungeon_name']}\n🚪 Sala {int(dungeon.get('room') or 1)}/{RPG_DUNGEON_ROOMS}\n\n"
             f"⚔️ {dungeon.get('enemy_name') or 'Esperando enemigo'}\n"
-            f"❤️ {max(0,int(dungeon.get('enemy_hp') or 0))}/{max(1,int(dungeon.get('enemy_max_hp') or 1))} HP\n\n"
+            f"❤️ {max(0,int(dungeon.get('enemy_hp') or 0))}/{max(1,int(dungeon.get('enemy_max_hp') or 1))} HP"
+            f"{party_block}\n\n"
             f"🎯 Turno: {tname}\n👥 Todos atacan al MISMO enemigo. Espera tu turno.\n⏱️ Tienes 30 segundos cuando te toque; si no actúas, KiwBot te echa de la sala. 😂")
 
 

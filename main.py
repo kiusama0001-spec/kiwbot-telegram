@@ -4619,23 +4619,16 @@ def chronicles_achievements_text(user_id):
 
 
 def chronicles_titles_text_keyboard(user_id):
-    """Selector manual de títulos desbloqueados. El título activo es cosmético y puede cambiarse cuando se quiera."""
     with db_lock:
         conn=get_db(); rows=conn.execute("SELECT title_key FROM rpg_chronicle_titles WHERE user_id=? ORDER BY unlocked_at ASC",(int(user_id),)).fetchall(); prof=conn.execute("SELECT equipped_title FROM rpg_chronicle_profile WHERE user_id=?",(int(user_id),)).fetchone(); conn.close()
-    owned=[str(r['title_key']) for r in rows]; equipped=str((prof or {}).get('equipped_title') or '')
-    names={v[2]:v[3] for v in CHRONICLES_ACHIEVEMENTS.values()}; names.update(CHRONICLES_SPECIAL_TITLES)
-    lines=["🎖️ TÍTULOS", "", "Elige cuál quieres mostrar en tu perfil. Puedes cambiarlo cuando quieras.", "✨ = equipado actualmente · 🎖️ = disponible"]
+    owned=[r['title_key'] for r in rows]; equipped=str((prof or {}).get('equipped_title') or '')
+    names={v[2]:v[3] for v in CHRONICLES_ACHIEVEMENTS.values()}; names.update(CHRONICLES_SPECIAL_TITLES); lines=["🎖️ TÍTULOS\n"]
     kb=[]
-    if not owned:
-        lines.extend(["", "Todavía no has desbloqueado títulos."])
+    if not owned: lines.append("Todavía no has desbloqueado títulos.")
     for k in owned:
-        n=names.get(k,k)
-        lines.append(f"{'✨' if k==equipped else '▫️'} {n}")
-        kb.append([{"text":('✨ Equipado · ' if k==equipped else '🎖️ Equipar · ')+n,"callback_data":"chron:title:"+k}])
-    if equipped:
-        kb.append([{"text":"❌ Quitar título","callback_data":"chron:title:none"}])
-    kb.append([{"text":"🔄 Actualizar","callback_data":"chron:titles"},{"text":"⬅️ Crónicas","callback_data":"chron:home"}])
-    return "\n".join(lines),{"inline_keyboard":kb}
+        n=names.get(k,k); lines.append(f"{'✨' if k==equipped else '▫️'} {n}"); kb.append([{"text":('✨ ' if k==equipped else '🎖️ ')+n,"callback_data":"chron:title:"+k}])
+    if equipped: kb.append([{"text":"❌ Quitar título","callback_data":"chron:title:none"}])
+    return "\n".join(lines),{"inline_keyboard":kb} if kb else None
 
 
 def chronicles_equip_title(user_id,title_key):
@@ -5286,17 +5279,30 @@ HIDDEN_BLADE_ABILITY = {
     "special":True, "cooldown":3
 }
 
+_special_techniques_ready=False
+_special_techniques_ready_lock=RLock()
+
 def _ensure_special_techniques_table():
-    with db_lock:
-        conn=get_db()
-        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_special_techniques(
-            user_id BIGINT NOT NULL,
-            technique_key TEXT NOT NULL,
-            unlocked_at BIGINT NOT NULL,
-            source TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY(user_id,technique_key)
-        )""")
-        conn.commit(); conn.close()
+    # CREATE TABLE IF NOT EXISTS no debe ejecutarse en cada render de combate.
+    # Una vez verificada por proceso, las consultas de Hidden Blade van directo
+    # al SELECT y se ahorra un viaje completo a PostgreSQL por tarjeta.
+    global _special_techniques_ready
+    if _special_techniques_ready: return
+    with _special_techniques_ready_lock:
+        if _special_techniques_ready: return
+        with db_lock:
+            conn=get_db()
+            try:
+                conn.execute("""CREATE TABLE IF NOT EXISTS rpg_special_techniques(
+                    user_id BIGINT NOT NULL,
+                    technique_key TEXT NOT NULL,
+                    unlocked_at BIGINT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(user_id,technique_key)
+                )""")
+                conn.commit(); conn.close(); _special_techniques_ready=True
+            except Exception:
+                conn.rollback(); conn.close(); raise
 
 def has_special_technique(user_id,key):
     _ensure_special_techniques_table()
@@ -6541,9 +6547,19 @@ PVP_EXPIRE_SECONDS = 300
 PVP_DICE_MULT = {1:0.0, 2:1.00, 3:1.10, 4:1.20, 5:1.35, 6:1.60}
 
 def _pvp_name(uid):
+    # Nombre muy consultado en PvP/Boss. Un TTL corto evita viajes repetidos a
+    # PostgreSQL durante cada turno sin convertir el caché en fuente de verdad.
+    uid=int(uid); key=("display_name",uid); now=time.monotonic()
+    with _cache_lock:
+        cached=_runtime_cache["users"].get(key)
+        if cached and now-cached[1] < CACHE_TTL_SECONDS:
+            return cached[0]
     with db_lock:
-        conn=get_db(); row=conn.execute("SELECT display_name FROM players WHERE user_id=?",(int(uid),)).fetchone(); conn.close()
-    return (row or {}).get("display_name") or f"Jugador {uid}"
+        conn=get_db(); row=conn.execute("SELECT display_name FROM players WHERE user_id=?",(uid,)).fetchone(); conn.close()
+    name=(row or {}).get("display_name") or f"Jugador {uid}"
+    with _cache_lock:
+        _runtime_cache["users"][key]=(name,now)
+    return name
 
 def _pvp_active_for_user(chat_id, uid):
     with db_lock:
@@ -8183,7 +8199,11 @@ def _boss_card(b,user_id=None):
         conn=get_db(); rows=conn.execute("SELECT p.user_id,p.damage,p.defeated,p.defeated_until,p.hp,p.max_hp,COALESCE(NULLIF(pl.display_name,''),CAST(p.user_id AS TEXT)) display_name FROM rpg_boss_participants p LEFT JOIN players pl ON pl.user_id=p.user_id WHERE p.boss_id=? ORDER BY p.damage DESC",(int(b['id']),)).fetchall(); conn.close()
     phase=_boss_phase(b); left=max(0,int(b['expires_at'])-int(time.time())); mins=left//60
     turn=int(b.get('turn_user_id') or 0)
-    lines=[f"👹 BOSS — {b['name']}",f"⭐ Nv. {b['level']} · Fase {phase}/3",f"❤️ {b['hp']}/{b['max_hp']}",f"⚔️ ATK {b['atk']} · 🛡️ DEF {b['defense']}","",f"🎯 Turno: {_player_color_marker(turn)} {_boss_turn_name(turn)}" if turn else "🎯 Turno: esperando aventureros", "👥 Un solo Boss, un solo HP y un turno a la vez.", "⏱️ Cada aventurero tiene 30 segundos para actuar. Si no, huye de la sala automáticamente."]
+    # La consulta de participantes ya trae display_name; reutilízalo para no
+    # hacer otra consulta sólo para pintar el nombre del turno.
+    turn_row=next((r for r in rows if int(r['user_id'])==turn),None) if turn else None
+    turn_name=(turn_row.get('display_name') if turn_row else None) or (_boss_turn_name(turn) if turn else '')
+    lines=[f"👹 BOSS — {b['name']}",f"⭐ Nv. {b['level']} · Fase {phase}/3",f"❤️ {b['hp']}/{b['max_hp']}",f"⚔️ ATK {b['atk']} · 🛡️ DEF {b['defense']}","",f"🎯 Turno: {_player_color_marker(turn)} {turn_name}" if turn else "🎯 Turno: esperando aventureros", "👥 Un solo Boss, un solo HP y un turno a la vez.", "⏱️ 30 segundos para actuar. Si no, KiwBot te echa por cobarde. 😂"]
     if user_id is not None:
         mine=next((r for r in rows if int(r['user_id'])==int(user_id)),None)
         if mine:
@@ -8191,7 +8211,8 @@ def _boss_card(b,user_id=None):
             cname=char['class_name'] if char else 'Personaje'
             now=int(time.time()); until=int(mine.get('defeated_until') or 0)
             state=' 💀 CAÍDO' if int(mine['defeated']) else ''
-            lines += ["", "⚔️ TU ESTADO", f"{_player_color_marker(user_id)} {_pvp_name(user_id)} — {cname}{state}", f"❤️ {mine['hp']}/{mine['max_hp']}"]
+            mine_name=mine.get('display_name') or _pvp_name(user_id)
+            lines += ["", "⚔️ TU ESTADO", f"{_player_color_marker(user_id)} {mine_name} — {cname}{state}", f"❤️ {mine['hp']}/{mine['max_hp']}"]
             pet=_equipped_pet(user_id)
             if pet:
                 pet_level=max(1,int(pet.get('level',1)))
@@ -8466,14 +8487,57 @@ def _boss_reward_all(b):
                 print(f"[BOSS DROP] DM falló user={uid} boss={b.get('boss_key')}: {exc}")
     return len(rows)
 
+def _boss_claim_turn_for_action(boss_id,user_id):
+    """Atomically claims the current turn before network/DB-heavy combat work.
+
+    The timeout worker uses the same boss row lock. Whichever arrives first wins:
+    either the 30 s timeout expels the player, or this refreshes the turn clock
+    and guarantees the accepted action is not expelled halfway through.
+    """
+    bid=int(boss_id); uid=int(user_id); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            b=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(bid,)).fetchone()
+            if not b or b['status']!='active': conn.rollback(); conn.close(); return False,"Ese Boss ya terminó o expiró."
+            if int(b.get('turn_user_id') or 0)!=uid:
+                cur=int(b.get('turn_user_id') or 0); conn.rollback(); conn.close(); return False,f"⏳ Aún no es tu turno. Ahora juega {_boss_turn_name(cur)}."
+            p=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND user_id=? FOR UPDATE",(bid,uid)).fetchone()
+            if not p or int(p.get('defeated') or 0) or int(p.get('hp') or 0)<=0:
+                conn.rollback(); conn.close(); return False,"⏱️ Tu turno ya venció y saliste de la sala. Pulsa VOLVER AL COMBATE si el Boss sigue activo."
+            conn.execute("UPDATE rpg_boss_instances SET turn_started_at=? WHERE id=?",(now,bid))
+            conn.commit(); conn.close(); return True,''
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def _queue_boss_mission_events(user_id,damage):
+    """Saca el progreso de misiones del camino crítico del turno del Boss."""
+    uid=int(user_id); dmg=max(0,int(damage or 0))
+    if dmg<=0: return
+    def _work():
+        try:
+            mission_event(uid,"boss_damage",dmg)
+            mission_event(uid,"boss_hits",1)
+        except Exception:
+            logger.exception("Error actualizando misiones de Boss en segundo plano")
+    try: executor.submit(_work)
+    except Exception: _work()
+
+
 def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
-    # El dado y el daño forman una sola acción lógica. Evita dos ataques por doble clic.
+    # Todo el Boss comparte lock: evita doble turno y mantiene el HP global consistente.
+    # Medimos el camino crítico para detectar latencia real de Render/Supabase en logs.
     lock=_user_action_lock(_boss_action_locks,_boss_action_locks_guard,boss_id,0)
     if not lock.acquire(blocking=False):
-        return False,"⏳ Tu acción anterior todavía se está resolviendo."
+        return False,"⏳ El turno anterior todavía se está resolviendo."
+    started=time.monotonic()
     try:
         return _boss_action_impl(chat_id,user_id,boss_id,ability_key=ability_key,defend=defend)
     finally:
+        elapsed=time.monotonic()-started
+        if elapsed>=1.25:
+            logger.warning("Boss turn lento: boss=%s user=%s %.3fs",boss_id,user_id,elapsed)
         lock.release()
 
 def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
@@ -8493,8 +8557,11 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         return False,"♻️ Ya terminaste de recuperarte. Pulsa VOLVER AL COMBATE."
     char=get_active_character(user_id)
     if not char or int(char['id'])!=int(p['character_id']): return False,"No puedes cambiar de personaje durante el Boss."
+    eff=None; mission_dmg=0
     if defend:
         if int(p['defends_used'])>=3: return False,"🛡️ Ya usaste tus 3 defensas contra este Boss."
+        claimed,why=_boss_claim_turn_for_action(boss_id,user_id)
+        if not claimed: return False,why
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET defending=1,defends_used=defends_used+1,special_cd=GREATEST(0,special_cd-1),ultimate_cd=GREATEST(0,ultimate_cd-1),hidden_blade_cd=GREATEST(0,hidden_blade_cd-1),last_action_at=? WHERE boss_id=? AND user_id=?",(int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
         player_text=f"🛡️ {_pvp_name(user_id)} se prepara para resistir."
@@ -8504,8 +8571,13 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if ability_key=='hidden_blade' and int(p.get('hidden_blade_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(p.get('hidden_blade_cd') or 0)} turnos."
         if ability_key!='hidden_blade' and ab.get('special') and int(p['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['special_cd']} turnos."
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
-        dr=send_dice(chat_id,'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
-        if not roll: return False,"Telegram no devolvió el dado. Intenta el ataque otra vez."
+        claimed,why=_boss_claim_turn_for_action(boss_id,user_id)
+        if not claimed: return False,why
+        # Boss FAST TURN: el dado nativo de Telegram añade una llamada de red y
+        # una animación que hace sentir cada turno mucho más lento. El Boss usa
+        # RNG local seguro para gameplay y muestra el resultado como 🎲 N en la
+        # misma tarjeta final. PvE/PvP conservan sus dados nativos.
+        roll=random.randint(1,6)
         eff=_boss_stats_for(user_id,char); dmg=0; heal=0; boss_was_defending=int(b.get('defending') or 0)
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
@@ -8519,13 +8591,16 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         with db_lock:
             conn=get_db(); fresh=conn.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(int(boss_id),)).fetchone()
             if not fresh or fresh['status']!='active': conn.rollback(); conn.close(); return False,"El Boss ya fue derrotado."
-            nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(p['special_cd'])-1); uc=max(0,int(p['ultimate_cd'])-1); hc=max(0,int(p.get('hidden_blade_cd') or 0)-1)
+            if int(fresh.get('turn_user_id') or 0)!=int(user_id): conn.rollback(); conn.close(); return False,"⏱️ Tu turno ya cambió antes de resolverse el ataque."
+            livep=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND user_id=? FOR UPDATE",(int(boss_id),int(user_id))).fetchone()
+            if not livep: conn.rollback(); conn.close(); return False,"⏱️ Tu turno venció y ya no estás dentro del Boss."
+            nh=max(0,int(fresh['hp'])-dmg); phase=_boss_phase(dict(fresh)|{'hp':nh}); sc=max(0,int(livep['special_cd'])-1); uc=max(0,int(livep['ultimate_cd'])-1); hc=max(0,int(livep.get('hidden_blade_cd') or 0)-1)
             old_phase=int(fresh['phase'])
             boss_phase_change=(nh>0 and phase>old_phase)
             if ability_key=='hidden_blade': hc=int(ab.get('cooldown',3))
             elif ab.get('special'): sc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
-            ownhp=min(int(p['max_hp']),int(p['hp'])+heal)
+            ownhp=min(int(livep['max_hp']),int(livep['hp'])+heal)
             counter=0
             if fresh['boss_key']=='angel_caido' and boss_was_defending and dmg>0 and nh>0:
                 counter=max(1,int(round(dmg*.15)))
@@ -8538,8 +8613,7 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,hidden_blade_cd=?,defeated=?,defeated_until=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,hc,1 if ownhp<=0 else 0,(int(time.time())+BOSS_RECOVERY_SECONDS) if ownhp<=0 else 0,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
-        mission_event(user_id,"boss_damage",dmg)
-        if dmg>0: mission_event(user_id,"boss_hits",1)
+        mission_dmg=int(dmg)
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
         if counter:
             player_text+=f"\n🪽 CONTRAATAQUE — El Ángel Caído devuelve {counter} de daño."
@@ -8598,12 +8672,23 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
                         except Exception: pass
                 extra=f"\n🔥 Will peleó a su lado. Hidden Blade fue entregada a {unlocked} aventurero(s) que aún no la tenían."
             send_message(chat_id,player_text+f"\n\n☠️ {dead['name']} HA SIDO DERROTADO\n🏆 Golpe final: {_pvp_name(user_id)}\n🎁 Recompensas entregadas a {n} participantes."+extra)
+            _queue_boss_mission_events(user_id,mission_dmg)
             if char['class_name']=='The Cleaner' and ability_key=='one_winged_angel': send_one_winged_angel_finisher(chat_id)
             cleanup_combat_dice(chat_id,user_id)
             return True,''
     # IA decide DESPUÉS de la acción del jugador y antes de resolver su propio resultado.
     b=_boss_active(chat_id); p=_boss_participant(boss_id,user_id)
     if not b: return True,''
+    # Si el contraataque del Ángel Caído derribó al jugador, ese contraataque YA
+    # fue la respuesta del Boss. Evita una segunda acción de IA contra 0 HP.
+    if p and (int(p.get('defeated') or 0) or int(p.get('hp') or 0)<=0):
+        next_uid=_boss_set_next_turn(boss_id,user_id)
+        b=_boss_active(chat_id) or b
+        view_uid=int(next_uid or user_id)
+        send_message(chat_id,player_text+"\n\n🪽 El contraataque cerró este turno. El Boss no ejecuta un segundo golpe.\n\n"+_boss_card(b,view_uid),reply_markup=_boss_keyboard(b,view_uid))
+        _queue_boss_mission_events(user_id,mission_dmg)
+        cleanup_combat_dice(chat_id,user_id)
+        return True,''
     choice=_boss_ai_choice(b,p); ai_text=''
     if choice=='defend':
         with db_lock:
@@ -8617,7 +8702,8 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
             conn=get_db(); conn.execute("UPDATE rpg_boss_instances SET hp=?,heals_used=heals_used+1 WHERE id=?",(nh,int(boss_id))); conn.commit(); conn.close()
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
-        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); eff=_boss_stats_for(user_id,char); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        if eff is None: eff=_boss_stats_for(user_id,char)
+        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
         key=str(b.get('boss_key') or '')
         # Identidad mecánica de los Bosses sin añadir estados frágiles a la BD.
         if phase==3 and key in ('fenrir','behemoth'): damage=max(0,int(round(damage*1.18)))
@@ -8646,9 +8732,12 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if php<=0:
             ai_text+=f"\n💀 {_pvp_name(user_id)} cayó, pero el Boss sigue disponible para el grupo.\n♻️ Puedes volver al combate inmediatamente."
             cleanup_combat_dice(chat_id,user_id)
-    _boss_set_next_turn(boss_id,user_id)
+    next_uid=_boss_set_next_turn(boss_id,user_id)
     b=_boss_active(chat_id) or b
-    send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b,user_id),reply_markup=_boss_keyboard(b,user_id)); return True,''
+    view_uid=int(next_uid or user_id)
+    send_message(chat_id,player_text+"\n\n"+ai_text+"\n\n"+_boss_card(b,view_uid),reply_markup=_boss_keyboard(b,view_uid))
+    _queue_boss_mission_events(user_id,mission_dmg)
+    return True,''
 
 
 
@@ -9135,6 +9224,28 @@ def _marriage_row(user_id, statuses=("active",)):
             f"SELECT * FROM rpg_marriages WHERE (user_a=? OR user_b=?) AND status IN ({marks}) ORDER BY id DESC LIMIT 1",
             (uid,uid,*statuses)).fetchone(); conn.close()
     return dict(row) if row else None
+
+
+def admin_reset_marriage_pending(user_id):
+    """Limpia propuestas pendientes que bloquean a un jugador sin tocar bodas activas."""
+    uid=int(user_id); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            rows=conn.execute("""SELECT * FROM rpg_marriages
+                WHERE (user_a=? OR user_b=?) AND status='pending' FOR UPDATE""",(uid,uid)).fetchall()
+            for row in rows:
+                rid=int(row.get('ring_inventory_id') or 0); proposer=int(row.get('proposed_by') or 0)
+                if rid and proposer:
+                    conn.execute("UPDATE rpg_inventory SET locked=0 WHERE id=? AND user_id=?",(rid,proposer))
+                conn.execute("UPDATE rpg_marriages SET status='cancelled',ended_at=?,ended_by=? WHERE id=? AND status='pending'",(now,uid,int(row['id'])))
+            # Repara también un anillo que haya quedado bloqueado por un crash sin propuesta viva.
+            conn.execute("""UPDATE rpg_inventory i SET locked=0
+                WHERE i.user_id=? AND i.item_key='anillo_bodas' AND i.locked=1
+                  AND NOT EXISTS (SELECT 1 FROM rpg_marriages m WHERE m.ring_inventory_id=i.id AND m.status='pending')""",(uid,))
+            conn.commit(); conn.close(); return len(rows)
+        except Exception:
+            conn.rollback(); conn.close(); raise
 
 
 def _marriage_partner_id(row,user_id):
@@ -9877,6 +9988,27 @@ def _dungeon_next_turn(rows,current_uid=0):
     i=ids.index(int(current_uid)); return ids[(i+1)%len(ids)]
 
 
+def _next_turn_after_removal(original_rows, removed_uid, remaining_rows):
+    """Conserva la rotación cuando el jugador del turno es expulsado.
+
+    Si A→B→C y B vence por tiempo, el siguiente debe ser C, no volver a A.
+    """
+    original=[int(r['user_id']) for r in original_rows]
+    remaining=[int(r['user_id']) for r in remaining_rows]
+    if not remaining:
+        return 0
+    removed=int(removed_uid or 0)
+    if removed not in original:
+        return remaining[0]
+    start=original.index(removed)
+    allowed=set(remaining)
+    for step in range(1,len(original)+1):
+        candidate=original[(start+step)%len(original)]
+        if candidate in allowed:
+            return candidate
+    return remaining[0]
+
+
 def _dungeon_spawn_shared_enemy(conn,dungeon,room):
     members=_dungeon_party_rows(conn,int(dungeon['id']))
     levels=[]
@@ -9908,7 +10040,7 @@ def dungeon_card(dungeon):
     return (f"🏰 {dungeon['dungeon_name']}\n🚪 Sala {int(dungeon.get('room') or 1)}/{RPG_DUNGEON_ROOMS}\n\n"
             f"⚔️ {dungeon.get('enemy_name') or 'Esperando enemigo'}\n"
             f"❤️ {max(0,int(dungeon.get('enemy_hp') or 0))}/{max(1,int(dungeon.get('enemy_max_hp') or 1))} HP\n\n"
-            f"🎯 Turno: {tname}\n👥 Todos atacan al MISMO enemigo. Espera tu turno.\n⏱️ Tienes 30 segundos cuando te toque; si no actúas, huyes de la sala.")
+            f"🎯 Turno: {tname}\n👥 Todos atacan al MISMO enemigo. Espera tu turno.\n⏱️ Tienes 30 segundos cuando te toque; si no actúas, KiwBot te echa de la sala. 😂")
 
 
 def dungeon_keyboard(dungeon,user_id):
@@ -9945,7 +10077,7 @@ def _spawn_dungeon(chatrow, now=None):
     old=get_current_message_thread_id()
     try:
         set_current_message_thread_id(topic)
-        sent=send_message(chat_id,f"🏰 MAZMORRA COOPERATIVA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\n👥 Todos luchan contra el MISMO enemigo y atacan por turnos.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Unirme a la expedición","callback_data":f"rpg_dungeon_enter:{did}"}]]})
+        sent=send_message(chat_id,f"🏰 MAZMORRA COOPERATIVA\n\n{d['name']} ha abierto sus puertas.\n🚪 {RPG_DUNGEON_ROOMS} salas · ⏳ 20 minutos\n\n👥 Todos luchan contra el MISMO enemigo y atacan por turnos.\nMientras esté abierta no aparecerán monstruos del mundo.",reply_markup={"inline_keyboard":[[{"text":"🏰 Unirme a la mazmorra","callback_data":f"rpg_dungeon_enter:{did}"}]]})
     finally: set_current_message_thread_id(old)
     mid=int((((sent or {}).get('result') or {}).get('message_id') or 0)) if isinstance(sent,dict) else 0
     with db_lock:
@@ -10028,7 +10160,7 @@ def dungeon_action(chat_id,user_id,dungeon_id,ability_key=None,defend=False):
                     if cc and int(cc['hp'])>0: live.append(rr)
                 nxt=_dungeon_next_turn(live,uid) if live else 0
                 conn.execute("UPDATE rpg_dungeons SET enemy_hp=?,turn_user_id=?,turn_started_at=? WHERE id=?",(ehp,nxt,now,did)); conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
-                if not nxt: return False,"💀 Todo el grupo ha caído. La expedición necesita recuperarse."
+                if not nxt: return False,"💀 Todo el grupo ha caído. La mazmorra queda sin aventureros capaces de actuar."
                 return True,f"{ab['emoji']} {char['name']} usa {ab['name']} · 🎲 {roll}\n⚔️ {damage} de daño.\n💥 Recibes {edmg} de daño.\n\n"+dungeon_card(dict(d2))
             # Sala derrotada: todos avanzan juntos.
             room=int(d.get('room') or 1)
@@ -10049,6 +10181,93 @@ def dungeon_action(chat_id,user_id,dungeon_id,ability_key=None,defend=False):
         change_kiwons(mid,kw,'rpg_dungeon',chat_id=chat_id,note=f'Mazmorra cooperativa {did} completada'); grant_rpg_exp(int(ch['id']),xp)
         chest=roll_dungeon_completion_loot(mid,int(ch['id']),did); reward_lines.append(f"• {_dungeon_member_name(mid)}: +{kw} KW · +{xp} EXP"+(f" · 🎁 {chest['name']}" if chest else ''))
     return True,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 {party} aventureros · bonus de equipo +{int((coop-1)*100)}%\n\n"+'\n'.join(reward_lines)
+
+RPG_TURN_TIMEOUT_SECONDS = 30
+RPG_TURN_TIMEOUT_POLL_SECONDS = 2
+RPG_TURN_TIMEOUT_TAUNTS = [
+    "salió corriendo tan rápido que hasta el Boss se quedó confundido. 🏃💨",
+    "vio que era su turno y decidió que la valentía era opcional. Salió corriendo. 😂",
+    "se quedó mirando el arma 30 segundos... y luego huyó con una dignidad discutible. 🏃",
+    "descubrió una técnica secreta: Retirada Estratégica Nivel 100. Fue expulsado de la sala. 😂",
+    "no atacó a tiempo. El gremio anotó oficialmente: «corrió». 📝🏃",
+]
+
+
+def _turn_timeout_message(name, place):
+    return f"😂 {name} tenía 30 segundos para atacar en {place} y no hizo nada... {random.choice(RPG_TURN_TIMEOUT_TAUNTS)}"
+
+
+def _process_coop_turn_timeouts(now=None):
+    """Expulsa automáticamente turnos cooperativos vencidos y entrega controles al siguiente."""
+    now=int(now or time.time()); notices=[]
+    with db_lock:
+        conn=get_db()
+        try:
+            dungeons=conn.execute("SELECT id,chat_id,message_thread_id,turn_user_id,turn_started_at FROM rpg_dungeons WHERE status='active' AND turn_user_id>0 AND turn_started_at>0 AND turn_started_at<=?",(now-RPG_TURN_TIMEOUT_SECONDS,)).fetchall()
+            bosses=conn.execute("SELECT id,chat_id,turn_user_id,turn_started_at FROM rpg_boss_instances WHERE status='active' AND turn_user_id>0 AND turn_started_at>0 AND turn_started_at<=?",(now-RPG_TURN_TIMEOUT_SECONDS,)).fetchall()
+            conn.commit(); conn.close()
+        except Exception:
+            conn.rollback(); conn.close(); raise
+    for rr in dungeons:
+        did=int(rr['id']); chat_id=int(rr['chat_id'])
+        with db_lock:
+            c=get_db()
+            try:
+                d=c.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(did,)).fetchone()
+                if not d or d['status']!='active' or int(d.get('turn_user_id') or 0)<=0 or now-int(d.get('turn_started_at') or now)<RPG_TURN_TIMEOUT_SECONDS:
+                    c.rollback(); c.close(); continue
+                old=int(d['turn_user_id']); name_row=c.execute("SELECT display_name FROM players WHERE user_id=?",(old,)).fetchone(); name=str((name_row or {}).get('display_name') or f'Jugador {old}')
+                before=_dungeon_party_rows(c,did)
+                c.execute("DELETE FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(did,old))
+                rows=_dungeon_party_rows(c,did); nxt=_next_turn_after_removal(before,old,rows)
+                c.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,did)); c.commit(); c.close()
+                notices.append((chat_id,rr.get('message_thread_id'),_turn_timeout_message(name,'la mazmorra'),'dungeon',did,nxt))
+            except Exception:
+                c.rollback(); c.close(); raise
+    for rr in bosses:
+        bid=int(rr['id']); chat_id=int(rr['chat_id'])
+        with db_lock:
+            c=get_db()
+            try:
+                b=c.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(bid,)).fetchone()
+                if not b or b['status']!='active' or int(b.get('turn_user_id') or 0)<=0 or now-int(b.get('turn_started_at') or now)<RPG_TURN_TIMEOUT_SECONDS:
+                    c.rollback(); c.close(); continue
+                old=int(b['turn_user_id']); name_row=c.execute("SELECT display_name FROM players WHERE user_id=?",(old,)).fetchone(); name=str((name_row or {}).get('display_name') or f'Jugador {old}')
+                before=_boss_turn_rows(c,bid)
+                # Lo expulsa de la rotación, pero conserva su daño aportado y su
+                # derecho a recompensa. Puede pulsar VOLVER AL COMBATE después.
+                c.execute("UPDATE rpg_boss_participants SET hp=0,defeated=1,defeated_until=?,defending=0 WHERE boss_id=? AND user_id=?",(now,bid,old))
+                rows=_boss_turn_rows(c,bid); nxt=_next_turn_after_removal(before,old,rows)
+                c.execute("UPDATE rpg_boss_instances SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,bid))
+                tr=c.execute("SELECT message_thread_id FROM rpg_auto_chats WHERE chat_id=? AND enabled=1",(chat_id,)).fetchone()
+                c.commit(); c.close()
+                notices.append((chat_id,(tr or {}).get('message_thread_id'),_turn_timeout_message(name,'el combate contra el Boss'),'boss',bid,nxt))
+            except Exception:
+                c.rollback(); c.close(); raise
+    for chat_id,topic,msg,kind,instance_id,nxt in notices:
+        old_topic=get_current_message_thread_id()
+        try:
+            set_current_message_thread_id(topic)
+            send_message(chat_id,msg)
+            if int(nxt or 0)>0 and kind=='boss':
+                b=_boss_active(chat_id)
+                if b and int(b.get('id') or 0)==int(instance_id):
+                    send_message(chat_id,_boss_card(b,int(nxt)),reply_markup=_boss_keyboard(b,int(nxt)))
+            elif int(nxt or 0)>0 and kind=='dungeon':
+                d=_active_dungeon(chat_id)
+                if d and int(d.get('id') or 0)==int(instance_id):
+                    send_message(chat_id,dungeon_card(dict(d)),reply_markup=dungeon_keyboard(dict(d),int(nxt)))
+        finally:
+            set_current_message_thread_id(old_topic)
+    return len(notices)
+
+
+def _coop_turn_timeout_loop():
+    while True:
+        try: _process_coop_turn_timeouts()
+        except Exception: logger.exception("Error expulsando turnos cooperativos inactivos")
+        time.sleep(RPG_TURN_TIMEOUT_POLL_SECONDS)
+
 
 def spawn_will_epic_event(chatrow, now=None):
     chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
@@ -10084,85 +10303,6 @@ def _pause_regular_spawns_for_boss(chat_id, now=None):
     for mid in mids:
         try: delete_message(int(chat_id),mid)
         except Exception: pass
-
-RPG_TURN_TIMEOUT_SECONDS = 30
-RPG_TURN_TIMEOUT_POLL_SECONDS = 2
-RPG_TURN_TIMEOUT_TAUNTS = [
-    "salió corriendo tan rápido que hasta el Boss se quedó confundido. 🏃💨",
-    "vio que era su turno y decidió que la valentía era opcional. Salió corriendo. 😂",
-    "se quedó mirando el arma 30 segundos... y luego huyó con una dignidad discutible. 🏃",
-    "descubrió una técnica secreta: Retirada Estratégica Nivel 100. Fue expulsado de la sala. 😂",
-    "no atacó a tiempo. El gremio anotó oficialmente: «corrió». 📝🏃",
-]
-
-
-def _turn_timeout_message(name, place):
-    return f"😂 {name} tenía 30 segundos para atacar en {place} y no hizo nada... {random.choice(RPG_TURN_TIMEOUT_TAUNTS)}"
-
-
-def _process_coop_turn_timeouts(now=None):
-    """Expulsa automáticamente al dueño de un turno cooperativo tras 30 s de inactividad.
-
-    Es deliberadamente pequeño y transaccional: bloquea sólo la instancia que vence,
-    vuelve a comprobar el reloj bajo FOR UPDATE y rota antes de publicar el mensaje.
-    """
-    now=int(now or time.time()); notices=[]
-    with db_lock:
-        conn=get_db()
-        try:
-            dungeons=conn.execute("SELECT id,chat_id,message_thread_id,turn_user_id,turn_started_at FROM rpg_dungeons WHERE status='active' AND turn_user_id>0 AND turn_started_at>0 AND turn_started_at<=?",(now-RPG_TURN_TIMEOUT_SECONDS,)).fetchall()
-            bosses=conn.execute("SELECT id,chat_id,turn_user_id,turn_started_at FROM rpg_boss_instances WHERE status='active' AND turn_user_id>0 AND turn_started_at>0 AND turn_started_at<=?",(now-RPG_TURN_TIMEOUT_SECONDS,)).fetchall()
-            conn.commit(); conn.close()
-        except Exception:
-            conn.rollback(); conn.close(); raise
-    for rr in dungeons:
-        did=int(rr['id']); chat_id=int(rr['chat_id'])
-        with db_lock:
-            c=get_db()
-            try:
-                d=c.execute("SELECT * FROM rpg_dungeons WHERE id=? FOR UPDATE",(did,)).fetchone()
-                if not d or d['status']!='active' or int(d.get('turn_user_id') or 0)<=0 or now-int(d.get('turn_started_at') or now)<RPG_TURN_TIMEOUT_SECONDS:
-                    c.rollback(); c.close(); continue
-                old=int(d['turn_user_id']); name_row=c.execute("SELECT display_name FROM players WHERE user_id=?",(old,)).fetchone(); name=str((name_row or {}).get('display_name') or f'Jugador {old}')
-                c.execute("DELETE FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(did,old))
-                rows=_dungeon_party_rows(c,did); nxt=_dungeon_next_turn(rows,old) if rows else 0
-                c.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,did)); c.commit(); c.close()
-                notices.append((chat_id,rr.get('message_thread_id'),_turn_timeout_message(name,'la mazmorra')))
-            except Exception:
-                c.rollback(); c.close(); raise
-    for rr in bosses:
-        bid=int(rr['id']); chat_id=int(rr['chat_id'])
-        with db_lock:
-            c=get_db()
-            try:
-                b=c.execute("SELECT * FROM rpg_boss_instances WHERE id=? FOR UPDATE",(bid,)).fetchone()
-                if not b or b['status']!='active' or int(b.get('turn_user_id') or 0)<=0 or now-int(b.get('turn_started_at') or now)<RPG_TURN_TIMEOUT_SECONDS:
-                    c.rollback(); c.close(); continue
-                old=int(b['turn_user_id']); name_row=c.execute("SELECT display_name FROM players WHERE user_id=?",(old,)).fetchone(); name=str((name_row or {}).get('display_name') or f'Jugador {old}')
-                c.execute("DELETE FROM rpg_boss_participants WHERE boss_id=? AND user_id=?",(bid,old))
-                rows=_boss_turn_rows(c,bid); nxt=_boss_next_turn(rows,old) if rows else 0
-                c.execute("UPDATE rpg_boss_instances SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,bid))
-                tr=c.execute("SELECT message_thread_id FROM rpg_auto_chats WHERE chat_id=? AND enabled=1",(chat_id,)).fetchone()
-                c.commit(); c.close()
-                notices.append((chat_id,(tr or {}).get('message_thread_id'),_turn_timeout_message(name,'el combate contra el Boss')))
-            except Exception:
-                c.rollback(); c.close(); raise
-    for chat_id,topic,msg in notices:
-        old_topic=get_current_message_thread_id()
-        try:
-            set_current_message_thread_id(topic)
-            send_message(chat_id,msg)
-        finally:
-            set_current_message_thread_id(old_topic)
-    return len(notices)
-
-
-def _coop_turn_timeout_loop():
-    while True:
-        try: _process_coop_turn_timeouts()
-        except Exception: logger.exception("Error expulsando turnos cooperativos inactivos")
-        time.sleep(RPG_TURN_TIMEOUT_POLL_SECONDS)
-
 
 def rpg_auto_world_tick(now=None):
     now=int(now or time.time())
@@ -11408,15 +11548,16 @@ def handle_rpg_callback(query):
         if data=="chron:bestiary": send_message(chat_id,chronicles_bestiary_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:achievements": send_message(chat_id,chronicles_achievements_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:titles":
+            if not _is_private_chat_obj(msg.get("chat")):
+                send_message(chat_id,"🎖️ Tus títulos se administran en privado con KiwBot.",reply_markup=_private_launch_keyboard("titles")); return True
             txt,kb=chronicles_titles_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
         if data=="chron:firsts": send_message(chat_id,chronicles_firsts_text(),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:keyitems": send_message(chat_id,chronicles_key_items_text(uid),reply_markup={"inline_keyboard":[[{"text":"⬅️ Crónicas","callback_data":"chron:home"}]]}); return True
         if data=="chron:home": send_message(chat_id,chronicles_home(uid),reply_markup=chronicles_keyboard()); return True
         if data.startswith("chron:title:"):
-            ok,msg2=chronicles_equip_title(uid,data.split(":",2)[2])
-            txt,kb=chronicles_titles_text_keyboard(uid)
-            send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb)
-            return True
+            if not _is_private_chat_obj(msg.get("chat")):
+                send_message(chat_id,"🎖️ Los cambios de título se hacen en privado.",reply_markup=_private_launch_keyboard("titles")); return True
+            ok,msg2=chronicles_equip_title(uid,data.split(":",2)[2]); send_message(chat_id,msg2); return True
         return True
     if data.startswith("erick_target:"):
         try: tidx=int(data.split(":",1)[1]); txt,kb=erick_target_keyboard(uid,tidx); send_message(chat_id,txt,reply_markup=kb)
@@ -11553,17 +11694,18 @@ def handle_rpg_callback(query):
     if data.startswith("dungeon_wait:"):
         return True
     if data.startswith("dungeon_skip:"):
-        # Compatibilidad con tarjetas antiguas: el timeout ahora es automático a los 30 s.
-        send_message(chat_id,"⏱️ Los turnos inactivos ahora se expulsan automáticamente a los 30 segundos. Pulsa 🔄 Actualizar.")
+        send_message(chat_id,"⏱️ Ya no necesitas saltar turnos: KiwBot expulsa automáticamente al inactivo a los 30 segundos.")
         return True
     if data.startswith("dungeon_def:"):
         did=int(data.split(":",1)[1]); ok,msg2=dungeon_action(chat_id,uid,did,defend=True); d=_active_dungeon(chat_id)
-        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),uid) if d else None); return True
+        next_uid=int(d.get('turn_user_id') or uid) if d else uid
+        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),next_uid) if d else None); return True
     if data.startswith("dungeon_atk:"):
         try: _,did,key=data.split(":",2); did=int(did)
         except Exception: return True
         ok,msg2=dungeon_action(chat_id,uid,did,ability_key=key); d=_active_dungeon(chat_id)
-        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),uid) if d else None); return True
+        next_uid=int(d.get('turn_user_id') or uid) if d else uid
+        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),next_uid) if d else None); return True
     if data.startswith("rpg_help_revive:"):
         try: target_id=int(data.split(":",1)[1])
         except Exception: return True
@@ -11624,8 +11766,7 @@ def handle_rpg_callback(query):
             conn.close()
         send_message(chat_id,f"🗑️ {row['name']} fue eliminado por el administrador.\nLa batalla terminó sin recompensas." if row else "Ese Boss ya no existe."); return True
     if data.startswith("boss_skip:"):
-        # Compatibilidad con tarjetas antiguas: nadie puede expulsar manualmente al turno actual.
-        send_message(chat_id,"⏱️ El Boss expulsa automáticamente a quien no actúe en 30 segundos. Pulsa 🔄 Actualizar.")
+        send_message(chat_id,"⏱️ Ya no necesitas saltar turnos: KiwBot expulsa automáticamente al inactivo a los 30 segundos.")
         return True
     if data.startswith("boss_join:"):
         bid=int(data.split(":",1)[1]); ok,msg2=boss_join(chat_id,uid,bid); b=_boss_active(chat_id)
@@ -11802,6 +11943,8 @@ def handle_rpg_callback(query):
     if data=="rpg_show_equipment":
         send_message(chat_id,equipment_text(uid)); return True
     if data=="rpg_show_inventory":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🎒 Tu inventario se administra en privado con KiwBot.",reply_markup=_private_launch_keyboard("inventory")); return True
         world=current_rpg_world()
         with db_lock:
             conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot,x.item_type FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
@@ -12024,14 +12167,14 @@ def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE.\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
-         "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Tus títulos.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
+         "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
          "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Inventario de ambos.\n/compartiritem — Entrega un objeto.\n/divorcio — Termina el matrimonio.\n\n"
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
-        txt += ("\n\n👑 KIU / PRUEBAS\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
+        txt += ("\n\n👑 KIU / PRUEBAS\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
     return txt
 
 def grand_opening_start(chat_id,user_id):
@@ -12585,6 +12728,8 @@ def process_command(
         send_message(chat_id,chronicles_achievements_text(user_id)); return True
     if command in ("/titulos",):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
+        if chat.get("type")!="private":
+            send_message(chat_id,"🎖️ Tus títulos se administran en privado con KiwBot. Ahí puedes equiparlos, cambiarlos o quitarlos.",reply_markup=_private_launch_keyboard("titles")); return True
         _ct,_ck=chronicles_titles_text_keyboard(user_id); send_message(chat_id,_ct,reply_markup=_ck); return True
     if command in ("/primeros",):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
@@ -12706,7 +12851,7 @@ def process_command(
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
             txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
-        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","inventory","skills","commands"):
+        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","inventory","skills","commands","titles"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
@@ -12719,6 +12864,8 @@ def process_command(
                 txt,kb=techniques_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="commands":
                 send_message(chat_id,rpg_commands_text(user.get("id")))
+            elif parts[1]=="titles":
+                txt,kb=chronicles_titles_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="inventory":
                 uid=user.get("id"); world=current_rpg_world()
                 with db_lock:
@@ -12858,6 +13005,18 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         ok,state,row=cancel_marriage_proposal(user_id,True)
         if not ok: send_message(chat_id,state); return True
         send_message(chat_id,f"🥀 PROPUESTA RECHAZADA\n\n{_player_name_by_id(user_id)} rechazó la propuesta de {_player_name_by_id(int(row['proposed_by']))}.\n💍 El anillo regresó a su propietario."); return True
+
+    if command in ("/resetmatrimonio", "/resetboda"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede usar este comando de reparación."); return True
+        raw_parts=str(text or '').strip().split(maxsplit=1)
+        target=None
+        if len(raw_parts)>1 or (message.get('reply_to_message') or {}).get('from'):
+            target=resolve_target_for_economy(message,text)
+            if not target: send_message(chat_id,"🧹 No pude identificar al jugador. Usa /resetmatrimonio @usuario o responde a su mensaje."); return True
+        target_id=int(target.get('id')) if target else int(user_id)
+        n=admin_reset_marriage_pending(target_id)
+        send_message(chat_id,f"🧹 Matrimonio reparado para {_player_name_by_id(target_id)}.\nPropuestas pendientes limpiadas: {n}.\n💍 Anillos reservados restaurados.\n✅ Los matrimonios activos NO fueron modificados.")
+        return True
 
     if command in ("/fondopareja", "/fondoboda"):
         info=marriage_bank_info(user_id)
@@ -15355,7 +15514,7 @@ if __name__ == "__main__":
     threading.Thread(target=_omega_announcer_loop,daemon=True,name="omega-announcer").start()
     # Mundo vivo: una aparición automática cada 5 minutos por grupo activo.
     threading.Thread(target=_rpg_auto_world_loop,daemon=True,name="rpg-auto-world").start()
-    # Turnos cooperativos: 30 s para actuar; después el jugador sale de la sala.
+    # Turnos cooperativos: expulsa automáticamente a quien no actúe en 30 s.
     threading.Thread(target=_coop_turn_timeout_loop,daemon=True,name="coop-turn-timeout").start()
 
     app.run(

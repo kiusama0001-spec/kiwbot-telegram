@@ -5923,10 +5923,11 @@ def _reserve_manual_encounter(user_id):
         c=get_db()
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS rpg_encounter_daily(user_id BIGINT NOT NULL,day_key TEXT NOT NULL,uses BIGINT DEFAULT 0,updated_at BIGINT NOT NULL,PRIMARY KEY(user_id,day_key))""")
+            # Crea primero la fila canónica: evita la carrera del primer /encuentro del día.
+            c.execute("INSERT INTO rpg_encounter_daily(user_id,day_key,uses,updated_at) VALUES(?,?,0,?) ON CONFLICT(user_id,day_key) DO NOTHING",(int(user_id),day,now))
             row=c.execute("SELECT uses FROM rpg_encounter_daily WHERE user_id=? AND day_key=? FOR UPDATE",(int(user_id),day)).fetchone(); used=int((row or {}).get('uses') or 0)
             if used>=15: c.rollback(); c.close(); return False,used
-            if row: c.execute("UPDATE rpg_encounter_daily SET uses=uses+1,updated_at=? WHERE user_id=? AND day_key=?",(now,int(user_id),day))
-            else: c.execute("INSERT INTO rpg_encounter_daily(user_id,day_key,uses,updated_at) VALUES(?,?,1,?)",(int(user_id),day,now))
+            c.execute("UPDATE rpg_encounter_daily SET uses=uses+1,updated_at=? WHERE user_id=? AND day_key=?",(now,int(user_id),day))
             c.commit(); c.close(); return True,used+1
         except Exception:
             c.rollback(); c.close(); raise
@@ -5937,6 +5938,11 @@ def _refund_manual_encounter(user_id):
         c=get_db(); c.execute("UPDATE rpg_encounter_daily SET uses=GREATEST(0,uses-1),updated_at=? WHERE user_id=? AND day_key=?",(int(time.time()),int(user_id),day)); c.commit(); c.close()
 
 def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0, dungeon_event_id=0, dungeon_room=0):
+    # Nunca reemplaza silenciosamente un combate ya activo del mismo jugador/chat.
+    with db_lock:
+        _c=get_db(); _busy=_c.execute("SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone(); _c.close()
+    if _busy:
+        return False, "⚔️ Ya tienes un combate activo aquí. Termínalo, usa /huir o /resetcombate antes de iniciar otro."
     char = get_active_character(user_id)
     if not char:
         return False, "Necesitas un personaje activo. Usa /crear_personaje."
@@ -10012,7 +10018,18 @@ def divorce_marriage(user_id,target_id=0,ended_by_id=0):
         try:
             locked=conn.execute("SELECT * FROM rpg_marriages WHERE id=? AND status='active' FOR UPDATE",(int(row['id']),)).fetchone()
             if not locked: conn.rollback(); conn.close(); return False,"Ese matrimonio ya no está activo.",None
-            conn.execute("UPDATE rpg_marriages SET status='divorced',ended_at=?,ended_by=? WHERE id=?",(now,ended_by,int(row['id']))); out=dict(locked); out['ended_by']=ended_by
+            # Devuelve cada objeto compartido a quien lo depositó ANTES de cerrar el matrimonio.
+            shared=conn.execute("SELECT * FROM rpg_marriage_shared_inventory WHERE marriage_id=? ORDER BY id FOR UPDATE",(int(row['id']),)).fetchall()
+            returned=0
+            for it in shared:
+                owner=int(it.get('deposited_by') or 0)
+                if owner not in (int(locked['user_a']),int(locked['user_b'])): owner=int(locked['user_a'])
+                ch=conn.execute("SELECT id FROM characters WHERE user_id=? AND is_active=1 ORDER BY id LIMIT 1",(owner,)).fetchone()
+                if not ch: ch=conn.execute("SELECT id FROM characters WHERE user_id=? ORDER BY id LIMIT 1",(owner,)).fetchone()
+                if not ch: raise RuntimeError(f"No hay personaje para devolver inventario matrimonial a {owner}")
+                conn.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES(?,?,?,?,?,0,0,?,'marriage_divorce_return',?,?)",(owner,int(ch['id']),it['item_key'],int(it.get('serial_number') or 0),int(it.get('quantity') or 1),now,current_rpg_world(),owner))
+                conn.execute("DELETE FROM rpg_marriage_shared_inventory WHERE id=?",(int(it['id']),)); returned+=1
+            conn.execute("UPDATE rpg_marriages SET status='divorced',ended_at=?,ended_by=? WHERE id=?",(now,ended_by,int(row['id']))); out=dict(locked); out['ended_by']=ended_by; out['_returned_items']=returned
             a,b,rem=_split_marriage_bank_locked(conn,out,now); out['_split_each']=a; out['_split_remainder']=rem
             conn.commit(); conn.close(); return True,"divorced",out
         except Exception:
@@ -10201,7 +10218,7 @@ def _quick_finish(m,user_id):
         if not row or row['status']!='active' or int(row['expires_at'])<=int(time.time()): conn.rollback(); conn.close(); return False,"Llegaste tarde. La misión ya terminó."
         conn.execute("UPDATE rpg_quick_missions SET status='completed',winner_id=? WHERE id=?",(int(user_id),int(m['id']))); conn.commit(); conn.close()
     reward=_quick_reward(dict(row),user_id)
-    try: record_world_decision(user_id,f"quick:{int(row['id'])}",f"Completaste la misión «{row['title']}».",1,traits={"honorable":1})
+    try: record_world_decision(user_id,f"quick:{int(row['id'])}",f"Completaste la misión «{row['title']}».",1,traits={"honorable":1},chat_id=int(row.get("chat_id") or 0))
     except Exception: logger.exception("No pude registrar la misión en la memoria del mundo")
     return True,f"🏆 {_pvp_name(user_id)} completó «{row['title']}» primero.\n{reward}"
 
@@ -11475,6 +11492,8 @@ def mission_event(user_id,event,amount=1):
         uid=int(user_id); amount=max(0,int(amount))
         if not uid or amount<=0: return []
         _mission_ensure_tables()
+        try: exclusive_mission_event(uid,event,amount)
+        except Exception: logger.exception("Exclusive mission event error")
         cycle=_mission_cycle_id()
         # V9: todas las misiones visibles del tablón están activas simultáneamente.
         board=[m for m in _mission_board(cycle) if m["event"]==event]
@@ -12480,6 +12499,19 @@ def handle_rpg_callback(query):
         send_message(chat_id,msg2)
         if ok: _delete_old_combat_card(chat_id,msg)
         return True
+    if data.startswith("story_choice:"):
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"📖 Las decisiones de tu historia se toman en privado con KiwBot."); return True
+        ok,msg2=resolve_story_choice(uid,data.split(":",1)[1]); send_message(chat_id,msg2); return True
+    if data.startswith("exclusive_accept:"):
+        mid=int(data.split(":",1)[1]); _ensure_world_memory_db()
+        with db_lock:
+            c=get_db(); m=c.execute("SELECT * FROM rpg_exclusive_missions WHERE id=? FOR UPDATE",(mid,)).fetchone()
+            if not m or m['status']!='open': c.rollback(); c.close(); send_message(chat_id,"Esa misión exclusiva ya no está disponible."); return True
+            if int(m['target_user_id'])!=int(uid): c.rollback(); c.close(); telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🔒 Esta misión pertenece a otro aventurero.","show_alert":True}); return True
+            c.execute("UPDATE rpg_exclusive_missions SET status='active',progress=0 WHERE id=?",(mid,)); c.commit(); c.close()
+        send_message(chat_id,f"🔓 {_world_user_mention(uid,chat_id)} aceptó «{m['title']}».\n🎯 Objetivo: consigue {int(m.get('goal') or 3)} victorias PvE.\n🪙 Premio: {int(m['reward']):,} KW")
+        return True
     if data.startswith("mission_select:"):
         # Compatibilidad con botones antiguos: ya no se seleccionan misiones.
         send_message(chat_id,"📜 El tablón cambió: ahora las 10 misiones avanzan al mismo tiempo. Ya no necesitas seleccionar una.",reply_markup=mission_board_keyboard(uid))
@@ -12936,7 +12968,7 @@ def rpg_welcome_keyboard(user_id):
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
-         "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
+         "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
          "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
@@ -12994,6 +13026,12 @@ def _ensure_world_memory_db():
         c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_events(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,event_key TEXT NOT NULL,description TEXT DEFAULT '',affinity_delta BIGINT DEFAULT 0,created_at BIGINT NOT NULL,UNIQUE(user_id,npc_key,event_key))""")
         c.execute("""CREATE TABLE IF NOT EXISTS rpg_story_progress(user_id BIGINT PRIMARY KEY,chapter BIGINT DEFAULT 1,scene BIGINT DEFAULT 1,path TEXT DEFAULT 'wanderer',updated_at BIGINT DEFAULT 0)""")
         c.execute("""CREATE TABLE IF NOT EXISTS rpg_letters(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',subject TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'unread',created_at BIGINT NOT NULL)""")
+        c.execute("ALTER TABLE rpg_letters ADD COLUMN IF NOT EXISTS event_key TEXT DEFAULT ''")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rpg_letters_user_event ON rpg_letters(user_id,event_key) WHERE event_key<>''")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_exclusive_missions(id BIGSERIAL PRIMARY KEY,target_user_id BIGINT NOT NULL,chat_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',title TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'open',reward BIGINT DEFAULT 0,rep_delta BIGINT DEFAULT 0,event_type TEXT DEFAULT 'pve_win',goal BIGINT DEFAULT 3,progress BIGINT DEFAULT 0,created_at BIGINT NOT NULL,completed_at BIGINT DEFAULT 0)""")
+        c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS event_type TEXT DEFAULT 'pve_win'")
+        c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS goal BIGINT DEFAULT 3")
+        c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS progress BIGINT DEFAULT 0")
         c.execute("""CREATE TABLE IF NOT EXISTS rpg_marriage_shared_inventory(id BIGSERIAL PRIMARY KEY,marriage_id BIGINT NOT NULL,item_key TEXT NOT NULL,quantity BIGINT DEFAULT 1,serial_number BIGINT DEFAULT 0,deposited_by BIGINT NOT NULL,original_inventory_id BIGINT DEFAULT 0,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL)""")
         c.commit(); c.close()
 
@@ -13009,7 +13047,88 @@ def get_reputation(user_id):
         c=get_db(); r=c.execute("SELECT * FROM rpg_reputation WHERE user_id=?",(int(user_id),)).fetchone(); c.close()
     return dict(r) if r else {"user_id":int(user_id),"score":0,"merciful":0,"cruel":0,"greedy":0,"protector":0,"honorable":0,"opportunist":0}
 
-def record_world_decision(user_id,event_key,description,rep_delta=0,npc_key='',traits=None):
+def _world_user_mention(user_id, chat_id=None):
+    uid=int(user_id)
+    with db_lock:
+        c=get_db()
+        if chat_id:
+            r=c.execute("SELECT username,first_name FROM chat_users WHERE chat_id=? AND user_id=?",(int(chat_id),uid)).fetchone()
+        else:
+            r=c.execute("SELECT username,first_name FROM chat_users WHERE user_id=? ORDER BY updated_at DESC LIMIT 1",(uid,)).fetchone()
+        c.close()
+    if r and r.get('username'): return '@'+str(r['username']).lstrip('@')
+    return (r.get('first_name') if r else None) or _pvp_name(uid)
+
+def _world_queue_letter(user_id,event_key,npc_key,subject,body):
+    _ensure_world_memory_db(); now=int(time.time()); created=False
+    with db_lock:
+        c=get_db()
+        try:
+            r=c.execute("INSERT INTO rpg_letters(user_id,npc_key,subject,body,status,created_at,event_key) VALUES(?,?,?,?, 'unread',?,?) ON CONFLICT DO NOTHING RETURNING id",(int(user_id),npc_key,subject,body,now,event_key)).fetchone()
+            created=bool(r); c.commit(); c.close()
+        except Exception: c.rollback(); c.close(); raise
+    if created:
+        try: send_private_message(int(user_id),f"✉️ NUEVA CARTA — {subject}\n\n{body}\n\n/cartas — ver tu buzón")
+        except Exception: logger.exception("No pude entregar carta automática")
+    return created
+
+def _world_create_exclusive_mission(user_id,chat_id,event_key,npc_key,title,body,reward,rep_delta):
+    if not chat_id or int(chat_id)>0: return False
+    _ensure_world_memory_db(); uid=int(user_id); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        old=c.execute("SELECT 1 FROM rpg_decision_log WHERE user_id=? AND event_key=?",(uid,'exclusive:'+event_key)).fetchone()
+        if old: c.close(); return False
+        r=c.execute("INSERT INTO rpg_exclusive_missions(target_user_id,chat_id,npc_key,title,body,status,reward,rep_delta,created_at) VALUES(?,?,?,?,?,'open',?,?,?) RETURNING id",(uid,int(chat_id),npc_key,title,body,int(reward),int(rep_delta),now)).fetchone()
+        mid=int(r['id']); c.execute("INSERT INTO rpg_decision_log(user_id,event_key,event_type,description,rep_delta,npc_key,created_at) VALUES(?,?, 'unlock', ?,0,?,?)",(uid,'exclusive:'+event_key,f"Desbloqueaste la misión exclusiva «{title}».",npc_key,now)); c.commit(); c.close()
+    who=_world_user_mention(uid,chat_id)
+    kb={"inline_keyboard":[[{"text":"🔒 Aceptar misión","callback_data":f"exclusive_accept:{mid}"}]]}
+    send_message(int(chat_id),f"🔒 MISIÓN EXCLUSIVA — {who}\n\n{title}\n{body}\n\nTodos pueden verla, pero solo {who} puede aceptarla.",reply_markup=kb)
+    return True
+
+def _world_after_decision(user_id,chat_id=None):
+    # Las decisiones tomadas en PV usan el último grupo donde KiwBot vio al jugador
+    # para poder publicar una misión exclusiva sin convertir el PV en grupo.
+    if not chat_id or int(chat_id)>0:
+        try:
+            with db_lock:
+                _c=get_db(); _g=_c.execute("SELECT chat_id FROM chat_users WHERE user_id=? AND chat_id<0 ORDER BY updated_at DESC LIMIT 1",(int(user_id),)).fetchone(); _c.close()
+            if _g: chat_id=int(_g['chat_id'])
+        except Exception:
+            chat_id=None
+    r=get_reputation(user_id); score=int(r.get('score') or 0); tier=reputation_tier(score)
+    if score>=25:
+        _world_queue_letter(user_id,'rep_respected','aurel','El guardián ha oído tu nombre','Tus actos ya circulan por Aeternus. Si sigues así, habrá gente dispuesta a confiarte asuntos que no pondrían en manos de cualquiera.')
+        _world_create_exclusive_mission(user_id,chat_id,'rep_respected','aurel','Ecos en el camino','Aurel pide que respondas personalmente a una llamada de auxilio.',1800,3)
+    if score>=60:
+        _world_queue_letter(user_id,'rep_hero','aurel','Una deuda de Aeternus','Ya no eres un desconocido. Hay personas que cuentan historias de lo que hiciste cuando nadie te obligaba.')
+    if score<=-25:
+        _world_queue_letter(user_id,'rep_doubtful','malkor','Negocios para gente interesante','La mala fama cierra puertas aburridas y abre otras mucho más rentables. Tengo algo que quizá quieras escuchar.')
+        _world_create_exclusive_mission(user_id,chat_id,'rep_doubtful','malkor','Un encargo sin testigos','Malkor tiene un trabajo que no ofrecería a alguien con reputación impecable.',2200,-2)
+    if score<=-60:
+        _world_queue_letter(user_id,'rep_feared','valka','Ya saben quién eres','Tu nombre empieza a hacer que algunas conversaciones bajen de volumen. Eso puede ser una herramienta.')
+
+def exclusive_mission_event(user_id,event,amount=1):
+    uid=int(user_id); amount=max(0,int(amount or 0)); now=int(time.time()); completed=[]
+    if not uid or not amount: return completed
+    _ensure_world_memory_db()
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT * FROM rpg_exclusive_missions WHERE target_user_id=? AND status='active' AND event_type=? FOR UPDATE",(uid,str(event))).fetchall()
+        for m in rows:
+            prog=min(int(m.get('goal') or 1),int(m.get('progress') or 0)+amount)
+            if prog>=int(m.get('goal') or 1):
+                c.execute("UPDATE rpg_exclusive_missions SET progress=?,status='completed',completed_at=? WHERE id=?",(prog,now,int(m['id'])))
+                c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(int(m['reward']),now,uid)); completed.append(dict(m))
+            else: c.execute("UPDATE rpg_exclusive_missions SET progress=? WHERE id=?",(prog,int(m['id'])))
+        c.commit(); c.close()
+    for m in completed:
+        record_world_decision(uid,f"exclusive_done:{int(m['id'])}",f"Completaste la misión exclusiva «{m['title']}».",int(m['rep_delta']),npc_key=str(m.get('npc_key') or ''),traits={"honorable":1} if int(m['rep_delta'])>0 else {"opportunist":1},chat_id=int(m['chat_id']))
+        npc_record_event(uid,str(m.get('npc_key') or 'malkor'),f"exclusive:{int(m['id'])}",f"Completaste «{m['title']}».",2 if int(m['rep_delta'])>0 else 1)
+        try: send_message(int(m['chat_id']),f"🔓 {_world_user_mention(uid,int(m['chat_id']))} completó su misión exclusiva «{m['title']}».\n🪙 +{int(m['reward']):,} KW")
+        except Exception: logger.exception("No pude anunciar misión exclusiva")
+    return completed
+
+def record_world_decision(user_id,event_key,description,rep_delta=0,npc_key='',traits=None,chat_id=None):
     _ensure_world_memory_db(); now=int(time.time()); traits=traits or {}
     with db_lock:
         c=get_db()
@@ -13021,9 +13140,12 @@ def record_world_decision(user_id,event_key,description,rep_delta=0,npc_key='',t
             allowed={"merciful","cruel","greedy","protector","honorable","opportunist"}
             for k,v in traits.items():
                 if k in allowed and int(v): c.execute(f"UPDATE rpg_reputation SET {k}={k}+? WHERE user_id=?",(int(v),int(user_id)))
-            c.commit(); c.close(); return True
+            c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
+    try: _world_after_decision(user_id,chat_id)
+    except Exception: logger.exception("No pude procesar consecuencias automáticas del mundo")
+    return True
 
 def npc_record_event(user_id,npc_key,event_key,description,affinity_delta=0):
     _ensure_world_memory_db(); now=int(time.time()); unique=f"{event_key}:{now//60}" if event_key=="interaction" else str(event_key)
@@ -13092,14 +13214,16 @@ def attempt_robbery(chat_id, thief, target):
     with db_lock:
         c=get_db()
         try:
+            # Fila diaria canónica + bloqueo determinista de ambos jugadores: evita carreras y A→B/B→A deadlocks.
+            c.execute("INSERT INTO rpg_robbery_daily(user_id,day_key,attempts,updated_at) VALUES(?,?,0,?) ON CONFLICT(user_id,day_key) DO NOTHING",(uid,day,now))
             a=c.execute("SELECT attempts FROM rpg_robbery_daily WHERE user_id=? AND day_key=? FOR UPDATE",(uid,day)).fetchone(); used=int(a['attempts'] or 0) if a else 0
             if used>=3:c.rollback();c.close();return False,"🥷 Ya usaste tus 3 intentos de robo de hoy."
-            victim=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(tid,)).fetchone(); c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
-            bal=int(victim['kiwons'] or 0) if victim else 0
+            locked_players=c.execute("SELECT user_id,kiwons FROM players WHERE user_id IN (?,?) ORDER BY user_id FOR UPDATE",(uid,tid)).fetchall()
+            balances={int(x['user_id']):int(x.get('kiwons') or 0) for x in locked_players}
+            bal=int(balances.get(tid,0))
             if bal<=0:c.rollback();c.close();return False,"🥷 Esa persona no tiene Kiwons que puedas robar."
             rr=c.execute("SELECT score FROM rpg_reputation WHERE user_id=? FOR UPDATE",(tid,)).fetchone(); tier=reputation_tier(int((rr or {}).get('score') or 0)); chance,cap={"Héroe":(.50,20000),"Respetado":(.50,20000),"Neutral":(.50,20000),"Dudoso":(.55,22500),"Temido":(.60,25000),"Villano":(.65,30000)}[tier]
-            if a:c.execute("UPDATE rpg_robbery_daily SET attempts=attempts+1,updated_at=? WHERE user_id=? AND day_key=?",(now,uid,day))
-            else:c.execute("INSERT INTO rpg_robbery_daily(user_id,day_key,attempts,updated_at) VALUES(?,?,1,?)",(uid,day,now))
+            c.execute("UPDATE rpg_robbery_daily SET attempts=attempts+1,updated_at=? WHERE user_id=? AND day_key=?",(now,uid,day))
             success=random.random()<chance; amount=random.randint(1,min(cap,bal)) if success else 0
             if success:
                 c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(amount,now,tid)); c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(amount,now,uid))
@@ -13108,7 +13232,7 @@ def attempt_robbery(chat_id, thief, target):
         except Exception:c.rollback();c.close();raise
     # El robo deja huella; robar a alguien de mala fama pesa menos que atacar a un héroe.
     penalty={"Héroe":-6,"Respetado":-5,"Neutral":-4,"Dudoso":-3,"Temido":-2,"Villano":-1}[tier]
-    record_world_decision(uid,f"robbery:{day}:{used+1}",f"Intentaste robar a alguien con fama {tier}.",penalty,traits={"greedy":1,"opportunist":1})
+    record_world_decision(uid,f"robbery:{day}:{used+1}",f"Intentaste robar a alguien con fama {tier}.",penalty,traits={"greedy":1,"opportunist":1},chat_id=chat_id)
     left=2-used
     if success:return True,f"🥷 ROBO EXITOSO\n\n{player_display_name(thief)} robó {amount:,} KW.\n⚖️ Fama de la víctima: {tier} · éxito {int(chance*100)}% · tope {cap:,} KW\n🎟️ Intentos restantes: {left}"
     return True,f"🚨 ROBO FALLIDO\n\nTe descubrieron.\n⚖️ Fama de la víctima: {tier} · éxito {int(chance*100)}%\n🎟️ Intentos restantes: {left}"
@@ -13130,24 +13254,74 @@ def _select_enemy_for_level(level,rng=random):
     return rng.choices(candidates,weights=weights,k=1)[0]
 
 def rpg_letters_text(user_id):
-    _ensure_world_memory_db(); rep=get_reputation(user_id); tier=reputation_tier(rep['score']); now=int(time.time())
+    """Buzón solamente: las cartas nacen de acontecimientos, nunca de abrir /cartas."""
+    _ensure_world_memory_db()
     with db_lock:
-        c=get_db(); rows=c.execute("SELECT * FROM rpg_letters WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 8",(int(user_id),)).fetchall()
-        if not rows:
-            if tier in ('Temido','Villano'): npc,subject,body='valka','Contrato sin preguntas','Tu reputación llegó a oídos de gente que paga por trabajos que otros no aceptarían.'
-            elif tier in ('Héroe','Respetado'): npc,subject,body='aurel','Una petición de auxilio','He oído cómo actúas cuando nadie te obliga. Hay personas que necesitan esa clase de ayuda.'
-            else:npc,subject,body='malkor','Una oportunidad','No eres santo ni monstruo todavía. Eso te hace interesante. Tengo una propuesta.'
-            c.execute("INSERT INTO rpg_letters(user_id,npc_key,subject,body,status,created_at) VALUES(?,?,?,?, 'unread',?)",(int(user_id),npc,subject,body,now)); c.commit(); rows=c.execute("SELECT * FROM rpg_letters WHERE user_id=? ORDER BY id DESC LIMIT 8",(int(user_id),)).fetchall()
-        c.close()
+        c=get_db(); rows=c.execute("SELECT * FROM rpg_letters WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT 8",(int(user_id),)).fetchall(); c.close()
+    if not rows:
+        return "✉️ CARTAS PRIVADAS\n\nTu buzón está vacío. Sigue jugando: NPC, reputación e historia pueden hacer que alguien te escriba automáticamente."
     return "✉️ CARTAS PRIVADAS\n\n"+"\n\n".join(f"#{r['id']} · {r['subject']}\n{r['body']}" for r in rows)
 
 def rpg_personal_story_text(user_id):
-    _ensure_world_memory_db(); r=get_reputation(user_id); tier=reputation_tier(r['score'])
+    _ensure_world_memory_db(); r=get_reputation(user_id); tier=reputation_tier(r['score']); now=int(time.time())
     with db_lock:
         c=get_db(); row=c.execute("SELECT * FROM rpg_story_progress WHERE user_id=?",(int(user_id),)).fetchone()
-        if not row:c.execute("INSERT INTO rpg_story_progress(user_id,chapter,scene,path,updated_at) VALUES(?,1,1,'wanderer',?)",(int(user_id),int(time.time())));c.commit();row={'chapter':1,'scene':1,'path':'wanderer'}
+        if not row:
+            c.execute("INSERT INTO rpg_story_progress(user_id,chapter,scene,path,updated_at) VALUES(?,1,1,'wanderer',?)",(int(user_id),now)); c.commit(); row={'chapter':1,'scene':1,'path':'wanderer'}
         c.close()
-    return f"📖 TU HISTORIA EN AETERNUS\n\nCapítulo {int(row['chapter'])} · Escena {int(row['scene'])}\nCamino: {row['path']}\nReputación actual: {tier}\n\nTus decisiones, robos, contratos y relaciones con viajeros quedan registrados. Las próximas escenas y cartas pueden reaccionar a esas huellas."
+    ch=int(row['chapter']); sc=int(row['scene']); path=str(row['path'])
+    scenes={
+      (1,1):("La puerta que no estaba allí","Al caer la noche encuentras una puerta de piedra fuera de los caminos de Aeternus. Del otro lado alguien pide ayuda. Cerca, una bolsa de Kiwons abandonada parece demasiado conveniente."),
+      (1,2):("El precio de una decisión","La noticia de lo que hiciste llegó antes que tú. Un viajero encapuchado te espera y asegura conocer el origen del despertar de Aeternus."),
+      (1,3):("Una voz entre ruinas","Las ruinas responden a tu presencia. Hay algo antiguo observando qué clase de aventurero estás eligiendo ser."),
+    }
+    title,body=scenes.get((ch,sc),("El mundo sigue moviéndose","Tu camino actual aún no tiene una nueva escena. Sigue jugando: las decisiones, cartas y encuentros pueden abrirla."))
+    kb=None
+    if (ch,sc)==(1,1): kb={"inline_keyboard":[[{"text":"🛡️ Ayudar a la voz","callback_data":"story_choice:rescue"},{"text":"🪙 Tomar la bolsa","callback_data":"story_choice:gold"}]]}
+    elif (ch,sc)==(1,2): kb={"inline_keyboard":[[{"text":"🤝 Escucharlo","callback_data":"story_choice:listen"},{"text":"⚔️ Amenazarlo","callback_data":"story_choice:threaten"}]]}
+    elif (ch,sc)==(1,3): kb={"inline_keyboard":[[{"text":"✨ Perdonar","callback_data":"story_choice:mercy"},{"text":"🩸 Ejecutar","callback_data":"story_choice:execute"}]]}
+    text=f"📖 TU HISTORIA EN AETERNUS\n\nCapítulo {ch} · Escena {sc}\n{title}\n\n{body}\n\nCamino: {path}\n⚖️ Reputación: {tier}\n\nTus elecciones se guardan automáticamente."
+    return text,kb
+
+def resolve_story_choice(user_id,choice):
+    uid=int(user_id); now=int(time.time()); _ensure_world_memory_db()
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT * FROM rpg_story_progress WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+        if not row: c.rollback(); c.close(); return False,"Abre primero /historiapersonal."
+        ch,sc=int(row['chapter']),int(row['scene'])
+        options={(1,1):{'rescue':('protector','Ayudaste a una voz desconocida tras la puerta.',5,{'protector':2,'honorable':1}),'gold':('opportunist','Ignoraste la llamada y tomaste los Kiwons abandonados.',-4,{'greedy':2,'opportunist':1})},(1,2):{'listen':('seeker','Escuchaste al viajero antes de juzgarlo.',2,{'honorable':1}),'threaten':('iron','Amenazaste al viajero para obtener respuestas.',-3,{'cruel':1})},(1,3):{'mercy':('merciful','Perdonaste a quien estaba a tu merced.',6,{'merciful':2}),'execute':('executioner','Elegiste ejecutar a quien ya no podía defenderse.',-7,{'cruel':2})}}
+        opt=options.get((ch,sc),{}).get(str(choice))
+        if not opt: c.rollback(); c.close(); return False,"Esa decisión ya no pertenece a tu escena actual."
+        path,desc,delta,traits=opt; next_sc=sc+1
+        c.execute("UPDATE rpg_story_progress SET scene=?,path=?,updated_at=? WHERE user_id=?",(next_sc,path,now,uid)); c.commit(); c.close()
+    record_world_decision(uid,f"story:{ch}:{sc}",desc,delta,traits=traits)
+    _world_queue_letter(uid,f"story_{ch}_{sc}",'malkor' if delta<0 else 'aurel','El mundo respondió',f"Tu decisión no pasó inadvertida: {desc}")
+    return True,f"📖 {desc}\n⚖️ Reputación {delta:+d}.\n\nLa siguiente escena ya está disponible en /historiapersonal."
+
+def clear_personal_rpg_states(chat_id,user_id):
+    uid=int(user_id); cid=int(chat_id); now=int(time.time()); cleared=[]; refunded=0
+    with db_lock:
+        c=get_db()
+        try:
+            n=c.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(cid,uid)).rowcount
+            if n: cleared.append('PvE')
+            duels=c.execute("SELECT id,status,challenger_id,opponent_id FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) FOR UPDATE",(cid,uid,uid)).fetchall()
+            for d in duels: c.execute("UPDATE rpg_pvp_duels SET status='cancelled',turn_user_id=NULL,updated_at=? WHERE id=?",(now,int(d['id'])))
+            if duels: cleared.append('PvP')
+            dice=c.execute("SELECT * FROM rpg_dice_duels WHERE chat_id=? AND status IN ('pending','active') AND (challenger_id=? OR opponent_id=?) FOR UPDATE",(cid,uid,uid)).fetchall()
+            for d in dice:
+                if d['status']=='active' and int(d.get('wager') or 0)>0:
+                    w=int(d['wager']); a=int(d['challenger_id']); b=int(d['opponent_id'] or 0)
+                    for x in (a,b):
+                        if x:
+                            c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(w,now,x)); refunded+=w
+                            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(x,w,'dice_duel_refund',uid,0,cid,f'Reembolso /salirtodo duelo #{int(d["id"])}',now))
+                c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(now,int(d['id'])))
+            if dice: cleared.append('dados')
+            c.commit(); c.close()
+        except Exception: c.rollback(); c.close(); raise
+    cleanup_combat_dice(cid,uid)
+    return cleared,refunded
 
 def _marriage_id_for_user(user_id):
     r=_marriage_row(user_id,("active",)); return int(r['id']) if r else 0
@@ -13160,9 +13334,10 @@ def marriage_shared_deposit(user_id,inventory_id):
     with db_lock:
         c=get_db()
         try:
-            r=c.execute("SELECT i.*,x.name FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE",(iid,uid,world)).fetchone()
+            r=c.execute("SELECT i.*,x.name,x.tradeable FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? FOR UPDATE",(iid,uid,world)).fetchone()
             if not r:c.rollback();c.close();return False,"No encontré ese objeto."
             if int(r.get('equipped') or 0) or int(r.get('locked') or 0):c.rollback();c.close();return False,"Desequipa/desbloquea el objeto primero."
+            if not int(r.get('tradeable') or 0) or str(r.get('item_key') or '')=='anillo_bodas':c.rollback();c.close();return False,"Ese objeto no puede guardarse en el almacén matrimonial."
             qty=int(r.get('quantity') or 1); c.execute("INSERT INTO rpg_marriage_shared_inventory(marriage_id,item_key,quantity,serial_number,deposited_by,original_inventory_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(mid,r['item_key'],qty,int(r.get('serial_number') or 0),uid,iid,now,now)); c.execute("DELETE FROM rpg_inventory WHERE id=?",(iid,)); c.commit(); name=r['name']; c.close(); return True,f"💞 {name} ×{qty} quedó en el almacén compartido."
         except Exception:c.rollback();c.close();raise
 
@@ -14925,7 +15100,14 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,rpg_letters_text(user_id)); return True
 
     if command in ("/historiapersonal", "/aventura"):
-        send_message(chat_id,rpg_personal_story_text(user_id)); return True
+        txt,kb=rpg_personal_story_text(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/salirtodo", "/salircombate", "/liberarme"):
+        cleared,refunded=clear_personal_rpg_states(chat_id,user_id)
+        msg="🧹 Estados personales liberados: "+(", ".join(cleared) if cleared else "no había combates o duelos atascados")+"."
+        if refunded: msg+=f"\n🪙 Apuestas devueltas: {refunded:,} KW en total."
+        msg+="\n\nNo se tocaron Bosses, mazmorras ni eventos globales."
+        send_message(chat_id,msg); return True
 
     if command in ("/depositaritempareja", "/guardarpareja"):
         parts=str(text or '').split(); iid=int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 0

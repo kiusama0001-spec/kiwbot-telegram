@@ -5162,6 +5162,10 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
 # de que Telegram alcance a retirar/editar la tarjeta.
 _boss_action_locks = {}
 _boss_action_locks_guard = RLock()
+# Mazmorras cooperativas: un lock por instancia evita que dos callbacks
+# resuelvan el mismo turno a la vez dentro del mismo proceso de Render.
+_dungeon_action_locks = {}
+_dungeon_action_locks_guard = RLock()
 _boss_consumed_cards = {}
 _boss_consumed_cards_guard = RLock()
 
@@ -5396,17 +5400,29 @@ RPG_TECHNIQUE_ESSENCE_COSTS = {
     10:18, 11:21, 12:24, 13:27, 14:30, 15:35, 16:40, 17:45, 18:50, 19:60
 }
 
+_technique_levels_ready=False
+_technique_levels_ready_lock=RLock()
+
 def _ensure_technique_levels_table():
-    with db_lock:
-        conn=get_db()
-        conn.execute("""CREATE TABLE IF NOT EXISTS rpg_technique_levels(
-            user_id BIGINT NOT NULL,
-            technique_key TEXT NOT NULL,
-            level BIGINT NOT NULL DEFAULT 1,
-            updated_at BIGINT NOT NULL DEFAULT 0,
-            PRIMARY KEY(user_id,technique_key)
-        )""")
-        conn.commit(); conn.close()
+    # La tabla ya se crea en init_db. Este guard evita ejecutar DDL en CADA
+    # render de botones/ataque, algo especialmente caro con PostgreSQL remoto.
+    global _technique_levels_ready
+    if _technique_levels_ready: return
+    with _technique_levels_ready_lock:
+        if _technique_levels_ready: return
+        with db_lock:
+            conn=get_db()
+            try:
+                conn.execute("""CREATE TABLE IF NOT EXISTS rpg_technique_levels(
+                    user_id BIGINT NOT NULL,
+                    technique_key TEXT NOT NULL,
+                    level BIGINT NOT NULL DEFAULT 1,
+                    updated_at BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY(user_id,technique_key)
+                )""")
+                conn.commit(); conn.close(); _technique_levels_ready=True
+            except Exception:
+                conn.rollback(); conn.close(); raise
 
 def technique_level(user_id,key):
     _ensure_technique_levels_table()
@@ -10077,16 +10093,18 @@ def _next_turn_after_removal(original_rows, removed_uid, remaining_rows):
 
 def _dungeon_spawn_shared_enemy(conn,dungeon,room):
     members=_dungeon_party_rows(conn,int(dungeon['id']))
-    levels=[]
+    levels=[]; living=[]
     for m in members:
-        c=conn.execute("SELECT level FROM characters WHERE user_id=? AND is_active=1 LIMIT 1",(int(m['user_id']),)).fetchone()
-        if c: levels.append(int(c['level']))
+        c=conn.execute("SELECT level,hp FROM characters WHERE user_id=? AND is_active=1 LIMIT 1",(int(m['user_id']),)).fetchone()
+        if c:
+            levels.append(int(c['level']))
+            if int(c.get('hp') or 0)>0: living.append(int(m['user_id']))
     level=max(levels or [1]); base=random.choice(RPG_ENEMIES); scale=max(0,level-1)
     # Cooperativa: más vida según participantes, pero un solo objetivo compartido.
     party=max(1,len(members)); hp_mult=1.0+0.55*(party-1)
     hp=max(1,int(round((base['hp']+scale*10)*hp_mult)))
     atk=max(1,int(round(base['atk']+scale*1.25))); de=max(0,int(round(base['def']+scale)))
-    first=int(members[0]['user_id']) if members else 0
+    first=int(living[0]) if living else 0
     conn.execute("UPDATE rpg_dungeons SET room=?,enemy_key=?,enemy_name=?,enemy_hp=?,enemy_max_hp=?,enemy_atk=?,enemy_def=?,turn_user_id=?,turn_started_at=? WHERE id=?",
                  (int(room),base['key'],base['name'],hp,hp,atk,de,first,int(time.time()),int(dungeon['id'])))
     return base['name'],hp,first
@@ -10117,17 +10135,23 @@ def dungeon_keyboard(dungeon,user_id):
         c=get_db(); m=c.execute("SELECT * FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(did,uid)).fetchone(); c.close()
     if not m: return {"inline_keyboard":[[{"text":"🏰 Unirme","callback_data":f"rpg_dungeon_enter:{did}"}]]}
     if int(dungeon.get('turn_user_id') or 0)!=uid:
-        elapsed=max(0,int(time.time())-int(dungeon.get('turn_started_at') or 0)); wait=max(0,30-elapsed)
+        elapsed=max(0,int(time.time())-int(dungeon.get('turn_started_at') or 0)); wait=max(0,RPG_TURN_TIMEOUT_SECONDS-elapsed)
         return {"inline_keyboard":[[{"text":f"⏳ Esperando turno · {wait}s","callback_data":f"dungeon_wait:{did}"}],[{"text":"🔄 Actualizar","callback_data":f"dungeon_refresh:{did}"}]]}
+
+    # Una sola lectura para los niveles de las técnicas. Antes se hacían varias
+    # consultas (y hasta DDL) cada vez que se dibujaba esta tarjeta.
+    levels=technique_levels_for_user(uid)
     abs_=rpg_abilities_for(char['class_name']); rows=[]
     cds={'special':int(m.get('special_cd') or 0),'ultimate':int(m.get('ultimate_cd') or 0),'hidden':int(m.get('hidden_cd') or 0)}
     def b(a):
         cd=cds['ultimate'] if a.get('ultimate') else cds['special'] if a.get('special') else 0
-        return {"text":(f"⏳ {a['name']} ({cd})" if cd>0 else f"{a['emoji']} {a['name']} · ×{float(_rpg_get_ability_for_user(uid,char['class_name'],a['key'])['power']):.2f}"),"callback_data":f"dungeon_atk:{did}:{a['key']}" if cd<=0 else f"dungeon_wait:{did}"}
+        lvl=levels.get(str(a['key']),1)
+        power=float(a['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+        return {"text":(f"⏳ {a['name']} ({cd})" if cd>0 else f"{a['emoji']} {a['name']} · ×{power:.2f}"),"callback_data":f"dungeon_atk:{did}:{a['key']}" if cd<=0 else f"dungeon_wait:{did}"}
     rows.append([b(abs_[0]),b(abs_[1])]); rows.append([b(abs_[2])])
     if has_special_technique(uid,'hidden_blade'):
-        hcd=cds['hidden']; hb=_rpg_get_ability_for_user(uid,char['class_name'],'hidden_blade')
-        rows.append([{"text":f"⏳ Hidden Blade ({hcd})" if hcd>0 else f"🗡️ Hidden Blade · ×{float(hb['power']):.2f}","callback_data":f"dungeon_atk:{did}:hidden_blade" if hcd<=0 else f"dungeon_wait:{did}"}])
+        hcd=cds['hidden']; lvl=levels.get('hidden_blade',1); power=float(HIDDEN_BLADE_ABILITY['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+        rows.append([{"text":f"⏳ Hidden Blade ({hcd})" if hcd>0 else f"🗡️ Hidden Blade · ×{power:.2f}","callback_data":f"dungeon_atk:{did}:hidden_blade" if hcd<=0 else f"dungeon_wait:{did}"}])
     rows.append([{"text":"🛡️ Defender","callback_data":f"dungeon_def:{did}"},{"text":"🔄 Actualizar","callback_data":f"dungeon_refresh:{did}"}])
     return {'inline_keyboard':rows}
 
@@ -10173,72 +10197,187 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
     return True,dungeon_card(dict(d))
 
 
-def dungeon_action(chat_id,user_id,dungeon_id,ability_key=None,defend=False):
+def _dungeon_claim_turn_for_action(chat_id,dungeon_id,user_id):
+    """Reserva atómicamente el turno antes de lanzar el dado de Telegram.
+
+    El timeout y la acción compiten por la misma fila de rpg_dungeons. Si la
+    acción llega primero, refresca el reloj y el jugador no puede ser expulsado
+    mientras Telegram devuelve el d6. Si el timeout llegó primero, la acción se
+    rechaza porque el jugador ya no pertenece a la sala.
+    """
     uid=int(user_id); did=int(dungeon_id); now=int(time.time())
     with db_lock:
         conn=get_db()
         try:
             d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? AND chat_id=? FOR UPDATE",(did,int(chat_id))).fetchone()
-            if not d or d['status']!='active' or int(d['expires_at'])<=now: conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya terminó."
-            m=conn.execute("SELECT * FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=? FOR UPDATE",(did,uid)).fetchone()
-            if not m: conn.rollback(); conn.close(); return False,"Primero únete a la mazmorra."
-            if int(d.get('turn_user_id') or 0)!=uid: conn.rollback(); conn.close(); return False,f"⏳ Aún no es tu turno. Ahora juega {_dungeon_member_name(int(d.get('turn_user_id') or 0))}."
+            if not d or d['status']!='active' or int(d['expires_at'])<=now:
+                conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya terminó."
+            if int(d.get('turn_user_id') or 0)!=uid:
+                cur=int(d.get('turn_user_id') or 0); conn.rollback(); conn.close()
+                return False,f"⏳ Aún no es tu turno. Ahora juega {_dungeon_member_name(cur)}."
+            m=conn.execute("SELECT 1 FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=? AND completed=0",(did,uid)).fetchone()
+            if not m:
+                conn.rollback(); conn.close(); return False,"⏱️ Tu turno ya venció y KiwBot te sacó de la sala. Vuelve a entrar si la mazmorra sigue abierta."
+            ch=conn.execute("SELECT hp FROM characters WHERE user_id=? AND is_active=1",(uid,)).fetchone()
+            if not ch or int(ch.get('hp') or 0)<=0:
+                conn.rollback(); conn.close(); return False,"💀 No puedes actuar mientras estás derrotado."
+            conn.execute("UPDATE rpg_dungeons SET turn_started_at=? WHERE id=?",(now,did))
+            conn.commit(); conn.close(); return True,''
+        except Exception:
+            conn.rollback(); conn.close(); raise
+
+
+def _dungeon_native_d6(chat_id):
+    """Lanza el d6 visible en el mismo topic de la mazmorra y devuelve 1..6."""
+    payload={"chat_id":int(chat_id),"emoji":"🎲"}
+    topic=get_current_message_thread_id()
+    if topic is not None:
+        try: payload["message_thread_id"]=int(topic)
+        except Exception: pass
+    result=telegram("sendDice",payload) or {}
+    try:
+        value=int((((result.get("result") or {}).get("dice") or {}).get("value")))
+        if 1<=value<=6: return value
+    except Exception:
+        pass
+    value=random.randint(1,6)
+    logger.warning("Fallback RNG usado en mazmorra porque sendDice no devolvió valor.")
+    return value
+
+
+def dungeon_action(chat_id,user_id,dungeon_id,ability_key=None,defend=False):
+    """Resuelve una acción cooperativa sin bloquear el turno durante llamadas de red.
+
+    El lock de instancia evita dobles clics. Las consultas auxiliares de stats y
+    técnicas se hacen fuera de la transacción que bloquea la mazmorra; así un
+    turno no puede atascar el pool PostgreSQL esperando otro permiso de db_lock.
+    """
+    did=int(dungeon_id); uid=int(user_id)
+    lock=_user_action_lock(_dungeon_action_locks,_dungeon_action_locks_guard,did,0)
+    if not lock.acquire(blocking=False):
+        return False,"⏳ El turno anterior de la mazmorra todavía se está resolviendo."
+    started=time.monotonic()
+    try:
+        return _dungeon_action_impl(chat_id,uid,did,ability_key=ability_key,defend=defend)
+    finally:
+        elapsed=time.monotonic()-started
+        if elapsed>=1.25:
+            logger.warning("Dungeon turn lento: dungeon=%s user=%s %.3fs",did,uid,elapsed)
+        lock.release()
+
+
+def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=False):
+    uid=int(user_id); did=int(dungeon_id); now=int(time.time())
+
+    # Lectura inicial SIN mantener una transacción abierta mientras calculamos
+    # equipo, pociones o niveles de técnicas.
+    with db_lock:
+        conn=get_db()
+        d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? AND chat_id=?",(did,int(chat_id))).fetchone()
+        m=conn.execute("SELECT * FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=? AND completed=0",(did,uid)).fetchone()
+        char=conn.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1",(uid,)).fetchone()
+        conn.close()
+    if not d or d['status']!='active' or int(d['expires_at'])<=now: return False,"⏳ Esa mazmorra ya terminó."
+    if not m: return False,"Primero únete a la mazmorra."
+    if int(d.get('turn_user_id') or 0)!=uid: return False,f"⏳ Aún no es tu turno. Ahora juega {_dungeon_member_name(int(d.get('turn_user_id') or 0))}."
+    if not char or int(char['hp'])<=0: return False,"💀 No puedes actuar mientras estás derrotado."
+
+    # Stats y habilidad se resuelven antes de tomar FOR UPDATE. Esto elimina la
+    # cascada de conexiones anidadas que podía congelar el turno cooperativo.
+    eff=effective_character_stats(char)
+    ab=None
+    if not defend:
+        ab=_rpg_get_ability_for_user(uid,char['class_name'],ability_key)
+        if not ab: return False,"Movimiento no válido."
+        if ability_key=='hidden_blade' and int(m.get('hidden_cd') or 0)>0: return False,f"⏳ Hidden Blade estará disponible en {int(m['hidden_cd'])} turnos."
+        if ability_key!='hidden_blade' and ab.get('special') and int(m.get('special_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(m['special_cd'])} turnos."
+        if ab.get('ultimate') and int(m.get('ultimate_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(m['ultimate_cd'])} turnos."
+
+    claimed,why=_dungeon_claim_turn_for_action(chat_id,did,uid)
+    if not claimed: return False,why
+
+    # Defender no necesita dado. Atacar sí muestra el d6 NATIVO de Telegram.
+    roll=None if defend else _dungeon_native_d6(chat_id)
+    now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        try:
+            d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=? AND chat_id=? FOR UPDATE",(did,int(chat_id))).fetchone()
+            if not d or d['status']!='active' or int(d['expires_at'])<=now:
+                conn.rollback(); conn.close(); return False,"⏳ Esa mazmorra ya terminó."
+            if int(d.get('turn_user_id') or 0)!=uid:
+                conn.rollback(); conn.close(); return False,"⏱️ El turno cambió antes de que pudiera resolverse tu acción."
+            m=conn.execute("SELECT * FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=? AND completed=0 FOR UPDATE",(did,uid)).fetchone()
             char=conn.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1 FOR UPDATE",(uid,)).fetchone()
-            if not char or int(char['hp'])<=0: conn.rollback(); conn.close(); return False,"💀 No puedes actuar mientras estás derrotado."
-            rows=_dungeon_party_rows(conn,did); nxt=_dungeon_next_turn(rows,uid)
-            nsc=max(0,int(m.get('special_cd') or 0)-1); nuc=max(0,int(m.get('ultimate_cd') or 0)-1); nhc=max(0,int(m.get('hidden_cd') or 0)-1)
+            if not m or not char or int(char['hp'])<=0:
+                conn.rollback(); conn.close(); return False,"⏱️ Ya no puedes actuar en esta sala."
+
+            rows=_dungeon_party_rows(conn,did)
+            nsc=max(0,int(m.get('special_cd') or 0)-1)
+            nuc=max(0,int(m.get('ultimate_cd') or 0)-1)
+            nhc=max(0,int(m.get('hidden_cd') or 0)-1)
+
             if defend:
-                eff=effective_character_stats(char)
                 edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff['def']*0.35)*0.55)))
-                hp=max(0,int(char['hp'])-edmg); conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
+                hp=max(0,int(char['hp'])-edmg)
+                conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
                 conn.execute("UPDATE rpg_dungeon_party_members SET special_cd=?,ultimate_cd=?,hidden_cd=?,defending=0 WHERE dungeon_id=? AND user_id=?",(nsc,nuc,nhc,did,uid))
                 live=[]
                 for rr in rows:
                     cc=conn.execute("SELECT hp FROM characters WHERE user_id=? AND is_active=1",(int(rr['user_id']),)).fetchone()
                     if cc and int(cc['hp'])>0: live.append(rr)
                 nxt=_dungeon_next_turn(live,uid) if live else 0
-                conn.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now,did)); conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
+                conn.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,did))
+                conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
                 return True,f"🛡️ {char['name']} se defiende y reduce el golpe enemigo a {edmg} de daño.\n\n"+dungeon_card(dict(d2))
-            ab=_rpg_get_ability_for_user(uid,char['class_name'],ability_key)
-            if not ab: conn.rollback(); conn.close(); return False,"Movimiento no válido."
-            if ability_key=='hidden_blade' and int(m.get('hidden_cd') or 0)>0: conn.rollback(); conn.close(); return False,f"⏳ Hidden Blade estará disponible en {int(m['hidden_cd'])} turnos."
-            if ab.get('special') and int(m.get('special_cd') or 0)>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {int(m['special_cd'])} turnos."
-            if ab.get('ultimate') and int(m.get('ultimate_cd') or 0)>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {int(m['ultimate_cd'])} turnos."
-            enemy_def=int(d.get('enemy_def') or 0); eff=effective_character_stats(char)
-            # Se usa RNG local aquí para mantener la acción atómica y evitar dos turnos simultáneos.
-            roll=random.randint(1,6); damage=0
-            if roll!=1:
-                pen=float(ab.get('pen',0.0)); raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(enemy_def*(1.0-pen)*0.42)
+
+            enemy_def=int(d.get('enemy_def') or 0); damage=0
+            if int(roll)!=1:
+                pen=float(ab.get('pen',0.0)); raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[int(roll)])-(enemy_def*(1.0-pen)*0.42)
                 damage=max(1,int(round(raw*RPG_PVE_PLAYER_DAMAGE_MULT)))
             ehp=max(0,int(d['enemy_hp'])-damage)
             if ability_key=='hidden_blade': nhc=int(ab.get('cooldown',3))
             elif ab.get('special'): nsc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): nuc=int(ab.get('cooldown',4))
-            # Respuesta del enemigo sólo al jugador que tomó el turno.
-            defended=bool(int(m.get('defending') or 0)); edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff['def']*0.35)*(0.55 if defended else 1.0)))) if ehp>0 else 0
-            hp=max(0,int(char['hp'])-edmg); conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
+
+            # El enemigo responde únicamente si sobrevivió al golpe.
+            edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff['def']*0.35)))) if ehp>0 else 0
+            hp=max(0,int(char['hp'])-edmg)
+            conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
             conn.execute("UPDATE rpg_dungeon_party_members SET special_cd=?,ultimate_cd=?,hidden_cd=?,defending=0 WHERE dungeon_id=? AND user_id=?",(nsc,nuc,nhc,did,uid))
+
             if ehp>0:
-                # Si el siguiente está caído, rota hasta uno vivo.
                 live=[]
                 for rr in rows:
                     cc=conn.execute("SELECT hp FROM characters WHERE user_id=? AND is_active=1",(int(rr['user_id']),)).fetchone()
                     if cc and int(cc['hp'])>0: live.append(rr)
                 nxt=_dungeon_next_turn(live,uid) if live else 0
-                conn.execute("UPDATE rpg_dungeons SET enemy_hp=?,turn_user_id=?,turn_started_at=? WHERE id=?",(ehp,nxt,now,did)); conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
+                conn.execute("UPDATE rpg_dungeons SET enemy_hp=?,turn_user_id=?,turn_started_at=? WHERE id=?",(ehp,nxt,now if nxt else 0,did))
+                conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
                 if not nxt: return False,"💀 Todo el grupo ha caído. La mazmorra queda sin aventureros capaces de actuar."
-                return True,f"{ab['emoji']} {char['name']} usa {ab['name']} · 🎲 {roll}\n⚔️ {damage} de daño.\n💥 Recibes {edmg} de daño.\n\n"+dungeon_card(dict(d2))
-            # Sala derrotada: todos avanzan juntos.
+                crit=' 💥 CRÍTICO' if int(roll)==6 else ''; miss=' — fallo total' if int(roll)==1 else ''
+                return True,f"🎲 {roll} · {ab['emoji']} {char['name']} usa {ab['name']}{crit}{miss}\n⚔️ {damage} de daño.\n💥 Recibes {edmg} de daño.\n\n"+dungeon_card(dict(d2))
+
+            # Sala derrotada: todos avanzan juntos al mismo enemigo siguiente.
             room=int(d.get('room') or 1)
-            for rr in rows: conn.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=? AND user_id=?",(room,did,int(rr['user_id'])))
+            for rr in rows:
+                conn.execute("UPDATE rpg_dungeon_party_members SET room_cleared=GREATEST(room_cleared,?) WHERE dungeon_id=? AND user_id=?",(room,did,int(rr['user_id'])))
             if room<RPG_DUNGEON_ROOMS:
-                nr=room+1; _dungeon_spawn_shared_enemy(conn,d,nr); conn.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND completed=0",(nr,now,did)); conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
-                return True,f"{ab['emoji']} {char['name']} remata al enemigo con {damage} de daño.\n🚪 ¡Sala {room} superada por todo el grupo!\n\n"+dungeon_card(dict(d2))
-            # Final: marca primero, luego premia una vez a cada miembro.
-            conn.execute("UPDATE rpg_dungeons SET status='completed',enemy_hp=0,turn_user_id=0,turn_started_at=0 WHERE id=?",(did,)); members=[int(r['user_id']) for r in rows]
-            conn.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,did)); conn.execute("UPDATE rpg_dungeon_runs SET completed=1,room=?,updated_at=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,now,did)); conn.commit(); conn.close()
+                nr=room+1
+                _dungeon_spawn_shared_enemy(conn,d,nr)
+                conn.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND completed=0",(nr,now,did))
+                conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
+                return True,f"🎲 {roll} · {ab['emoji']} {char['name']} remata al enemigo con {damage} de daño.\n🚪 ¡Sala {room} superada por todo el grupo!\n\n"+dungeon_card(dict(d2))
+
+            # Final: marca completado ANTES de repartir para impedir doble cobro.
+            conn.execute("UPDATE rpg_dungeons SET status='completed',enemy_hp=0,turn_user_id=0,turn_started_at=0 WHERE id=?",(did,))
+            members=[int(r['user_id']) for r in rows]
+            conn.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,did))
+            conn.execute("UPDATE rpg_dungeon_runs SET completed=1,room=?,updated_at=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,now,did))
+            conn.commit(); conn.close()
         except Exception:
             conn.rollback(); conn.close(); raise
+
     party=max(1,len(members)); coop=1.0+min(0.40,0.10*(party-1)); kw=int(round(RPG_DUNGEON_FINAL_KW*coop)); xp=int(round(RPG_DUNGEON_FINAL_EXP*coop))
     reward_lines=[]
     for mid in members:
@@ -10251,7 +10390,7 @@ def dungeon_action(chat_id,user_id,dungeon_id,ability_key=None,defend=False):
 RPG_TURN_TIMEOUT_SECONDS = 30
 RPG_TURN_TIMEOUT_POLL_SECONDS = 2
 RPG_TURN_TIMEOUT_TAUNTS = [
-    "salió corriendo tan rápido que hasta el Boss se quedó confundido. 🏃💨",
+    "salió corriendo tan rápido que hasta el enemigo se quedó confundido. 🏃💨",
     "vio que era su turno y decidió que la valentía era opcional. Salió corriendo. 😂",
     "se quedó mirando el arma 30 segundos... y luego huyó con una dignidad discutible. 🏃",
     "descubrió una técnica secreta: Retirada Estratégica Nivel 100. Fue expulsado de la sala. 😂",

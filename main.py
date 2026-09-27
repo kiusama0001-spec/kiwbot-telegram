@@ -3946,8 +3946,12 @@ def resolve_target_for_economy(message, text):
             return u
         return None
 
-    # 2) @username escrito: resolver SIEMPRE por el username exacto guardado.
-    match = re.search(r"@([A-Za-z0-9_]{3,})", str(text or ""))
+    # 2) @username escrito: buscar SOLO en los argumentos del comando.
+    # En grupos Telegram suele enviar /transferir@Kiwbot_bot 500 @usuario;
+    # buscar sobre todo el texto confundía @Kiwbot_bot con el destinatario.
+    raw_text = str(text or "").strip()
+    command_args = raw_text.split(maxsplit=1)[1] if len(raw_text.split(maxsplit=1)) > 1 else ""
+    match = re.search(r"(?:^|\s)@([A-Za-z0-9_]{3,32})(?=\s|$)", command_args)
     if match:
         username = match.group(1).lower()
         chat_id = int((message.get("chat") or {}).get("id") or 0)
@@ -7210,9 +7214,13 @@ def accept_pvp(duel_id, chat_id, user):
             conn.execute("UPDATE rpg_pvp_duels SET status='expired',updated_at=? WHERE id=?",(int(time.time()),int(duel_id))); conn.commit(); conn.close(); return False,'Ese desafío expiró.'
         char=get_active_character(uid)
         if not char: conn.rollback(); conn.close(); return False,'Primero necesitas un personaje activo.'
-        busy=conn.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND id<>? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(int(chat_id),int(duel_id),uid,uid)).fetchone()
+        # Un reto viejo abierto/pendiente no debe impedir aceptar uno nuevo.
+        # Al aceptar, se cancelan los otros retos NO iniciados del usuario;
+        # sólo un duelo realmente en iniciativa/activo o un PvE lo bloquea.
+        conn.execute("UPDATE rpg_pvp_duels SET status='cancelled',updated_at=? WHERE chat_id=? AND id<>? AND status IN ('open','pending') AND (challenger_id=? OR opponent_id=?)",(int(time.time()),int(chat_id),int(duel_id),uid,uid))
+        busy=conn.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND id<>? AND status IN ('initiative','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(int(chat_id),int(duel_id),uid,uid)).fetchone()
         pve=conn.execute('SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=?',(int(chat_id),uid)).fetchone()
-        if busy or pve: conn.rollback(); conn.close(); return False,'Ahora mismo estás ocupado en otro combate o desafío.'
+        if busy or pve: conn.rollback(); conn.close(); return False,'Ahora mismo estás ocupado en otro combate.'
         c1=_pvp_char(d['challenger_character_id']); duel_level=_pvp_equal_level(c1,char); mode=str(d.get('duel_mode') or 'friendly'); e1=_duel_stats_for_mode(c1,duel_level,mode); e2=_duel_stats_for_mode(char,duel_level,mode)
         conn.execute("""UPDATE rpg_pvp_duels SET opponent_id=?,opponent_character_id=?,challenger_hp=?,opponent_hp=?,status='initiative',is_open=0,updated_at=? WHERE id=?""",(uid,int(char['id']),int(e1['max_hp']),int(e2['max_hp']),int(time.time()),int(duel_id))); conn.commit(); conn.close()
     # Dos dados reales de Telegram: uno por combatiente.
@@ -10284,12 +10292,21 @@ def _telegram_download_file_bytes(file_id):
     """Descarga un archivo de Telegram sin persistirlo. Devuelve (bytes, file_path)."""
     if not TELEGRAM_API or not file_id:
         return b"", ""
-    meta=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/getFile",params={"file_id":str(file_id)},timeout=TELEGRAM_TIMEOUT).json()
+    meta_res=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/getFile",params={"file_id":str(file_id)},timeout=TELEGRAM_TIMEOUT)
+    if not meta_res.ok:
+        logger.error("Telegram getFile voz -> %s", meta_res.text[:500])
+        return b"", ""
+    meta=meta_res.json()
     path=str(((meta.get("result") or {}).get("file_path") or ""))
     if not path:
+        logger.error("Telegram getFile voz sin file_path -> %s", str(meta)[:500])
         return b"", ""
-    res=TELEGRAM_SESSION.get(f"{TELEGRAM_API}/file/bot{TELEGRAM_TOKEN}/{path}",timeout=TELEGRAM_TIMEOUT)
+    # TELEGRAM_API ya contiene /bot<TOKEN>; los archivos usan /file/bot<TOKEN>
+    # directamente desde api.telegram.org. La URL anterior duplicaba /bot<TOKEN>.
+    file_url=f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{path}"
+    res=TELEGRAM_SESSION.get(file_url,timeout=TELEGRAM_TIMEOUT)
     if not res.ok:
+        logger.error("Telegram descarga voz -> HTTP %s: %s",res.status_code,res.text[:500])
         return b"", path
     return bytes(res.content), path
 
@@ -14074,7 +14091,7 @@ def process_command(
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
             txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
-        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","upgrade_weapons","inventory","skills","commands","titles"):
+        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
@@ -14091,6 +14108,8 @@ def process_command(
                 send_message(chat_id,rpg_commands_text(user.get("id")))
             elif parts[1]=="titles":
                 txt,kb=chronicles_titles_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
+            elif parts[1]=="story":
+                txt,kb=rpg_personal_story_text(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="inventory":
                 txt,kb=rpg_inventory_page(user.get("id"),1)
                 send_message(chat_id,txt,reply_markup=kb)
@@ -14574,6 +14593,18 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
                 lines.append(f"{n:02d}. {m['title']}  [{m['key']}]"); n+=1
             lines.append('')
         send_message(chat_id,"\n".join(lines)); return True
+
+    if command in ("/testvoz", "/testmisionvoz"):
+        if not is_owner(message.get("from",{}).get("id")):
+            send_message(chat_id,"Solo Kiu puede forzar la misión de prueba de voz."); return True
+        set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
+        with db_lock:
+            conn=get_db(); row=conn.execute("SELECT * FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone(); conn.close()
+        if row and spawn_quick_mission(dict(row),int(time.time()),True,"voice_oath"):
+            send_message(chat_id,"🧪 Prueba de voz activada. Envía la nota exactamente como indica la misión.")
+        else:
+            send_message(chat_id,"No se pudo crear la misión de prueba de voz. Usa /rpgaqui primero si este chat todavía no está registrado para el RPG.")
+        return True
 
     if command in ("/misionrapida", "/testmision", "/minijuego"):
         if not is_owner(message.get("from",{}).get("id")):
@@ -15100,6 +15131,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,rpg_letters_text(user_id)); return True
 
     if command in ("/historiapersonal", "/aventura"):
+        if chat.get("type")!="private":
+            send_message(chat_id,"📖 Tu historia y sus decisiones son privadas. Ábrela con KiwBot para continuar tu aventura.",reply_markup=_private_launch_keyboard("story")); return True
         txt,kb=rpg_personal_story_text(user_id); send_message(chat_id,txt,reply_markup=kb); return True
 
     if command in ("/salirtodo", "/salircombate", "/liberarme"):
@@ -15162,6 +15195,12 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             f"{amount:,} Kiwons → {player_display_name(target)}\n"
             f"Tu saldo: {result:,} KW"
         )
+        # Aviso privado al receptor si ya abrió conversación con KiwBot.
+        try:
+            receiver_balance=get_kiwons(target.get("id"))
+            send_private_message(target.get("id"),f"💸 {player_display_name(user)} te transfirió {amount:,} Kiwons.\nTu saldo: {receiver_balance:,} KW")
+        except Exception:
+            logger.exception("No se pudo enviar aviso privado de transferencia")
         return True
 
     if command in ("/darrcolmillos", "/darcolmillos", "/addcolmillos"):

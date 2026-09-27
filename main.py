@@ -10285,6 +10285,12 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
     # Stats y habilidad se resuelven antes de tomar FOR UPDATE. Esto elimina la
     # cascada de conexiones anidadas que podía congelar el turno cooperativo.
     eff=effective_character_stats(char)
+    # effective_character_stats usa las claves "atk", "defense" y "max_hp".
+    # Guardamos los valores una sola vez para que el combate cooperativo no
+    # dependa de alias inexistentes como "def" (eso hacía que el dado saliera
+    # pero el turno explotara antes de aplicar el daño).
+    eff_atk=int(eff.get("atk", char.get("atk", 1)) or 1)
+    eff_def=int(eff.get("defense", char.get("defense", 0)) or 0)
     ab=None
     if not defend:
         ab=_rpg_get_ability_for_user(uid,char['class_name'],ability_key)
@@ -10318,7 +10324,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
             nhc=max(0,int(m.get('hidden_cd') or 0)-1)
 
             if defend:
-                edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff['def']*0.35)*0.55)))
+                edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff_def*0.35)*0.55)))
                 hp=max(0,int(char['hp'])-edmg)
                 conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
                 conn.execute("UPDATE rpg_dungeon_party_members SET special_cd=?,ultimate_cd=?,hidden_cd=?,defending=0 WHERE dungeon_id=? AND user_id=?",(nsc,nuc,nhc,did,uid))
@@ -10333,7 +10339,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
 
             enemy_def=int(d.get('enemy_def') or 0); damage=0
             if int(roll)!=1:
-                pen=float(ab.get('pen',0.0)); raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[int(roll)])-(enemy_def*(1.0-pen)*0.42)
+                pen=float(ab.get('pen',0.0)); raw=(eff_atk*float(ab['power'])*RPG_DICE_MULT[int(roll)])-(enemy_def*(1.0-pen)*0.42)
                 damage=max(1,int(round(raw*RPG_PVE_PLAYER_DAMAGE_MULT)))
             ehp=max(0,int(d['enemy_hp'])-damage)
             if ability_key=='hidden_blade': nhc=int(ab.get('cooldown',3))
@@ -10341,7 +10347,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
             if ab.get('ultimate'): nuc=int(ab.get('cooldown',4))
 
             # El enemigo responde únicamente si sobrevivió al golpe.
-            edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff['def']*0.35)))) if ehp>0 else 0
+            edmg=max(1,int(round(max(1,int(d.get('enemy_atk') or 1)-eff_def*0.35)))) if ehp>0 else 0
             hp=max(0,int(char['hp'])-edmg)
             conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
             conn.execute("UPDATE rpg_dungeon_party_members SET special_cd=?,ultimate_cd=?,hidden_cd=?,defending=0 WHERE dungeon_id=? AND user_id=?",(nsc,nuc,nhc,did,uid))

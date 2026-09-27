@@ -492,6 +492,9 @@ def init_db():
             created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
         )""")
         cur.execute("ALTER TABLE rpg_dice_duels ADD COLUMN IF NOT EXISTS wager BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_dice_duels ADD COLUMN IF NOT EXISTS challenger_roll BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_dice_duels ADD COLUMN IF NOT EXISTS opponent_roll BIGINT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE rpg_dice_duels ADD COLUMN IF NOT EXISTS round_no BIGINT NOT NULL DEFAULT 1")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dice_duels_active ON rpg_dice_duels(chat_id,status,created_at)")
 
         cur.execute("""
@@ -4127,37 +4130,41 @@ def attempt_robbery(chat_id, thief, target):
     return True,f"🚨 ROBO FALLIDO\n\n{player_display_name(thief)} intentó robar a {player_display_name(target)}, pero lo descubrieron. 😂\n🎟️ Intentos restantes hoy: {left}"
 
 
+def _dice_duel_keyboard(duel_id, status='pending'):
+    did=int(duel_id)
+    if status=='pending':
+        return {"inline_keyboard":[[{"text":"🎲 Aceptar reto","callback_data":f"dicefight_accept:{did}"},{"text":"❌ Cancelar","callback_data":f"dicefight_reject:{did}"}]]}
+    if status=='active':
+        return {"inline_keyboard":[[{"text":"🎲 Tirar mi dado","callback_data":f"dicefight_roll:{did}"}]]}
+    return None
+
+
 def start_dice_duel(chat_id, thread_id, challenger, target, wager):
-    uid=int(challenger.get('id') or 0); tid=int(target.get('id') or 0)
+    uid=int(challenger.get('id') or 0)
     try: wager=int(wager)
     except Exception: wager=0
-    if not uid or not tid: return False,"No encontré a ese jugador."
-    if uid==tid: return False,"🎲 No puedes retarte a ti mismo."
+    if not uid: return False,"No encontré al jugador."
     if wager<=0: return False,"🎲 La apuesta debe ser de al menos 1 KW."
-    ensure_player(challenger); ensure_player(target)
+    ensure_player(challenger)
     now=int(time.time())
     with db_lock:
         c=get_db()
         try:
-            balances=c.execute("SELECT user_id,kiwons FROM players WHERE user_id IN (?,?) ORDER BY user_id FOR UPDATE",(uid,tid)).fetchall()
-            bm={int(x['user_id']):int(x['kiwons'] or 0) for x in balances}
-            if bm.get(uid,0)<wager:
+            row=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            if int((row or {}).get('kiwons') or 0)<wager:
                 c.rollback(); c.close(); return False,f"🎲 No tienes {wager:,} KW para cubrir la apuesta."
-            if bm.get(tid,0)<wager:
-                c.rollback(); c.close(); return False,f"🎲 {player_display_name(target)} no tiene {wager:,} KW para cubrir la apuesta."
-            busy=c.execute("SELECT 1 FROM rpg_dice_duels WHERE chat_id=? AND status IN ('pending','active') AND (challenger_id IN (?,?) OR opponent_id IN (?,?)) LIMIT 1",(int(chat_id),uid,tid,uid,tid)).fetchone()
+            busy=c.execute("SELECT 1 FROM rpg_dice_duels WHERE chat_id=? AND status IN ('pending','active') AND challenger_id=? LIMIT 1",(int(chat_id),uid)).fetchone()
             if busy:
-                c.rollback(); c.close(); return False,"🎲 Uno de ustedes ya tiene una pelea de dados pendiente."
-            r=c.execute("INSERT INTO rpg_dice_duels(chat_id,message_thread_id,challenger_id,opponent_id,wager,status,created_at,updated_at) VALUES(?,?,?,?,?,'pending',?,?) RETURNING id",(int(chat_id),int(thread_id or 0),uid,tid,wager,now,now)).fetchone()
+                c.rollback(); c.close(); return False,"🎲 Ya tienes una pelea de dados pendiente o activa."
+            r=c.execute("INSERT INTO rpg_dice_duels(chat_id,message_thread_id,challenger_id,opponent_id,wager,status,created_at,updated_at) VALUES(?,?,?,0,?,'pending',?,?) RETURNING id",(int(chat_id),int(thread_id or 0),uid,wager,now,now)).fetchone()
             c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
     did=int(r['id'])
-    txt=(f"🎲 PELEA DE DADOS\n\n{player_display_name(challenger)} desafía a {player_display_name(target)}.\n"
+    txt=(f"🎲 PELEA DE DADOS — RETO ABIERTO\n\n{player_display_name(challenger)} pone {wager:,} KW sobre la mesa.\n"
          f"💰 Apuesta: {wager:,} KW por jugador · 🏆 Pozo: {wager*2:,} KW\n"
-         "🎯 Mejor de 3: el primero en ganar 2 rondas se lleva todo.")
-    kb={"inline_keyboard":[[{"text":"🎲 Aceptar","callback_data":f"dicefight_accept:{did}"},{"text":"❌ Rechazar","callback_data":f"dicefight_reject:{did}"}]]}
-    res=send_message(chat_id,txt,reply_markup=kb); mid=int((((res or {}).get('result') or {}).get('message_id') or 0))
+         "👥 Cualquier jugador puede aceptar.\n🎯 Mejor de 3: cada jugador tira SU propio dado. El primero en ganar 2 rondas se lleva todo.")
+    res=send_message(chat_id,txt,reply_markup=_dice_duel_keyboard(did,'pending')); mid=int((((res or {}).get('result') or {}).get('message_id') or 0))
     if mid:
         with db_lock:
             c=get_db(); c.execute("UPDATE rpg_dice_duels SET message_id=? WHERE id=?",(mid,did)); c.commit(); c.close()
@@ -4166,75 +4173,92 @@ def start_dice_duel(chat_id, thread_id, challenger, target, wager):
 
 def resolve_dice_duel(chat_id,user_id,duel_id,accept=True):
     uid=int(user_id); did=int(duel_id); now=int(time.time())
+    if accept:
+        ensure_player({'id':uid,'first_name':_pvp_name(uid)})
     with db_lock:
         c=get_db()
         try:
             d=c.execute("SELECT * FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
             if not d: c.rollback(); c.close(); return False,"Esa pelea ya no existe."
             if int(d['chat_id'])!=int(chat_id): c.rollback(); c.close(); return False,"Esa pelea pertenece a otro chat."
-            if int(d['opponent_id'])!=uid: c.rollback(); c.close(); return False,"Ese desafío no es para ti."
             if d['status']!='pending': c.rollback(); c.close(); return False,"Ese desafío ya fue resuelto."
+            a=int(d['challenger_id']); wager=int(d.get('wager') or 0)
             if not accept:
-                c.execute("UPDATE rpg_dice_duels SET status='rejected',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close(); return True,"❌ Pelea de dados rechazada."
-            a=int(d['challenger_id']); b=int(d['opponent_id']); wager=int(d.get('wager') or 0)
+                if uid!=a:
+                    c.rollback(); c.close(); return False,"🎲 Solo quien creó el reto puede cancelarlo."
+                c.execute("UPDATE rpg_dice_duels SET status='rejected',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close(); return True,"❌ Pelea de dados cancelada."
+            if uid==a:
+                c.rollback(); c.close(); return False,"🎲 No puedes aceptar tu propio reto. 😂"
+            b=uid
             if wager<=0:
                 c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close(); return False,"🎲 Esta pelea no tiene una apuesta válida y fue cancelada."
+            busy=c.execute("SELECT 1 FROM rpg_dice_duels WHERE id<>? AND chat_id=? AND status='active' AND (challenger_id=? OR opponent_id=?) LIMIT 1",(did,int(chat_id),b,b)).fetchone()
+            if busy:
+                c.rollback(); c.close(); return False,"🎲 Ya estás participando en otra pelea de dados activa."
             balances=c.execute("SELECT user_id,kiwons FROM players WHERE user_id IN (?,?) ORDER BY user_id FOR UPDATE",(a,b)).fetchall()
             bm={int(x['user_id']):int(x['kiwons'] or 0) for x in balances}
             if bm.get(a,0)<wager or bm.get(b,0)<wager:
-                c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close()
-                return False,"🎲 Pelea cancelada: uno de los jugadores ya no tiene suficientes Kiwons para cubrir la apuesta."
+                c.rollback(); c.close(); return False,"🎲 No se puede aceptar: uno de los dos ya no tiene suficientes Kiwons."
             c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id IN (?,?)",(wager,now,a,b))
             for payer,other in ((a,b),(b,a)):
                 c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(payer,-wager,'dice_duel_bet',payer,other,int(chat_id),f'Apuesta dados #{did}',now))
-            c.execute("UPDATE rpg_dice_duels SET status='active',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close()
+            c.execute("UPDATE rpg_dice_duels SET opponent_id=?,status='active',challenger_roll=0,opponent_roll=0,round_no=1,updated_at=? WHERE id=?",(b,now,did))
+            c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
+    return True,(f"🎲 ¡RETO ACEPTADO!\n\n{_pvp_name(a)} vs {_pvp_name(b)}\n💰 {wager:,} KW cada uno · Pozo {wager*2:,} KW\n\n"
+                 "Ahora cada jugador debe pulsar «🎲 Tirar mi dado». No los lanza KiwBot por ustedes."),_dice_duel_keyboard(did,'active')
 
-    aw=bw=0; rnd=0; lines=["🎲 PELEA DE DADOS — MEJOR DE 3","",f"💰 Apuesta: {wager:,} KW c/u · Pozo: {wager*2:,} KW",""]
-    try:
-        while aw<2 and bw<2:
-            rnd+=1
-            while True:
-                r1=send_dice(chat_id,'🎲'); r2=send_dice(chat_id,'🎲')
-                v1=int((((r1 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
-                v2=int((((r2 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
-                if v1!=v2: break
-                lines.append(f"Ronda {rnd}: {v1}-{v2} ⚖️ empate, se repite.")
-            if v1>v2: aw+=1; winner=a
-            else: bw+=1; winner=b
-            lines.append(f"Ronda {rnd}: {_pvp_name(a)} {v1} — {v2} {_pvp_name(b)} → {_pvp_name(winner)}")
-        winner=a if aw>bw else b; pot=wager*2
+
+def dice_duel_roll(chat_id,user_id,duel_id):
+    uid=int(user_id); did=int(duel_id); now=int(time.time())
+    # Reserva el lanzamiento antes de llamar a Telegram para impedir doble clic.
+    with db_lock:
+        c=get_db()
+        try:
+            d=c.execute("SELECT * FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
+            if not d or d['status']!='active': c.rollback(); c.close(); return False,"🎲 Esa pelea ya no está activa.",None
+            a=int(d['challenger_id']); b=int(d['opponent_id'])
+            if uid not in (a,b): c.rollback(); c.close(); return False,"🎲 No participas en esta pelea.",None
+            col='challenger_roll' if uid==a else 'opponent_roll'
+            if int(d[col] or 0)!=0: c.rollback(); c.close(); return False,"🎲 Ya tiraste tu dado en esta ronda. Espera al rival.",None
+            c.execute(f"UPDATE rpg_dice_duels SET {col}=-1,updated_at=? WHERE id=?",(now,did)); c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+    dr=send_dice(chat_id,'🎲')
+    val=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+    if not 1<=val<=6:
+        # Sin dado real no inventamos tirada: libera el turno para reintentar.
         with db_lock:
-            c=get_db()
-            try:
-                locked=c.execute("SELECT status FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
-                if not locked or locked['status']!='active':
-                    c.rollback(); c.close(); return False,"🎲 La pelea ya fue liquidada."
+            c=get_db(); c.execute(f"UPDATE rpg_dice_duels SET {col}=0,updated_at=? WHERE id=? AND {col}=-1",(int(time.time()),did)); c.commit(); c.close()
+        return False,"⚠️ Telegram no devolvió el dado. Pulsa otra vez; tu turno no se consumió.",_dice_duel_keyboard(did,'active')
+    with db_lock:
+        c=get_db()
+        try:
+            d=c.execute("SELECT * FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
+            if not d or d['status']!='active': c.rollback(); c.close(); return False,"🎲 La pelea ya terminó.",None
+            c.execute(f"UPDATE rpg_dice_duels SET {col}=?,updated_at=? WHERE id=? AND {col}=-1",(val,int(time.time()),did))
+            d=c.execute("SELECT * FROM rpg_dice_duels WHERE id=?",(did,)).fetchone()
+            r1=int(d['challenger_roll'] or 0); r2=int(d['opponent_roll'] or 0); aw=int(d['challenger_wins'] or 0); bw=int(d['opponent_wins'] or 0); rnd=int(d['round_no'] or 1); wager=int(d['wager'] or 0); a=int(d['challenger_id']); b=int(d['opponent_id'])
+            if r1<=0 or r2<=0:
+                c.commit(); c.close(); return True,f"🎲 {_pvp_name(uid)} sacó {val}.\n⏳ Falta el dado del rival.",_dice_duel_keyboard(did,'active')
+            if r1==r2:
+                c.execute("UPDATE rpg_dice_duels SET challenger_roll=0,opponent_roll=0,updated_at=? WHERE id=?",(int(time.time()),did)); c.commit(); c.close()
+                return True,f"⚖️ Ronda {rnd}: {r1} — {r2}. ¡Empate! Los dos vuelven a tirar.",_dice_duel_keyboard(did,'active')
+            if r1>r2: aw+=1; rw=a
+            else: bw+=1; rw=b
+            if aw>=2 or bw>=2:
+                winner=a if aw>=2 else b; pot=wager*2
                 c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(pot,int(time.time()),winner))
                 c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(winner,pot,'dice_duel_prize',winner,b if winner==a else a,int(chat_id),f'Premio dados #{did}',int(time.time())))
-                c.execute("UPDATE rpg_dice_duels SET challenger_wins=?,opponent_wins=?,status='finished',updated_at=? WHERE id=?",(aw,bw,int(time.time()),did)); c.commit(); c.close()
-            except Exception:
-                c.rollback(); c.close(); raise
-        lines += ["",f"🏆 {_pvp_name(winner)} gana {aw}-{bw} y se lleva {pot:,} KW."]
-        return True,"\n".join(lines)
-    except Exception:
-        # Si Telegram/DB falla durante la pelea, devuelve exactamente las dos apuestas una sola vez.
-        with db_lock:
-            c=get_db()
-            try:
-                row=c.execute("SELECT status FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
-                if row and row['status']=='active':
-                    c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id IN (?,?)",(wager,int(time.time()),a,b))
-                    for payer,other in ((a,b),(b,a)):
-                        c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(payer,wager,'dice_duel_refund',payer,other,int(chat_id),f'Reembolso dados #{did}',int(time.time())))
-                    c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(int(time.time()),did))
-                    c.commit()
-                else: c.rollback()
-                c.close()
-            except Exception:
-                c.rollback(); c.close()
-        raise
+                c.execute("UPDATE rpg_dice_duels SET challenger_wins=?,opponent_wins=?,challenger_roll=?,opponent_roll=?,status='finished',updated_at=? WHERE id=?",(aw,bw,r1,r2,int(time.time()),did)); c.commit(); c.close()
+                return True,(f"🎲 Ronda {rnd}: {_pvp_name(a)} {r1} — {r2} {_pvp_name(b)} → {_pvp_name(rw)}\n\n"
+                             f"🏆 {_pvp_name(winner)} gana {aw}-{bw} y se lleva {pot:,} KW."),None
+            c.execute("UPDATE rpg_dice_duels SET challenger_wins=?,opponent_wins=?,challenger_roll=0,opponent_roll=0,round_no=round_no+1,updated_at=? WHERE id=?",(aw,bw,int(time.time()),did)); c.commit(); c.close()
+            return True,(f"🎲 Ronda {rnd}: {_pvp_name(a)} {r1} — {r2} {_pvp_name(b)} → {_pvp_name(rw)}\n"
+                         f"📊 Marcador: {_pvp_name(a)} {aw} — {bw} {_pvp_name(b)}\n\nSiguiente ronda: cada uno tira su dado."),_dice_duel_keyboard(did,'active')
+        except Exception:
+            c.rollback(); c.close(); raise
 
 
 def kiwon_ranking(chat_id, limit=10):
@@ -7588,6 +7612,39 @@ def forge_keyboard(user_id):
         rows.append([{"text":f"{'🔥' if ready else '🔒'} {cfg['name']} · {cfg['cost']:,} KW","callback_data":f"forge_view:{key}"}])
     rows.append([{"text":"🎽 Ver equipo","callback_data":"rpg_show_equipment"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}])
     return {"inline_keyboard":rows}
+
+def forge_weapon_upgrade_text_keyboard(user_id):
+    """Menú directo de armas poseídas para reforzarlas sin pasar por recetas."""
+    char=get_active_character(user_id)
+    if not char:
+        return "Necesitas un personaje activo para mejorar armas.", None
+    world=current_rpg_world()
+    with db_lock:
+        conn=get_db()
+        rows=conn.execute("""SELECT i.id,i.quantity,i.forge_level,i.equipped,x.name,x.rarity,x.equip_slot
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=? AND x.equip_slot='arma'
+            ORDER BY i.equipped DESC,i.forge_level DESC,i.acquired_at DESC,i.id DESC""",
+            (int(user_id),world)).fetchall()
+        conn.close()
+    if not rows:
+        return "⚔️ MEJORAR ARMAS\n\nNo tienes armas disponibles para reforzar todavía.", {"inline_keyboard":[[{"text":"🔥 Ir a la Forja","callback_data":"forge_home"}],[{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]}
+    lines=["⚔️ MEJORAR ARMAS","","Elige el arma que quieres reforzar. Máximo +15.","El intento usa Polvo de Forja + KW; el arma nunca se rompe ni baja de nivel.",""]
+    kb=[]
+    for r in rows:
+        lv=int(r.get('forge_level') or 0)
+        eq=" 🟢" if int(r.get('equipped') or 0) else ""
+        qty=f" ×{int(r.get('quantity') or 1)}" if int(r.get('quantity') or 1)>1 else ""
+        if lv>=15:
+            label=f"🏆 {r['name']} +15{qty}{eq}"
+            kb.append([{"text":label,"callback_data":f"rpg_item:{int(r['id'])}"}])
+        else:
+            dust,cost,chance=forge_upgrade_requirements(lv+1)
+            label=f"🔨 {r['name']} +{lv} → +{lv+1} · {cost:,} KW{qty}{eq}"
+            kb.append([{"text":label,"callback_data":f"forge_upgrade:{int(r['id'])}"}])
+    kb.append([{"text":"🔥 Forja completa","callback_data":"forge_home"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}])
+    return "\n".join(lines), {"inline_keyboard":kb}
+
 
 def forge_text(user_id):
     char=get_active_character(user_id)
@@ -12347,8 +12404,15 @@ def handle_rpg_callback(query):
     if data.startswith("dicefight_accept:") or data.startswith("dicefight_reject:"):
         try: did=int(data.split(":",1)[1])
         except Exception: return True
-        ok,msg2=resolve_dice_duel(chat_id,uid,did,accept=data.startswith("dicefight_accept:"))
-        if msg2: send_message(chat_id,msg2)
+        result=resolve_dice_duel(chat_id,uid,did,accept=data.startswith("dicefight_accept:"))
+        ok,msg2=result[0],result[1]; kb=result[2] if len(result)>2 else None
+        if msg2: send_message(chat_id,msg2,reply_markup=kb)
+        return True
+    if data.startswith("dicefight_roll:"):
+        try: did=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2,kb=dice_duel_roll(chat_id,uid,did)
+        if msg2: send_message(chat_id,msg2,reply_markup=kb)
         return True
     if data=="rpg_defend":
         result=rpg_defend_action(chat_id,uid)
@@ -12627,7 +12691,7 @@ def rpg_commands_text(user_id=0):
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE.\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; hasta 20,000 KW.\n/peleadados @usuario cantidad — Mejor de 3 con apuesta.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; hasta 20,000 KW.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Inventario de ambos.\n/compartiritem — Entrega un objeto.\n/divorcio — Termina el matrimonio.\n\n"
@@ -13310,7 +13374,7 @@ def process_command(
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
             txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
-        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","inventory","skills","commands","titles"):
+        if len(parts)>1 and parts[1] in ("shop","pets","missions","forge","upgrade_weapons","inventory","skills","commands","titles"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
@@ -13319,6 +13383,8 @@ def process_command(
                 send_message(chat_id,pet_gacha_text(user.get("id")),reply_markup=pet_gacha_keyboard())
             elif parts[1]=="forge":
                 send_message(chat_id,forge_text(user.get("id")),reply_markup=forge_keyboard(user.get("id")))
+            elif parts[1]=="upgrade_weapons":
+                txt,kb=forge_weapon_upgrade_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="skills":
                 txt,kb=techniques_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="commands":
@@ -14043,6 +14109,12 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,"\n".join(lines),reply_markup={"inline_keyboard":kb})
         return True
 
+    if command in ("/subirarma", "/mejorararma", "/armas"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private":
+            send_message(chat_id,"⚔️ Abre directo el menú de mejora de armas en privado.",reply_markup=_private_launch_keyboard("upgrade_weapons")); return True
+        txt,kb=forge_weapon_upgrade_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
     if command in ("/forja", "/forge", "/forjador", "/mejorar"):
         user_id=message.get("from",{}).get("id")
         if chat.get("type")!="private":
@@ -14312,10 +14384,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         ok,msg2=attempt_robbery(chat_id,user,target); send_message(chat_id,msg2); return True
 
     if command in ("/peleadados", "/duelodados"):
-        user=message.get("from",{}); target=resolve_target_for_economy(message,text); wager=parse_positive_amount(text)
-        if not target or not target.get("id") or not wager:
-            send_message(chat_id,"🎲 Uso: /peleadados @usuario 5000\nTambién puedes responder a alguien: /peleadados 5000"); return True
-        ok,msg2=start_dice_duel(chat_id,message.get("message_thread_id") or 0,user,target,wager)
+        user=message.get("from",{}); wager=parse_positive_amount(text)
+        if not wager:
+            send_message(chat_id,"🎲 Uso: /peleadados 5000\nEl reto queda abierto y cualquier jugador puede aceptarlo."); return True
+        ok,msg2=start_dice_duel(chat_id,message.get("message_thread_id") or 0,user,None,wager)
         if msg2: send_message(chat_id,msg2)
         return True
 

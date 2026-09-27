@@ -5999,7 +5999,7 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
     elif rarity == "legendary": rare_note = "\n👑 Tabla de loot LEGENDARIA activada."
     return True, (
         f"{rd['icon']} ENCUENTRO {rd['label']} — #{encounter_number} DEL MUNDO\n"
-        f"⚔️ {enemy_name}\n\n"
+        f"⚔️ {enemy_name} · Nv. {level}\n\n"
         f"❤️ {char['name']}: {char['hp']}/{eff['max_hp']} HP\n"
         f"❤️ {enemy_name}: {enemy_hp}/{enemy_hp} HP"
         f"{rare_note}\n\n"
@@ -7110,23 +7110,21 @@ def _duel_stats_for_mode(char, duel_level, duel_mode):
     return effective_character_stats(char)
 
 def _pvp_effective_stats(char, duel_level):
-    """Stats PvP reconstruidos al mismo nivel, conservando equipo y estados propios."""
-    base=get_rpg_class_stats(char['class_name'])
+    """Stats base realmente igualados para /duelopvp.
+
+    El competitivo ignora equipo, mejoras externas y las diferencias de stats base
+    entre clases. La identidad de cada clase se conserva en sus habilidades PvP.
+    No modifica el personaje real ni afecta PvE o /duelo amistoso.
+    """
     lv=max(1,min(RPG_MAX_LEVEL,int(duel_level)))
     level_steps=lv-1
-    b=equipped_bonuses(char['id'])
-    # PvP competitivo/amistoso normaliza también estados exclusivos externos al kit.
-    # Las Espadas del Ángel siguen funcionando en PvE, pero no dan +ATK en duelos.
-    secret_atk=0
-    # Mismo crecimiento efectivo que usa el personaje real: ambos duelistas
-    # reciben exactamente la progresión del nivel virtual compartido.
     level_atk_bonus=level_steps//2
     level_def_bonus=level_steps//4
     return {
-        'atk': int(base['atk']) + level_steps*2 + level_atk_bonus + int(b['atk']) + secret_atk,
-        'defense': int(base['defense']) + level_steps + level_def_bonus + int(b['defense']),
-        'max_hp': int(base['hp']) + level_steps*10 + int(b['hp']),
-        'bonus': {'atk':int(b['atk'])+secret_atk,'defense':int(b['defense']),'hp':int(b['hp'])},
+        'atk': 15 + level_steps*2 + level_atk_bonus,
+        'defense': 7 + level_steps + level_def_bonus,
+        'max_hp': 120 + level_steps*10,
+        'bonus': {'atk':0,'defense':0,'hp':0},
         'duel_level': lv,
     }
 
@@ -12356,6 +12354,26 @@ def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     thread_id=int(msg.get("message_thread_id") or 0)
     telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+
+    # También bloquea botones de otras actividades mientras se combate.
+    # Los botones del combate actual y los paneles puramente informativos siguen vivos.
+    _busy_state=_personal_combat_state(chat_id,uid) if chat_id is not None and uid else ''
+    if _busy_state:
+        _allowed = (
+            (_busy_state=='pve' and data.startswith(('rpg_attack:','rpg_use:','rpg_item:','rpg_show_inventory:','rpg_locked:'))) or
+            (_busy_state=='pvp' and data.startswith(('pvp_atk:','pvp_def:','pvp_wait:','pvp_surrender:','pvp_cancel:','pvp_reject:','pvp_accept:'))) or
+            (_busy_state=='dice' and data.startswith(('dicefight_accept:','dicefight_reject:','dicefight_roll:'))) or
+            data.startswith(('chron:','welcome:'))
+        )
+        _other_gameplay_prefixes=('tavern:','qm:','micro:','wnpc:','limitedbuy:','mission_select:','exclusive_accept:',
+                                  'forge_make:','forge_upgrade:','rpg_buy:','rpg_shop_item:','rpg_dungeon_enter:',
+                                  'boss_join:','boss_atk:','boss_def:','boss_potion:','boss_potions:','omega_join:','omega_atk:',
+                                  'event_buy:','pet_equip:','pet_level:','pet_public_level:','tech_up:','trade_accept:','trade_pick:',
+                                  'marry_accept:','clan_join:','story_choice:')
+        if (not _allowed) and data.startswith(_other_gameplay_prefixes):
+            send_message(chat_id,_combat_lock_message(_busy_state))
+            return True
+
     if data.startswith("rpg_switch:"):
         try: cid=int(data.split(":",1)[1])
         except Exception: return True
@@ -13016,6 +13034,8 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🌎 Reiniciar mundo","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
+ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
@@ -13028,6 +13048,7 @@ def rpg_commands_text(user_id=0):
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
         txt += ("\n\n👑 KIU / PRUEBAS\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
+    txt += "\n\n📚 TODOS LOS COMANDOS REGISTRADOS (incluye alias)\n" + ALL_REGISTERED_COMMANDS_TEXT
     return txt
 
 def grand_opening_start(chat_id,user_id):
@@ -13348,6 +13369,40 @@ def resolve_story_choice(user_id,choice):
     record_world_decision(uid,f"story:{ch}:{sc}",desc,delta,traits=traits)
     _world_queue_letter(uid,f"story_{ch}_{sc}",'malkor' if delta<0 else 'aurel','El mundo respondió',f"Tu decisión no pasó inadvertida: {desc}")
     return True,f"📖 {desc}\n⚖️ Reputación {delta:+d}.\n\nLa siguiente escena ya está disponible en /historiapersonal."
+
+def _personal_combat_state(chat_id,user_id):
+    """Devuelve el combate personal que bloquea otras actividades del RPG."""
+    cid=int(chat_id); uid=int(user_id)
+    with db_lock:
+        c=get_db()
+        try:
+            if c.execute("SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(cid,uid)).fetchone():
+                return 'pve'
+            if c.execute("SELECT 1 FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(cid,uid,uid)).fetchone():
+                return 'pvp'
+            if c.execute("SELECT 1 FROM rpg_dice_duels WHERE chat_id=? AND status IN ('pending','active') AND (challenger_id=? OR opponent_id=?) LIMIT 1",(cid,uid,uid)).fetchone():
+                return 'dice'
+            return ''
+        finally:
+            c.close()
+
+def _combat_lock_message(state):
+    if state=='pve': return "⚔️ Ya estás en un combate. Termínalo o usa /huir antes de jugar otra actividad."
+    if state=='pvp': return "🏆 Ya estás en un duelo. Termínalo o usa /rendirse antes de jugar otra actividad."
+    if state=='dice': return "🎲 Ya estás en una pelea de dados. Termínala antes de jugar otra actividad."
+    return "⚔️ Termina tu combate actual antes de iniciar otra actividad."
+
+# Comandos que inician o alteran otra actividad y quedan bloqueados mientras
+# el jugador tenga un PvE/PvP/duelo de dados pendiente o activo. Los comandos
+# informativos y las salidas (/huir, /rendirse, /salirtodo) siguen disponibles.
+COMBAT_LOCKED_COMMANDS = {
+    '/encuentro','/combatir','/mazmorra','/taberna','/tavern','/gacha','/cofre',
+    '/duelo','/duelopvp','/peleadados','/duelodados','/robo','/robar',
+    '/misiones','/tablon','/misionesrpg','/misionrapida','/testmision','/minijuego',
+    '/omega','/kennyomega','/invocaromega','/spawnomega','/boss','/bossevento',
+    '/invocarboss','/spawnboss','/intercambiar','/trade','/casar','/proponer',
+    '/gacha','/cofre','/testmazmorra','/testvoz','/testmisionvoz','/testmundo'
+}
 
 def clear_personal_rpg_states(chat_id,user_id):
     uid=int(user_id); cid=int(chat_id); now=int(time.time()); cleared=[]; refunded=0
@@ -14007,6 +14062,15 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+
+    # Exclusividad de actividad: mientras exista un combate/duelo personal,
+    # no se puede iniciar otra actividad jugable. Consultas y comandos de salida
+    # permanecen disponibles para no encerrar al jugador.
+    if command in COMBAT_LOCKED_COMMANDS:
+        _busy_state=_personal_combat_state(chat_id,user_id)
+        if _busy_state:
+            send_message(chat_id,_combat_lock_message(_busy_state))
+            return True
 
     if command in ("/mundo", "/mundovivo"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True

@@ -7039,8 +7039,21 @@ def _pvp_name(uid):
     return name
 
 def _pvp_active_for_user(chat_id, uid):
+    # Limpieza defensiva: un reto vencido o una iniciativa que quedó a medias
+    # por reinicio/error no debe bloquear al jugador para siempre.
+    now=int(time.time())
     with db_lock:
-        conn=get_db(); row=conn.execute("""SELECT * FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1""",(int(chat_id),int(uid),int(uid))).fetchone(); conn.close()
+        conn=get_db()
+        conn.execute("""UPDATE rpg_pvp_duels SET status='expired',updated_at=?
+                        WHERE chat_id=? AND status IN ('open','pending')
+                        AND created_at<? AND (challenger_id=? OR opponent_id=?)""",
+                     (now,int(chat_id),now-int(PVP_EXPIRE_SECONDS),int(uid),int(uid)))
+        conn.execute("""UPDATE rpg_pvp_duels SET status='cancelled',updated_at=?
+                        WHERE chat_id=? AND status='initiative'
+                        AND updated_at<? AND (challenger_id=? OR opponent_id=?)""",
+                     (now,int(chat_id),now-180,int(uid),int(uid)))
+        conn.commit()
+        row=conn.execute("""SELECT * FROM rpg_pvp_duels WHERE chat_id=? AND status IN ('open','pending','initiative','active') AND (challenger_id=? OR opponent_id=?) ORDER BY id DESC LIMIT 1""",(int(chat_id),int(uid),int(uid))).fetchone(); conn.close()
     return row
 
 def _pvp_get(duel_id):
@@ -10331,9 +10344,24 @@ def _quick_transcribe_voice(message):
         if not raw or len(raw)>5_000_000:
             return "", "🎙️ No pude descargar esa nota de voz o pesa demasiado."
         ext=Path(path).suffix or ".ogg"
-        audio=io.BytesIO(raw); audio.name=f"kiwbot_voice{ext}"
-        out=groq_client.audio.transcriptions.create(model="whisper-large-v3-turbo",file=audio,language="es",temperature=0)
-        text_out=str(getattr(out,"text","") or "").strip()
+        # Enviar el audio como multipart directamente al endpoint compatible de Groq.
+        # Esto evita incompatibilidades del wrapper OpenAI con BytesIO/OGG.
+        resp=TELEGRAM_SESSION.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization":f"Bearer {GROQ_API_KEY}"},
+            files={"file":(f"kiwbot_voice{ext}",raw,"audio/ogg")},
+            data={"model":"whisper-large-v3-turbo","language":"es","temperature":"0","response_format":"json"},
+            timeout=max(30,TELEGRAM_TIMEOUT)
+        )
+        if not resp.ok:
+            logger.error("Groq transcripción voz -> HTTP %s: %s",resp.status_code,resp.text[:800])
+            return "", "🎙️ No pude transcribir la nota ahora mismo. Intenta otra vez; no consumí la misión."
+        payload=resp.json()
+        text_out=str((payload or {}).get("text") or "").strip()
+        if not text_out:
+            logger.error("Groq transcripción voz sin texto -> %s",str(payload)[:800])
+            return "", "🎙️ No pude entender la nota. Intenta otra vez; no consumí la misión."
+        logger.info("Misión voz transcrita para user=%s: %r",(message.get('from') or {}).get('id'),text_out[:180])
         return text_out, ""
     except Exception:
         logger.exception("Error transcribiendo misión de voz")

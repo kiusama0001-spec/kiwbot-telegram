@@ -479,6 +479,21 @@ def init_db():
             ON kiwon_transactions(user_id, created_at DESC)
         """)
 
+        # Economía social: robos diarios y peleas de dados.
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_robbery_daily (
+            user_id BIGINT NOT NULL, day_key TEXT NOT NULL, attempts BIGINT NOT NULL DEFAULT 0,
+            updated_at BIGINT NOT NULL, PRIMARY KEY(user_id,day_key)
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS rpg_dice_duels (
+            id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, message_thread_id BIGINT NOT NULL DEFAULT 0,
+            challenger_id BIGINT NOT NULL, opponent_id BIGINT NOT NULL, challenger_wins BIGINT NOT NULL DEFAULT 0,
+            opponent_wins BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+            wager BIGINT NOT NULL DEFAULT 0, message_id BIGINT NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+        )""")
+        cur.execute("ALTER TABLE rpg_dice_duels ADD COLUMN IF NOT EXISTS wager BIGINT NOT NULL DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rpg_dice_duels_active ON rpg_dice_duels(chat_id,status,created_at)")
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS characters (
                 id BIGSERIAL PRIMARY KEY,
@@ -2613,6 +2628,9 @@ def send_dice(chat_id, emoji="🎲", reply_to_message_id=None):
     """Lanza el dado sin borrar nada en el camino crítico del combate."""
     # No usamos reply_to_message_id: la tarjeta puede desaparecer antes de que Telegram procese el dado.
     data = {"chat_id": chat_id, "emoji": emoji}
+    thread_id=get_current_message_thread_id()
+    if thread_id is not None:
+        data["message_thread_id"]=int(thread_id)
     result=telegram("sendDice", data)
     try:
         mid=int((((result or {}).get("result") or {}).get("message_id") or 0))
@@ -4066,6 +4084,157 @@ def parse_positive_amount(text):
             if value > 0:
                 return value
     return None
+
+
+def _mx_day_key(now=None):
+    # Día civil de León/México para el límite diario (UTC-6, suficiente para el juego).
+    ts=int(time.time() if now is None else now)-6*3600
+    return time.strftime("%Y-%m-%d",time.gmtime(ts))
+
+
+def attempt_robbery(chat_id, thief, target):
+    uid=int(thief.get("id") or 0); tid=int(target.get("id") or 0)
+    if not uid or not tid: return False,"No encontré a ese jugador."
+    if uid==tid: return False,"🥷 No puedes robarte a ti mismo. 😂"
+    ensure_player(thief); ensure_player(target)
+    day=_mx_day_key(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            a=c.execute("SELECT attempts FROM rpg_robbery_daily WHERE user_id=? AND day_key=? FOR UPDATE",(uid,day)).fetchone()
+            used=int(a['attempts'] or 0) if a else 0
+            if used>=3:
+                c.rollback(); c.close(); return False,"🥷 Ya usaste tus 3 intentos de robo de hoy."
+            victim=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(tid,)).fetchone()
+            thiefrow=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            victim_balance=int(victim['kiwons'] or 0) if victim else 0
+            if victim_balance<=0:
+                c.rollback(); c.close(); return False,"🥷 Esa persona no tiene Kiwons que puedas robar."
+            if a: c.execute("UPDATE rpg_robbery_daily SET attempts=attempts+1,updated_at=? WHERE user_id=? AND day_key=?",(now,uid,day))
+            else: c.execute("INSERT INTO rpg_robbery_daily(user_id,day_key,attempts,updated_at) VALUES(?,?,1,?)",(uid,day,now))
+            success=random.random()<0.50
+            amount=random.randint(1,min(20000,victim_balance)) if success else 0
+            if success:
+                c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(amount,now,tid))
+                c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(amount,now,uid))
+                c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(tid,-amount,'robbery_victim',uid,uid,int(chat_id),'Robo',now))
+                c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(uid,amount,'robbery_success',uid,tid,int(chat_id),'Robo',now))
+            c.commit(); left=2-used; c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+    if success:
+        return True,f"🥷 ROBO EXITOSO\n\n{player_display_name(thief)} le robó {amount:,} KW a {player_display_name(target)}.\n🎟️ Intentos restantes hoy: {left}"
+    return True,f"🚨 ROBO FALLIDO\n\n{player_display_name(thief)} intentó robar a {player_display_name(target)}, pero lo descubrieron. 😂\n🎟️ Intentos restantes hoy: {left}"
+
+
+def start_dice_duel(chat_id, thread_id, challenger, target, wager):
+    uid=int(challenger.get('id') or 0); tid=int(target.get('id') or 0)
+    try: wager=int(wager)
+    except Exception: wager=0
+    if not uid or not tid: return False,"No encontré a ese jugador."
+    if uid==tid: return False,"🎲 No puedes retarte a ti mismo."
+    if wager<=0: return False,"🎲 La apuesta debe ser de al menos 1 KW."
+    ensure_player(challenger); ensure_player(target)
+    now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            balances=c.execute("SELECT user_id,kiwons FROM players WHERE user_id IN (?,?) ORDER BY user_id FOR UPDATE",(uid,tid)).fetchall()
+            bm={int(x['user_id']):int(x['kiwons'] or 0) for x in balances}
+            if bm.get(uid,0)<wager:
+                c.rollback(); c.close(); return False,f"🎲 No tienes {wager:,} KW para cubrir la apuesta."
+            if bm.get(tid,0)<wager:
+                c.rollback(); c.close(); return False,f"🎲 {player_display_name(target)} no tiene {wager:,} KW para cubrir la apuesta."
+            busy=c.execute("SELECT 1 FROM rpg_dice_duels WHERE chat_id=? AND status IN ('pending','active') AND (challenger_id IN (?,?) OR opponent_id IN (?,?)) LIMIT 1",(int(chat_id),uid,tid,uid,tid)).fetchone()
+            if busy:
+                c.rollback(); c.close(); return False,"🎲 Uno de ustedes ya tiene una pelea de dados pendiente."
+            r=c.execute("INSERT INTO rpg_dice_duels(chat_id,message_thread_id,challenger_id,opponent_id,wager,status,created_at,updated_at) VALUES(?,?,?,?,?,'pending',?,?) RETURNING id",(int(chat_id),int(thread_id or 0),uid,tid,wager,now,now)).fetchone()
+            c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+    did=int(r['id'])
+    txt=(f"🎲 PELEA DE DADOS\n\n{player_display_name(challenger)} desafía a {player_display_name(target)}.\n"
+         f"💰 Apuesta: {wager:,} KW por jugador · 🏆 Pozo: {wager*2:,} KW\n"
+         "🎯 Mejor de 3: el primero en ganar 2 rondas se lleva todo.")
+    kb={"inline_keyboard":[[{"text":"🎲 Aceptar","callback_data":f"dicefight_accept:{did}"},{"text":"❌ Rechazar","callback_data":f"dicefight_reject:{did}"}]]}
+    res=send_message(chat_id,txt,reply_markup=kb); mid=int((((res or {}).get('result') or {}).get('message_id') or 0))
+    if mid:
+        with db_lock:
+            c=get_db(); c.execute("UPDATE rpg_dice_duels SET message_id=? WHERE id=?",(mid,did)); c.commit(); c.close()
+    return True,''
+
+
+def resolve_dice_duel(chat_id,user_id,duel_id,accept=True):
+    uid=int(user_id); did=int(duel_id); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            d=c.execute("SELECT * FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
+            if not d: c.rollback(); c.close(); return False,"Esa pelea ya no existe."
+            if int(d['chat_id'])!=int(chat_id): c.rollback(); c.close(); return False,"Esa pelea pertenece a otro chat."
+            if int(d['opponent_id'])!=uid: c.rollback(); c.close(); return False,"Ese desafío no es para ti."
+            if d['status']!='pending': c.rollback(); c.close(); return False,"Ese desafío ya fue resuelto."
+            if not accept:
+                c.execute("UPDATE rpg_dice_duels SET status='rejected',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close(); return True,"❌ Pelea de dados rechazada."
+            a=int(d['challenger_id']); b=int(d['opponent_id']); wager=int(d.get('wager') or 0)
+            if wager<=0:
+                c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close(); return False,"🎲 Esta pelea no tiene una apuesta válida y fue cancelada."
+            balances=c.execute("SELECT user_id,kiwons FROM players WHERE user_id IN (?,?) ORDER BY user_id FOR UPDATE",(a,b)).fetchall()
+            bm={int(x['user_id']):int(x['kiwons'] or 0) for x in balances}
+            if bm.get(a,0)<wager or bm.get(b,0)<wager:
+                c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close()
+                return False,"🎲 Pelea cancelada: uno de los jugadores ya no tiene suficientes Kiwons para cubrir la apuesta."
+            c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id IN (?,?)",(wager,now,a,b))
+            for payer,other in ((a,b),(b,a)):
+                c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(payer,-wager,'dice_duel_bet',payer,other,int(chat_id),f'Apuesta dados #{did}',now))
+            c.execute("UPDATE rpg_dice_duels SET status='active',updated_at=? WHERE id=?",(now,did)); c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+
+    aw=bw=0; rnd=0; lines=["🎲 PELEA DE DADOS — MEJOR DE 3","",f"💰 Apuesta: {wager:,} KW c/u · Pozo: {wager*2:,} KW",""]
+    try:
+        while aw<2 and bw<2:
+            rnd+=1
+            while True:
+                r1=send_dice(chat_id,'🎲'); r2=send_dice(chat_id,'🎲')
+                v1=int((((r1 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
+                v2=int((((r2 or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
+                if v1!=v2: break
+                lines.append(f"Ronda {rnd}: {v1}-{v2} ⚖️ empate, se repite.")
+            if v1>v2: aw+=1; winner=a
+            else: bw+=1; winner=b
+            lines.append(f"Ronda {rnd}: {_pvp_name(a)} {v1} — {v2} {_pvp_name(b)} → {_pvp_name(winner)}")
+        winner=a if aw>bw else b; pot=wager*2
+        with db_lock:
+            c=get_db()
+            try:
+                locked=c.execute("SELECT status FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
+                if not locked or locked['status']!='active':
+                    c.rollback(); c.close(); return False,"🎲 La pelea ya fue liquidada."
+                c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(pot,int(time.time()),winner))
+                c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(winner,pot,'dice_duel_prize',winner,b if winner==a else a,int(chat_id),f'Premio dados #{did}',int(time.time())))
+                c.execute("UPDATE rpg_dice_duels SET challenger_wins=?,opponent_wins=?,status='finished',updated_at=? WHERE id=?",(aw,bw,int(time.time()),did)); c.commit(); c.close()
+            except Exception:
+                c.rollback(); c.close(); raise
+        lines += ["",f"🏆 {_pvp_name(winner)} gana {aw}-{bw} y se lleva {pot:,} KW."]
+        return True,"\n".join(lines)
+    except Exception:
+        # Si Telegram/DB falla durante la pelea, devuelve exactamente las dos apuestas una sola vez.
+        with db_lock:
+            c=get_db()
+            try:
+                row=c.execute("SELECT status FROM rpg_dice_duels WHERE id=? FOR UPDATE",(did,)).fetchone()
+                if row and row['status']=='active':
+                    c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id IN (?,?)",(wager,int(time.time()),a,b))
+                    for payer,other in ((a,b),(b,a)):
+                        c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(payer,wager,'dice_duel_refund',payer,other,int(chat_id),f'Reembolso dados #{did}',int(time.time())))
+                    c.execute("UPDATE rpg_dice_duels SET status='cancelled',updated_at=? WHERE id=?",(int(time.time()),did))
+                    c.commit()
+                else: c.rollback()
+                c.close()
+            except Exception:
+                c.rollback(); c.close()
+        raise
 
 
 def kiwon_ranking(chat_id, limit=10):
@@ -6009,21 +6178,24 @@ def handle_rpg_dice(message):
 
 
 def rpg_inventory_text(user_id):
+    world=current_rpg_world()
     with db_lock:
         conn=get_db()
         rows=conn.execute("""
-            SELECT i.*, x.name, x.rarity, x.item_type
+            SELECT x.item_key,x.name,x.rarity,x.item_type,
+                   SUM(i.quantity) AS quantity, MAX(i.acquired_at) AS last_acquired
             FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
-            WHERE i.user_id=? ORDER BY i.acquired_at DESC, i.id DESC LIMIT 30
-        """, (int(user_id),)).fetchall()
+            WHERE i.user_id=? AND i.world_id=?
+            GROUP BY x.item_key,x.name,x.rarity,x.item_type
+            ORDER BY last_acquired DESC,x.name
+        """, (int(user_id),world)).fetchall()
         conn.close()
     if not rows:
         return "🎒 INVENTARIO\n\nTodavía está vacío."
     rarity={"comun":"⚪","poco_comun":"🟢","raro":"🔵","ultra_raro":"🟣","legendario":"🟡","reliquia":"👑"}
     lines=["🎒 INVENTARIO",""]
     for r in rows:
-        serial=f" #{r['serial_number']}" if r.get('serial_number') else ""
-        lines.append(f"{rarity.get(r['rarity'],'⚪')} {r['name']}{serial} ×{r['quantity']}")
+        lines.append(f"{rarity.get(r['rarity'],'⚪')} {r['name']} ×{int(r['quantity'] or 0)}")
     return "\n".join(lines)
 
 
@@ -6478,7 +6650,8 @@ def grant_rpg_item(user_id, character_id, item_key, source="drop"):
                 if used >= int(limit):
                     conn.rollback(); conn.close(); return None
                 serial=used+1
-            if serial is None and item["rarity"] in ("comun","poco_comun"):
+            stackable = str(item.get("item_type") or "") in ("consumible","material") or item["rarity"] in ("comun","poco_comun")
+            if serial is None and stackable:
                 row=conn.execute("SELECT id,quantity FROM rpg_inventory WHERE user_id=? AND item_key=? AND serial_number IS NULL AND world_id=? AND equipped=0 AND locked=0 LIMIT 1 FOR UPDATE", (int(user_id),item_key,world)).fetchone()
                 if row:
                     conn.execute("UPDATE rpg_inventory SET quantity=quantity+1 WHERE id=?", (int(row["id"]),))
@@ -8545,7 +8718,7 @@ def _boss_reward_all(b):
     with db_lock:
         conn=get_db(); rows=conn.execute("SELECT * FROM rpg_boss_participants WHERE boss_id=? AND damage>0",(int(b['id']),)).fetchall(); conn.close()
     for p in rows:
-        uid=int(p['user_id']); dmg=int(p['damage']); kw=500+min(2500,dmg*2); exp=150+min(1000,dmg)
+        uid=int(p['user_id']); dmg=int(p['damage']); boss_level=max(1,int(b.get('level') or 1)); kw=1500+(boss_level*100)+min(5000,dmg*2); exp=500+(boss_level*30)+min(2500,dmg)
         exp_pct=_pet_bonus(uid,'exp'); kw_pct=_pet_bonus(uid,'kiwons')
         if exp_pct: exp=max(1,int(round(exp*(1.0+exp_pct/100.0))))
         if kw_pct: kw=max(1,int(round(kw*(1.0+kw_pct/100.0))))
@@ -8655,11 +8828,11 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         claimed,why=_boss_claim_turn_for_action(boss_id,user_id)
         if not claimed: return False,why
-        # Boss FAST TURN: el dado nativo de Telegram añade una llamada de red y
-        # una animación que hace sentir cada turno mucho más lento. El Boss usa
-        # RNG local seguro para gameplay y muestra el resultado como 🎲 N en la
-        # misma tarjeta final. PvE/PvP conservan sus dados nativos.
-        roll=random.randint(1,6)
+        # Dado nativo de Telegram: el Boss también muestra visualmente cada tirada.
+        dr=send_dice(chat_id,'🎲')
+        roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+        if not roll:
+            return False,"Telegram no devolvió el dado. Intenta otra vez."
         eff=_boss_stats_for(user_id,char); dmg=0; heal=0; boss_was_defending=int(b.get('defending') or 0)
         if roll!=1:
             raw=(eff['atk']*float(ab['power'])*RPG_DICE_MULT[roll])-(int(b['defense'])*(1-float(ab.get('pen',0)))*.40); dmg=max(1,int(round(raw)))
@@ -8785,7 +8958,11 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         ai_text=f"🧠 {b['name']} cambia de estrategia.\n❤️ Recupera {nh-int(b['hp'])} HP."
     else:
         if eff is None: eff=_boss_stats_for(user_id,char)
-        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0); roll=random.randint(1,6); damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0)
+        dr=send_dice(chat_id,'🎲')
+        roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+        if not roll: roll=random.randint(1,6)
+        damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
         key=str(b.get('boss_key') or '')
         # Identidad mecánica de los Bosses sin añadir estados frágiles a la BD.
         if phase==3 and key in ('fenrir','behemoth'): damage=max(0,int(round(damage*1.18)))
@@ -12167,6 +12344,12 @@ def handle_rpg_callback(query):
         result=resolve_rpg_action(chat_id,uid,data.split(":",1)[1],msg.get("message_id"))
         _delete_old_combat_card(chat_id,msg)
         return result
+    if data.startswith("dicefight_accept:") or data.startswith("dicefight_reject:"):
+        try: did=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=resolve_dice_duel(chat_id,uid,did,accept=data.startswith("dicefight_accept:"))
+        if msg2: send_message(chat_id,msg2)
+        return True
     if data=="rpg_defend":
         result=rpg_defend_action(chat_id,uid)
         _delete_old_combat_card(chat_id,msg)
@@ -12223,7 +12406,7 @@ def handle_rpg_callback(query):
             send_message(chat_id,"🎒 Tu inventario se administra en privado con KiwBot.",reply_markup=_private_launch_keyboard("inventory")); return True
         world=current_rpg_world()
         with db_lock:
-            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot,x.item_type FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(uid),world)).fetchall(); conn.close()
+            conn=get_db(); rows=conn.execute("""SELECT MIN(i.id) AS id, NULL::BIGINT AS serial_number, SUM(i.quantity) AS quantity, MAX(i.equipped) AS equipped, x.item_key,x.name,x.rarity,x.equip_slot,x.item_type,MAX(i.acquired_at) AS last_acquired FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? GROUP BY x.item_key,x.name,x.rarity,x.equip_slot,x.item_type ORDER BY last_acquired DESC,x.name""",(int(uid),world)).fetchall(); conn.close()
         kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
             serial=f" #{r['serial_number']}" if r['serial_number'] else ""; eq=" 🟢" if int(r['equipped']) else ""
@@ -12444,7 +12627,7 @@ def rpg_commands_text(user_id=0):
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE.\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate trabado.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/forja — Forja y mejoras.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; hasta 20,000 KW.\n/peleadados @usuario cantidad — Mejor de 3 con apuesta.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Inventario de ambos.\n/compartiritem — Entrega un objeto.\n/divorcio — Termina el matrimonio.\n\n"
@@ -13846,7 +14029,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,"🎒 Tu inventario se administra en privado. Perfil, mascotas e intercambios siguen siendo públicos.",reply_markup=_private_launch_keyboard("inventory")); return True
         world=current_rpg_world()
         with db_lock:
-            conn=get_db(); rows=conn.execute("""SELECT i.id,i.serial_number,i.quantity,i.equipped,x.name,x.rarity,x.equip_slot,x.item_type FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(int(user_id),world)).fetchall(); conn.close()
+            conn=get_db(); rows=conn.execute("""SELECT MIN(i.id) AS id, NULL::BIGINT AS serial_number, SUM(i.quantity) AS quantity, MAX(i.equipped) AS equipped, x.item_key,x.name,x.rarity,x.equip_slot,x.item_type,MAX(i.acquired_at) AS last_acquired FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? GROUP BY x.item_key,x.name,x.rarity,x.equip_slot,x.item_type ORDER BY last_acquired DESC,x.name""",(int(user_id),world)).fetchall(); conn.close()
         lines=["🎒 INVENTARIO","","Toca un objeto para verlo y administrarlo."] if rows else ["🎒 INVENTARIO","","Todavía está vacío."]
         kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],[{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
         for r in rows:
@@ -14120,6 +14303,20 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,"No tienes un personaje activo.\n\n👇 Haz clic aquí para comenzar la creación de tu personaje.",reply_markup=creator_launch_keyboard(chat_id))
             return True
         send_message(chat_id, character_card(char), reply_markup={"inline_keyboard":[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"}]]})
+        return True
+
+    if command in ("/robo", "/robar"):
+        user=message.get("from",{}); target=resolve_target_for_economy(message,text)
+        if not target or not target.get("id"):
+            send_message(chat_id,"🥷 Uso: responde al mensaje de alguien con /robo o usa /robo @usuario."); return True
+        ok,msg2=attempt_robbery(chat_id,user,target); send_message(chat_id,msg2); return True
+
+    if command in ("/peleadados", "/duelodados"):
+        user=message.get("from",{}); target=resolve_target_for_economy(message,text); wager=parse_positive_amount(text)
+        if not target or not target.get("id") or not wager:
+            send_message(chat_id,"🎲 Uso: /peleadados @usuario 5000\nTambién puedes responder a alguien: /peleadados 5000"); return True
+        ok,msg2=start_dice_duel(chat_id,message.get("message_thread_id") or 0,user,target,wager)
+        if msg2: send_message(chat_id,msg2)
         return True
 
     if command in ("/transferir", "/pagar"):
@@ -14793,6 +14990,8 @@ Kiwons:
 /perfil
 /saldo
 /transferir
+/robo
+/peleadados
 /ranking
 
 RPG:

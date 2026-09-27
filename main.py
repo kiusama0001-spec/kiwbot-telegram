@@ -14137,6 +14137,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
 
     if command in ("/subirarma", "/mejorararma", "/armas", "/mejorarequipo"):
         user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private":
+            send_message(chat_id,"🔨 Las mejoras de equipo se administran en privado con KiwBot.",reply_markup=_private_launch_keyboard("upgrade_weapons")); return True
         txt,kb=forge_weapon_upgrade_text_keyboard(user_id)
         send_message(chat_id,txt,reply_markup=kb); return True
 

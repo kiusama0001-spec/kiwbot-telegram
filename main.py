@@ -5489,7 +5489,7 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
             if uses>=3: c.close(); return '🩺 Eira cruza los brazos.\n\n—Ya te curé tres veces. Regresa cuando hayan pasado 3 horas.'
             char=get_active_character(uid)
             if not char: c.close(); return 'Necesitas un personaje activo.'
-            maxhp=effective_character_stats(char)['max_hp']; c.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(int(maxhp),now,int(char['id']))); c.execute("INSERT INTO rpg_world_heals(user_id,window_started,uses) VALUES(?,?,1) ON CONFLICT(user_id) DO UPDATE SET window_started=EXCLUDED.window_started,uses=?",(int(uid),start,uses+1,uses+1)); c.commit(); c.close(); return f'🩺 Eira cerró tus heridas.\n❤️ HP restaurado a {maxhp}.\nCuraciones: {uses+1}/3.'
+            maxhp=effective_character_stats(char)['max_hp']; c.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(int(maxhp),now,int(char['id']))); c.execute("INSERT INTO rpg_world_heals(user_id,window_started,uses) VALUES(?,?,1) ON CONFLICT(user_id) DO UPDATE SET window_started=EXCLUDED.window_started,uses=?",(int(uid),start,uses+1)); c.commit(); c.close(); return f'🩺 Eira cerró tus heridas.\n❤️ HP restaurado a {maxhp}.\nCuraciones: {uses+1}/3.'
         if key=='erick' and action=='enchant':
             char=get_active_character(uid)
             if not char: c.close(); return 'Necesitas un personaje activo.'
@@ -12898,10 +12898,19 @@ def handle_rpg_callback(query):
         mid=int(data.split(":",1)[1]); _ensure_world_memory_db()
         with db_lock:
             c=get_db(); m=c.execute("SELECT * FROM rpg_exclusive_missions WHERE id=? FOR UPDATE",(mid,)).fetchone()
-            if not m or m['status']!='open': c.rollback(); c.close(); send_message(chat_id,"Esa misión exclusiva ya no está disponible."); return True
+            if not m: c.rollback(); c.close(); send_message(chat_id,"Esa misión exclusiva ya no está disponible."); return True
             if int(m['target_user_id'])!=int(uid): c.rollback(); c.close(); telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🔒 Esta misión pertenece a otro aventurero.","show_alert":True}); return True
-            c.execute("UPDATE rpg_exclusive_missions SET status='active',progress=0 WHERE id=?",(mid,)); c.commit(); c.close()
-        send_message(chat_id,f"🔓 {_world_user_mention(uid,chat_id)} aceptó «{m['title']}».\n🎯 Objetivo: {str(m.get('body') or 'Completa el encargo indicado.')}\n📊 Progreso: 0/{int(m.get('goal') or 1):,}\n🪙 Premio: {int(m['reward']):,} KW")
+            if str(m['status'])=='open':
+                c.execute("UPDATE rpg_exclusive_missions SET status='active',progress=0 WHERE id=?",(mid,)); c.commit(); c.close()
+                prefix=f"🔓 {_world_user_mention(uid,chat_id)} aceptó «{m['title']}»."
+                progress=0
+            elif str(m['status'])=='active':
+                c.rollback(); c.close()
+                prefix=f"📜 «{m['title']}» ya está activa."
+                progress=int(m.get('progress') or 0)
+            else:
+                c.rollback(); c.close(); send_message(chat_id,"Esa misión exclusiva ya terminó."); return True
+        send_message(chat_id,f"{prefix}\n🎯 Objetivo: {str(m.get('body') or 'Completa el encargo indicado.')}\n📊 Progreso: {progress:,}/{int(m.get('goal') or 1):,}\n🪙 Premio: {int(m['reward']):,} KW")
         return True
     if data.startswith("mission_select:"):
         # Compatibilidad con botones antiguos: ya no se seleccionan misiones.

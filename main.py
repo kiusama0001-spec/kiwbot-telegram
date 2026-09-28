@@ -6740,8 +6740,6 @@ def rpg_inventory_page(user_id, page=1):
         if page<pages: nav.append({"text":"Siguiente ➡️","callback_data":f"rpg_show_inventory:{page+1}"})
         kb.append(nav)
     char=get_active_character(user_id)
-    rab=_equipped_recuerdo_ability(user_id,int(char['id'])) if char else None
-    if rab: rows.insert(max(0,len(rows)-1),[{'text':f"{rab['emoji']} {rab['name']} · RECUERDO · ×{rab['power']:.2f}",'callback_data':f"boss_atk:{b['id']}:{rab['key']}"}])
     if char and is_owner(user_id) and char['class_name']=='The Cleaner':
         active=bool(char['secret_blades_active'])
         kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])

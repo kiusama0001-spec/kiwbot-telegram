@@ -6437,6 +6437,7 @@ def rpg_inventory_page(user_id, page=1):
     start=(page-1)*RPG_INVENTORY_PAGE_SIZE
     shown=entries[start:start+RPG_INVENTORY_PAGE_SIZE]
     kb=[[{"text":"🎽 Equipo","callback_data":"rpg_show_equipment"},{"text":"🔥 Forja","callback_data":"forge_home"}],
+        [{"text":"♻️ Desmantelar varias","callback_data":"salvage_home"},{"text":"🏦 Banco","callback_data":"bank_home"}],
         [{"text":"🏪 Tienda RPG","callback_data":"rpg_shop"}]]
     for r in shown:
         serial=f" #{r['serial_number']}" if r.get('serial_number') else ""
@@ -7667,12 +7668,21 @@ RPG_WEAPON_GACHA_TIERS={
 # inaugura el sistema con las dos espadas de Kirito. Las demás ramas usan dos
 # variantes propias hasta que se sustituyan por nuevos diseños mensuales.
 RPG_WEAPON_GACHA_MONTHLY_MYTHICS={
-    (2026,9):[
-        ('elucidator','Elucidator',64,10,105,'starburst_stream','⚔️','Starburst Stream',1.34,0.28),
-        ('dark_repulser','Dark Repulser',56,18,130,'vorpal_strike','💠','Vorpal Strike',1.29,0.38),
-        ('blackwyrm_coat','Abrigo Negro de Kirito',18,38,180,'sonic_leap','🖤','Sonic Leap',1.25,0.32),
-    ]
+    # Dos piezas crossover por mes; septiembre 2026 conserva el evento SAO especial de 3.
+    1:[('excalibur_fate','Excalibur — Fate',62,14,115,'excalibur_burst','✨','Excalibur Burst',1.33,0.30),('survey_cloak','Capa del Cuerpo de Exploración',16,35,175,'wing_charge','🪽','Carga de las Alas',1.24,0.34)],
+    2:[('tessaiga','Tessaiga',61,13,120,'wind_scar','🌪️','Cicatriz del Viento',1.32,0.31),('red_coat','Abrigo Rojo del Cazador',20,34,170,'devil_rush','🔴','Devil Rush',1.25,0.33)],
+    3:[('zangetsu','Zangetsu',65,9,105,'getsuga','🌙','Getsuga',1.35,0.27),('alchemist_coat','Abrigo del Alquimista',17,37,180,'transmute_guard','⚗️','Guardia de Transmutación',1.23,0.38)],
+    4:[('anduril','Andúril',63,15,120,'king_strike','👑','Golpe del Rey',1.32,0.34),('mithril_coat','Cota de Mithril',12,42,195,'mithril_guard','🛡️','Guardia de Mithril',1.21,0.44)],
+    5:[('longclaw','Garra',60,17,125,'wolf_strike','🐺','Golpe del Lobo',1.30,0.36),('night_watch_cloak','Capa de la Guardia de la Noche',14,40,190,'watcher_guard','🌑','Guardia Nocturna',1.22,0.42)],
+    6:[('green_destiny','Destino Verde',64,11,110,'jade_cut','🟢','Corte de Jade',1.34,0.29),('dragon_robe','Túnica del Guerrero Dragón',18,36,180,'dragon_flow','🐉','Flujo del Dragón',1.25,0.35)],
+    7:[('murasame','Murasame',63,10,108,'cursed_cut','🩸','Corte Maldito',1.35,0.26),('black_swordsman_armor','Armadura del Espadachín Negro',19,39,185,'berserk_charge','⚫','Carga Berserker',1.27,0.31)],
+    8:[('nichirin_sun','Nichirin Solar',62,12,112,'sun_breath','☀️','Aliento Solar',1.33,0.30),('hashira_haori','Haori de Hashira',16,38,185,'hashira_focus','🔥','Concentración Hashira',1.24,0.38)],
+    9:[('elucidator','Elucidator',64,10,105,'starburst_stream','⚔️','Starburst Stream',1.34,0.28),('dark_repulser','Dark Repulser',56,18,130,'vorpal_strike','💠','Vorpal Strike',1.29,0.38),('blackwyrm_coat','Abrigo Negro de Kirito',18,38,180,'sonic_leap','🖤','Sonic Leap',1.25,0.32)],
+    10:[('tessaiga_oct','Tessaiga — Luna Demoníaca',63,12,115,'wind_scar_oct','🌪️','Cicatriz del Viento',1.33,0.30),('witcher_armor','Armadura del Lobo Blanco',18,40,185,'witcher_sign','🐺','Signo del Lobo',1.24,0.40)],
+    11:[('yamato','Yamato',66,9,105,'judgement_cut','💙','Judgement Cut',1.36,0.27),('mandalorian_armor','Armadura de Beskar',10,45,205,'beskar_guard','🛡️','Guardia Beskar',1.20,0.48)],
+    12:[('gryffindor_sword','Espada de Gryffindor',62,16,125,'lion_strike','🦁','Golpe del León',1.32,0.35),('santa_suit_legend','Abrigo del Héroe Invernal',15,41,200,'winter_guard','❄️','Guardia Invernal',1.22,0.45)],
 }
+
 
 GACHA_WEAPON_SKILL_DEFAULTS={
     1:('corte_eclipse','🌘','Corte de Eclipse',1.30,0.25),
@@ -7688,7 +7698,7 @@ def _weapon_gacha_branch():
 
 def _weapon_gacha_monthly_mythics():
     t=time.localtime(); branch,name=_weapon_gacha_branch()
-    explicit=RPG_WEAPON_GACHA_MONTHLY_MYTHICS.get((t.tm_year,t.tm_mon))
+    explicit=RPG_WEAPON_GACHA_MONTHLY_MYTHICS.get(t.tm_mon)
     if explicit: return explicit
     out=[]
     for idx in (1,2,3):
@@ -7705,28 +7715,34 @@ def _ensure_weapon_gacha_items():
         c=get_db()
         # Cada rareza normal puede entregar arma O ropa/armadura. Así el gacha es de equipo,
         # no una colección formada únicamente por espadas.
+        # Pool amplio: 12 piezas normales POR rareza (6 armas + 6 prendas/armaduras).
+        # La rama mensual cambia sus nombres, pero deja variedad suficiente para que el gacha
+        # no repita siempre las mismas dos piezas.
+        weapon_forms=('Espada','Katana','Lanza','Mandoble','Dagas','Arco')
+        outfit_forms=(('Abrigo','armadura'),('Coraza','armadura'),('Capucha','casco'),('Guantes','guantes'),('Botas','botas'),('Amuleto','accesorio'))
         for rarity,(icon,weight,atk,de,hp) in RPG_WEAPON_GACHA_TIERS.items():
             if rarity=='mitico': continue
-            for kind in ('arma','ropa'):
-                if kind=='arma':
-                    key=f"gacha_weapon_{branch}_{rarity}"
-                    nm=name+" "+rarity.replace('_',' ').title()
-                    slot='arma'; iatk,idef,ihp=atk,de,hp
-                    desc=f"Arma universal de la rotación mensual {name}. Puede equiparla cualquier clase."
-                else:
-                    key=f"gacha_outfit_{branch}_{rarity}"
-                    nm=f"Atuendo {name} "+rarity.replace('_',' ').title()
-                    slot='armadura'; iatk,idef,ihp=max(0,atk//3),de+max(3,atk//3),hp+25
-                    desc=f"Ropa/armadura universal de la rotación mensual {name}. Puede equiparla cualquier clase."
+            pretty=rarity.replace('_',' ').title()
+            for idx,form in enumerate(weapon_forms,1):
+                key=f"gacha_weapon_{branch}_{rarity}_{idx}"; nm=f"{form} {name} {pretty}"
+                # pequeñas variaciones conservando el poder de la rareza
+                iatk=atk+((idx-3)*2); idef=max(0,de+(idx%3)-1); ihp=max(0,hp+(idx-3)*5)
                 c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
                     VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,1)
                     ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,item_type=EXCLUDED.item_type,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes='',min_level=1""",
-                    (key,nm,rarity,kind,desc,iatk,idef,ihp,now,slot,''))
+                    (key,nm,rarity,'arma',f"Arma universal de la rotación mensual {name}.",iatk,idef,ihp,now,'arma',''))
+            for idx,(form,slot) in enumerate(outfit_forms,1):
+                key=f"gacha_outfit_{branch}_{rarity}_{idx}"; nm=f"{form} {name} {pretty}"
+                iatk=max(0,atk//4+(idx%2)); idef=de+max(3,atk//3)+(idx%3); ihp=hp+20+idx*5
+                c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level)
+                    VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,1)
+                    ON CONFLICT(item_key) DO UPDATE SET name=EXCLUDED.name,rarity=EXCLUDED.rarity,item_type=EXCLUDED.item_type,description=EXCLUDED.description,atk_bonus=EXCLUDED.atk_bonus,def_bonus=EXCLUDED.def_bonus,hp_bonus=EXCLUDED.hp_bonus,equip_slot=EXCLUDED.equip_slot,allowed_classes='',min_level=1""",
+                    (key,nm,rarity,'ropa',f"Prenda universal de la rotación mensual {name}.",iatk,idef,ihp,now,slot,''))
         # Las míticas del mes pueden ser armas o ropa. Septiembre añade las dos espadas
         # de Kirito y su abrigo negro como tercera pieza destacada.
         for idx,m in enumerate(_weapon_gacha_monthly_mythics(),1):
             slug,nm,atk,de,hp,skill_key,skill_emoji,skill_name,power,pen=m
-            is_outfit=(slug=='blackwyrm_coat' or 'coat' in slug or 'abrigo' in slug or 'armadura' in slug)
+            is_outfit=any(tag in slug for tag in ('coat','abrigo','armadura','armor','cloak','capa','robe','tunica','haori','suit'))
             slot='armadura' if is_outfit else 'arma'; kind='ropa' if is_outfit else 'arma'
             key=f"gacha_weapon_{branch}_mitico_{idx}"
             desc=(f"{'Ropa/armadura' if is_outfit else 'Arma'} mítica universal de la rotación {name}. Al equiparla desbloquea {skill_name} "
@@ -7743,7 +7759,7 @@ def weapon_gacha_text(user_id):
     return (f"🎰 GACHA DE EQUIPO — {name.upper()}\n\n🪙 Tirada: {RPG_WEAPON_GACHA_COST:,} KW · Saldo: {bal:,} KW\n"
             "🔵 Rara 70% · 🟣 Ultra rara 24% · 🟡 Legendaria 5% · 🌟 Mítica 1%\n\n"
             f"🌟 MÍTICAS DEL MES: {featured}\n"
-            "Cada mes hay piezas Míticas UNIVERSALES (armas y ropa) y cada una añade una habilidad mientras esté equipada.\n"
+            "Cada rareza tiene 12 piezas normales distintas (armas + ropa/equipo). Las Míticas del mes son especiales y añaden habilidad al equiparlas.\n"
             "🏆 Las habilidades de arma están desactivadas SOLO en /duelopvp clasificatorio.\n🔄 La rama cambia automáticamente cada mes; las armas obtenidas no desaparecen.")
 
 def weapon_gacha_keyboard():
@@ -7762,7 +7778,7 @@ def open_weapon_gacha(user_id):
         myths=_weapon_gacha_monthly_mythics(); myth_idx=random.randint(1,len(myths))
         item_key=f"gacha_weapon_{branch}_mitico_{myth_idx}"
     else:
-        item_key=(f"gacha_weapon_{branch}_{rarity}" if random.random()<0.5 else f"gacha_outfit_{branch}_{rarity}")
+        item_key=(f"gacha_weapon_{branch}_{rarity}_{random.randint(1,6)}" if random.random()<0.5 else f"gacha_outfit_{branch}_{rarity}_{random.randint(1,6)}")
     item=grant_rpg_item(user_id,int(char['id']),item_key,source=f"weapon_gacha:{_weapon_gacha_month_key()}")
     if not item:
         change_kiwons(user_id,RPG_WEAPON_GACHA_COST,'weapon_gacha_refund',note='Reembolso por fallo de entrega')
@@ -7826,6 +7842,231 @@ def _append_gacha_weapon_skill_button(kb,user_id,prefix,context_id=None):
         cb=(f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}")
         rows.insert(pos,[{'text':f"{ab['emoji']} {ab['name']} · {ab['weapon_name']} · ×{ab['power']:.2f}",'callback_data':cb}]); pos+=1
     return {'inline_keyboard':rows}
+
+# =========================================================
+# ECONOMÍA VIVA — DESMANTELAR + BANCO / CASA DE EMPEÑO
+# =========================================================
+RPG_BANK_LOAN_DAYS=7
+RPG_BANK_COMMISSION_PCT=5
+RPG_BANK_INTEREST_PCT=12
+RPG_PAWN_INTEREST_PCT=8
+
+
+def _ensure_economy_viva_db():
+    with db_lock:
+        c=get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_salvage_selection(
+            user_id BIGINT NOT NULL, inventory_id BIGINT NOT NULL, created_at BIGINT NOT NULL,
+            PRIMARY KEY(user_id,inventory_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_bank_loans(
+            id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,principal BIGINT NOT NULL,
+            commission BIGINT NOT NULL,interest BIGINT NOT NULL,total_due BIGINT NOT NULL,
+            paid BIGINT DEFAULT 0,status TEXT DEFAULT 'active',created_at BIGINT NOT NULL,due_at BIGINT NOT NULL,
+            defaulted_at BIGINT DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_pawns(
+            id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,inventory_id BIGINT NOT NULL,
+            item_name TEXT NOT NULL,loan_amount BIGINT NOT NULL,redeem_amount BIGINT NOT NULL,
+            status TEXT DEFAULT 'active',created_at BIGINT NOT NULL,due_at BIGINT NOT NULL)""")
+        c.commit(); c.close()
+
+
+def _gear_value(row):
+    rarity_mult={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12,'mitico':22,'reliquia':28}
+    r=str(row.get('rarity') or 'comun'); forge=int(row.get('forge_level') or 0)
+    stats=int(row.get('atk_bonus') or 0)*90+int(row.get('def_bonus') or 0)*75+int(row.get('hp_bonus') or 0)*12
+    ench=int(row.get('enchant_atk') or 0)*90+int(row.get('enchant_def') or 0)*75+int(row.get('enchant_hp') or 0)*12
+    return max(500,(stats+ench+500)*rarity_mult.get(r,1)+forge*900)
+
+
+def salvage_text_keyboard(user_id):
+    _ensure_economy_viva_db(); world=current_rpg_world(); uid=int(user_id)
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT i.id,i.equipped,i.locked,i.quantity,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,
+            x.name,x.rarity,x.item_type,x.equip_slot,x.atk_bonus,x.def_bonus,x.hp_bonus
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=? AND COALESCE(x.equip_slot,'')<>''
+              AND i.equipped=0 AND i.locked=0 AND x.rarity NOT IN ('mitico','reliquia')
+            ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(uid,world)).fetchall()
+        sel={int(r['inventory_id']) for r in c.execute("SELECT inventory_id FROM rpg_salvage_selection WHERE user_id=?",(uid,)).fetchall()}
+        c.close()
+    kb=[]; total_dust=0
+    rarity_dust={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12}
+    for rr in rows:
+        r=dict(rr); iid=int(r['id']); dust=rarity_dust.get(str(r.get('rarity')),1)+max(0,int(r.get('forge_level') or 0))
+        if iid in sel: total_dust+=dust
+        mark='✅' if iid in sel else '⬜'
+        kb.append([{'text':f"{mark} {r['name']} · +{dust} polvo",'callback_data':f'salvage_toggle:{iid}'}])
+    if sel: kb.append([{'text':f'♻️ DESMANTELAR {len(sel)} · +{total_dust} Polvo','callback_data':'salvage_confirm'}])
+    kb.append([{'text':'🧹 Limpiar selección','callback_data':'salvage_clear'},{'text':'🎒 Inventario','callback_data':'rpg_show_inventory:1'}])
+    txt=("♻️ DESMANTELAR EQUIPO\n\nSelecciona VARIAS piezas y destrúyelas juntas. Recibirás Polvo de Forja según rareza y nivel de Forja.\n"
+         "🔒 Equipados, bloqueados, Míticos y Reliquias están protegidos.\n\n"
+         f"Seleccionados: {len(sel)} · Polvo previsto: {total_dust}")
+    return txt,{'inline_keyboard':kb}
+
+
+def salvage_toggle(user_id,inventory_id):
+    _ensure_economy_viva_db(); uid=int(user_id); iid=int(inventory_id); world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        c=get_db(); r=c.execute("""SELECT i.id FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+          WHERE i.id=? AND i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0
+            AND COALESCE(x.equip_slot,'')<>'' AND x.rarity NOT IN ('mitico','reliquia')""",(iid,uid,world)).fetchone()
+        if not r: c.close(); return False
+        old=c.execute("SELECT 1 FROM rpg_salvage_selection WHERE user_id=? AND inventory_id=?",(uid,iid)).fetchone()
+        if old: c.execute("DELETE FROM rpg_salvage_selection WHERE user_id=? AND inventory_id=?",(uid,iid))
+        else: c.execute("INSERT INTO rpg_salvage_selection(user_id,inventory_id,created_at) VALUES(?,?,?) ON CONFLICT DO NOTHING",(uid,iid,now))
+        c.commit(); c.close(); return True
+
+
+def salvage_confirm(user_id):
+    _ensure_economy_viva_db(); uid=int(user_id); world=current_rpg_world(); now=int(time.time()); char=get_active_character(uid)
+    rarity_dust={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12}
+    with db_lock:
+        c=get_db()
+        try:
+            rows=c.execute("""SELECT i.id,i.forge_level,x.name,x.rarity FROM rpg_salvage_selection s
+              JOIN rpg_inventory i ON i.id=s.inventory_id JOIN rpg_items x ON x.item_key=i.item_key
+              WHERE s.user_id=? AND i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0
+                AND COALESCE(x.equip_slot,'')<>'' AND x.rarity NOT IN ('mitico','reliquia') FOR UPDATE""",(uid,uid,world)).fetchall()
+            if not rows: c.execute("DELETE FROM rpg_salvage_selection WHERE user_id=?",(uid,)); c.commit(); c.close(); return False,'♻️ No hay piezas válidas seleccionadas.'
+            dust=sum(rarity_dust.get(str(r['rarity']),1)+max(0,int(r.get('forge_level') or 0)) for r in rows)
+            ids=[int(r['id']) for r in rows]
+            c.execute("DELETE FROM rpg_inventory WHERE user_id=? AND id = ANY(?)",(uid,ids))
+            mat=c.execute("SELECT id FROM rpg_inventory WHERE user_id=? AND world_id=? AND item_key='polvo_forja' AND equipped=0 AND locked=0 LIMIT 1 FOR UPDATE",(uid,world)).fetchone()
+            if mat: c.execute("UPDATE rpg_inventory SET quantity=quantity+? WHERE id=?",(dust,int(mat['id'])))
+            else: c.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES(?,?, 'polvo_forja',NULL,?,0,0,?,'desmantelar',?,?)",(uid,int(char['id']) if char else None,dust,now,world,uid))
+            c.execute("DELETE FROM rpg_salvage_selection WHERE user_id=?",(uid,)); c.commit(); c.close()
+            return True,f"♻️ Desmantelaste {len(rows)} piezas.\n🧱 +{dust} Polvo de Forja."
+        except Exception:
+            c.rollback(); c.close(); raise
+
+
+def _bank_credit_limit(user_id):
+    ch=get_active_character(user_id); level=int(ch['level']) if ch else 1
+    rep=int(get_reputation(user_id).get('score') or 0)
+    base=20_000+level*2_500+max(-10_000,min(50_000,rep*500))
+    return max(10_000,min(250_000,base))
+
+
+def _bank_apply_default(user_id):
+    _ensure_economy_viva_db(); uid=int(user_id); now=int(time.time()); world=current_rpg_world(); seized=[]
+    with db_lock:
+        c=get_db()
+        loan=c.execute("SELECT * FROM rpg_bank_loans WHERE user_id=? AND status='active' AND due_at<? ORDER BY id LIMIT 1 FOR UPDATE",(uid,now)).fetchone()
+        if not loan: c.close(); return []
+        debt=max(0,int(loan['total_due'])-int(loan.get('paid') or 0))
+        bal=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone(); cash=int((bal or {}).get('kiwons') or 0)
+        take=min(cash,debt)
+        if take: c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(take,now,uid)); debt-=take
+        if debt>0:
+            rows=c.execute("""SELECT i.id,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,x.name,x.rarity,x.atk_bonus,x.def_bonus,x.hp_bonus
+              FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+              WHERE i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0 AND COALESCE(x.equip_slot,'')<>''
+              ORDER BY i.id FOR UPDATE""",(uid,world)).fetchall()
+            ranked=sorted((dict(r) for r in rows),key=_gear_value,reverse=True)
+            for r in ranked:
+                if debt<=0: break
+                val=max(500,int(_gear_value(r)*0.45)); c.execute("DELETE FROM rpg_inventory WHERE id=? AND user_id=?",(int(r['id']),uid)); debt-=val; seized.append(str(r['name']))
+        c.execute("UPDATE rpg_bank_loans SET status='defaulted',defaulted_at=? WHERE id=?",(now,int(loan['id']))); c.commit(); c.close()
+    # La morosidad afecta al mundo: reputación negativa, una sola vez por préstamo.
+    try: record_world_decision(uid,f"bank_default:{int(loan['id'])}","Incumpliste un préstamo del Banco de Aeternus.",-10,traits={'opportunist':1})
+    except Exception: pass
+    return seized
+
+
+def bank_text_keyboard(user_id):
+    _ensure_economy_viva_db(); seized=_bank_apply_default(user_id); uid=int(user_id); now=int(time.time()); limit=_bank_credit_limit(uid)
+    with db_lock:
+        c=get_db(); loan=c.execute("SELECT * FROM rpg_bank_loans WHERE user_id=? AND status='active' ORDER BY id DESC LIMIT 1",(uid,)).fetchone(); pawns=c.execute("SELECT COUNT(*) n FROM rpg_pawns WHERE user_id=? AND status='active'",(uid,)).fetchone(); c.close()
+    lines=["🏦 BANCO DE AETERNUS","",f"🪙 Saldo: {get_kiwons(uid):,} KW",f"💳 Límite de crédito: {limit:,} KW",f"🧾 Comisión al pedir: {RPG_BANK_COMMISSION_PCT}% · Interés: {RPG_BANK_INTEREST_PCT}% · Plazo: {RPG_BANK_LOAN_DAYS} días"]
+    kb=[]
+    if loan:
+        due=max(0,int(loan['total_due'])-int(loan.get('paid') or 0)); days=max(0,(int(loan['due_at'])-now+86399)//86400)
+        lines += ["",f"📌 Préstamo activo: debes {due:,} KW",f"⏳ Vence en: {days} día(s)"]
+        for amt in (1000,5000,10000): kb.append([{'text':f'💸 Pagar {amt:,} KW','callback_data':f'bank_pay:{amt}'}])
+        kb.append([{'text':'💰 Liquidar deuda','callback_data':'bank_payall'}])
+    else:
+        opts=sorted(set(x for x in (10_000,25_000,50_000,100_000,limit) if x<=limit and x>=10_000))
+        for amt in opts[-4:]: kb.append([{'text':f'🏦 Pedir {amt:,} KW','callback_data':f'bank_borrow:{amt}'}])
+    kb.append([{'text':'💎 Casa de empeño','callback_data':'pawn_home'},{'text':'♻️ Desmantelar','callback_data':'salvage_home'}])
+    if seized: lines += ["", "⚠️ PRÉSTAMO VENCIDO: el banco ejecutó la deuda.", "📦 Bienes embargados: "+(', '.join(seized) if seized else 'ninguno'), "⚖️ Reputación: -10"]
+    lines += ["", "⚠️ Si no pagas al vencer: el banco cobra tu KW disponible, puede embargar primero tu equipo no equipado de mayor valor y tu reputación baja 10 puntos."]
+    return '\n'.join(lines),{'inline_keyboard':kb}
+
+
+def bank_borrow(user_id,amount):
+    _ensure_economy_viva_db(); uid=int(user_id); amount=int(amount); now=int(time.time()); limit=_bank_credit_limit(uid)
+    if amount<10_000 or amount>limit: return False,f"🏦 Tu límite actual es {limit:,} KW."
+    commission=max(1,round(amount*RPG_BANK_COMMISSION_PCT/100)); interest=max(1,round(amount*RPG_BANK_INTEREST_PCT/100)); received=amount-commission; due=amount+interest
+    with db_lock:
+        c=get_db()
+        try:
+            active=c.execute("SELECT 1 FROM rpg_bank_loans WHERE user_id=? AND status='active' FOR UPDATE",(uid,)).fetchone()
+            if active: c.rollback(); c.close(); return False,'🏦 Ya tienes un préstamo activo.'
+            p=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            if not p: c.rollback(); c.close(); return False,'Primero necesitas una cuenta RPG.'
+            c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(received,now,uid))
+            c.execute("INSERT INTO rpg_bank_loans(user_id,principal,commission,interest,total_due,paid,status,created_at,due_at) VALUES(?,?,?,?,?,0,'active',?,?)",(uid,amount,commission,interest,due,now,now+RPG_BANK_LOAN_DAYS*86400))
+            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,note,created_at) VALUES(?,?,'bank_loan',?,?)",(uid,received,f'Préstamo {amount}; comisión {commission}; deuda {due}',now))
+            c.commit(); c.close(); return True,f"🏦 Préstamo aprobado.\n💰 Crédito: {amount:,} KW\n🧾 Comisión {RPG_BANK_COMMISSION_PCT}%: -{commission:,}\n🪙 Recibes: {received:,} KW\n📌 Debes devolver: {due:,} KW en {RPG_BANK_LOAN_DAYS} días."
+        except Exception: c.rollback(); c.close(); raise
+
+
+def bank_pay(user_id,amount=None):
+    _ensure_economy_viva_db(); uid=int(user_id); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            loan=c.execute("SELECT * FROM rpg_bank_loans WHERE user_id=? AND status='active' ORDER BY id DESC LIMIT 1 FOR UPDATE",(uid,)).fetchone()
+            if not loan: c.rollback(); c.close(); return False,'🏦 No tienes préstamo activo.'
+            due=max(0,int(loan['total_due'])-int(loan.get('paid') or 0)); pay=due if amount is None else min(due,max(1,int(amount)))
+            p=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone(); bal=int((p or {}).get('kiwons') or 0)
+            if bal<pay: c.rollback(); c.close(); return False,f"🪙 Necesitas {pay:,} KW. Saldo: {bal:,}."
+            newpaid=int(loan.get('paid') or 0)+pay; done=newpaid>=int(loan['total_due'])
+            c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(pay,now,uid)); c.execute("UPDATE rpg_bank_loans SET paid=?,status=? WHERE id=?",(newpaid,'paid' if done else 'active',int(loan['id'])))
+            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,note,created_at) VALUES(?,?,'bank_payment',?,?)",(uid,-pay,f'Pago préstamo #{int(loan["id"])}',now)); c.commit(); c.close()
+            return True,(f"✅ Préstamo liquidado. Historial limpio." if done else f"💸 Pagaste {pay:,} KW. Restan {int(loan['total_due'])-newpaid:,} KW.")
+        except Exception: c.rollback(); c.close(); raise
+
+
+def pawn_text_keyboard(user_id):
+    _ensure_economy_viva_db(); uid=int(user_id); world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT i.id,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,x.name,x.rarity,x.atk_bonus,x.def_bonus,x.hp_bonus
+          FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0 AND COALESCE(x.equip_slot,'')<>'' ORDER BY i.id DESC LIMIT 15""",(uid,world)).fetchall(); active=c.execute("SELECT * FROM rpg_pawns WHERE user_id=? AND status='active' ORDER BY id DESC",(uid,)).fetchall(); c.close()
+    kb=[]; lines=["💎 CASA DE EMPEÑO","","El objeto queda BLOQUEADO. Recibes 40% de su valor estimado y puedes recuperarlo pagando capital + 8% en 7 días."]
+    for p in active:
+        lines.append(f"🔒 {p['item_name']} · rescate {int(p['redeem_amount']):,} KW")
+        kb.append([{'text':f"🔓 Recuperar {p['item_name'][:24]}",'callback_data':f"pawn_redeem:{int(p['id'])}"}])
+    for rr in rows[:10]:
+        r=dict(rr); val=max(500,int(_gear_value(r)*0.40)); kb.append([{'text':f"💎 Empeñar {r['name'][:22]} · {val:,} KW",'callback_data':f"pawn_item:{int(r['id'])}"}])
+    kb.append([{'text':'⬅️ Banco','callback_data':'bank_home'}])
+    return '\n'.join(lines),{'inline_keyboard':kb}
+
+
+def pawn_item(user_id,inventory_id):
+    _ensure_economy_viva_db(); uid=int(user_id); iid=int(inventory_id); world=current_rpg_world(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            r=c.execute("""SELECT i.id,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,x.name,x.rarity,x.atk_bonus,x.def_bonus,x.hp_bonus FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.id=? AND i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0 AND COALESCE(x.equip_slot,'')<>'' FOR UPDATE""",(iid,uid,world)).fetchone()
+            if not r: c.rollback(); c.close(); return False,'💎 Esa pieza ya no se puede empeñar.'
+            val=max(500,int(_gear_value(dict(r))*0.40)); redeem=val+max(1,round(val*RPG_PAWN_INTEREST_PCT/100))
+            c.execute("UPDATE rpg_inventory SET locked=1 WHERE id=?",(iid,)); c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(val,now,uid)); c.execute("INSERT INTO rpg_pawns(user_id,inventory_id,item_name,loan_amount,redeem_amount,status,created_at,due_at) VALUES(?,?,?,?,?,'active',?,?)",(uid,iid,str(r['name']),val,redeem,now,now+RPG_BANK_LOAN_DAYS*86400)); c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,note,created_at) VALUES(?,?,'pawn_loan',?,?)",(uid,val,str(r['name']),now)); c.commit(); c.close(); return True,f"💎 Empeñaste {r['name']}.\n🪙 +{val:,} KW\n🔓 Rescate: {redeem:,} KW antes de 7 días."
+        except Exception: c.rollback(); c.close(); raise
+
+
+def pawn_redeem(user_id,pawn_id):
+    _ensure_economy_viva_db(); uid=int(user_id); pid=int(pawn_id); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            p=c.execute("SELECT * FROM rpg_pawns WHERE id=? AND user_id=? AND status='active' FOR UPDATE",(pid,uid)).fetchone()
+            if not p: c.rollback(); c.close(); return False,'Ese empeño ya no está activo.'
+            if now>int(p['due_at']): c.execute("DELETE FROM rpg_inventory WHERE id=? AND user_id=?",(int(p['inventory_id']),uid)); c.execute("UPDATE rpg_pawns SET status='forfeited' WHERE id=?",(pid,)); c.commit(); c.close(); return False,'⌛ El empeño venció y la casa se quedó con la pieza.'
+            balrow=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone(); cost=int(p['redeem_amount']); bal=int((balrow or {}).get('kiwons') or 0)
+            if bal<cost: c.rollback(); c.close(); return False,f"🪙 Necesitas {cost:,} KW para recuperarla."
+            c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(cost,now,uid)); c.execute("UPDATE rpg_inventory SET locked=0 WHERE id=? AND user_id=?",(int(p['inventory_id']),uid)); c.execute("UPDATE rpg_pawns SET status='redeemed' WHERE id=?",(pid,)); c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,note,created_at) VALUES(?,?,'pawn_redeem',?,?)",(uid,-cost,str(p['item_name']),now)); c.commit(); c.close(); return True,f"🔓 Recuperaste {p['item_name']} por {cost:,} KW."
+        except Exception: c.rollback(); c.close(); raise
 
 # =========================================================
 # KIWRPG V6.1 — MASCOTAS / GACHA
@@ -12806,7 +13047,7 @@ def handle_rpg_callback(query):
         _other_gameplay_prefixes=('tavern:','qm:','micro:','wnpc:','limitedbuy:','mission_select:','exclusive_accept:',
                                   'forge_make:','forge_upgrade:','rpg_buy:','rpg_shop_item:','rpg_dungeon_enter:',
                                   'boss_join:','boss_atk:','boss_def:','boss_potion:','boss_potions:','omega_join:','omega_atk:',
-                                  'event_buy:','weapon_gacha_open','pet_gacha_open','pet_equip:','pet_level:','pet_public_level:','tech_up:','trade_accept:','trade_pick:',
+                                  'event_buy:','weapon_gacha_open','salvage_','bank_','pawn_','pet_gacha_open','pet_equip:','pet_level:','pet_public_level:','tech_up:','trade_accept:','trade_pick:',
                                   'marry_accept:','clan_join:','story_choice:')
         if (not _allowed) and data.startswith(_other_gameplay_prefixes):
             send_message(chat_id,_combat_lock_message(_busy_state))
@@ -13407,6 +13648,36 @@ def handle_rpg_callback(query):
         return True
     if data=="merchant_sold":
         telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"❌ Esa pieza ya se agotó.","show_alert":False}); return True
+    if data=="salvage_home":
+        if not _is_private_chat_obj(msg.get("chat")): send_message(chat_id,"🔒 Desmantelar se administra en privado.",reply_markup=_private_launch_keyboard("salvage")); return True
+        txt,kb=salvage_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("salvage_toggle:"):
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        salvage_toggle(uid,int(data.split(":",1)[1])); txt,kb=salvage_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="salvage_clear":
+        _ensure_economy_viva_db()
+        with db_lock:
+            c=get_db(); c.execute("DELETE FROM rpg_salvage_selection WHERE user_id=?",(int(uid),)); c.commit(); c.close()
+        txt,kb=salvage_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="salvage_confirm":
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        ok,msg2=salvage_confirm(uid); txt,kb=salvage_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data=="bank_home":
+        if not _is_private_chat_obj(msg.get("chat")): send_message(chat_id,"🔒 El banco se administra en privado.",reply_markup=_private_launch_keyboard("bank")); return True
+        txt,kb=bank_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("bank_borrow:"):
+        ok,msg2=bank_borrow(uid,int(data.split(":",1)[1])); txt,kb=bank_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data.startswith("bank_pay:"):
+        ok,msg2=bank_pay(uid,int(data.split(":",1)[1])); txt,kb=bank_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data=="bank_payall":
+        ok,msg2=bank_pay(uid,None); txt,kb=bank_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data=="pawn_home":
+        if not _is_private_chat_obj(msg.get("chat")): return True
+        txt,kb=pawn_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("pawn_item:"):
+        ok,msg2=pawn_item(uid,int(data.split(":",1)[1])); txt,kb=pawn_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data.startswith("pawn_redeem:"):
+        ok,msg2=pawn_redeem(uid,int(data.split(":",1)[1])); txt,kb=pawn_text_keyboard(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
     if data=="forge_home":
         send_message(chat_id,forge_text(uid),reply_markup=forge_keyboard(uid)); return True
     if data.startswith("forge_view:"):
@@ -13526,14 +13797,14 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🌎 Reiniciar mundo","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Equipa automáticamente lo mejor compatible de tu inventario.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/banco — Préstamos con comisión, interés, morosidad y Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
@@ -14754,7 +15025,7 @@ def process_command(
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
             txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
-        if len(parts)>1 and parts[1] in ("shop","pets","weapon_gacha","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story","bestgear"):
+        if len(parts)>1 and parts[1] in ("shop","pets","weapon_gacha","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story","bestgear","salvage","bank"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
@@ -14779,8 +15050,11 @@ def process_command(
                 txt,kb=rpg_inventory_page(user.get("id"),1)
                 send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="bestgear":
-                txt,kb=best_equipment_preview(user.get("id"))
-                send_message(chat_id,txt,reply_markup=kb)
+                txt,kb=best_equipment_preview(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
+            elif parts[1]=="salvage":
+                txt,kb=salvage_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
+            elif parts[1]=="bank":
+                txt,kb=bank_text_keyboard(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             else:
                 send_message(chat_id,mission_board_text(user.get("id")),reply_markup=mission_board_keyboard(user.get("id")))
             return True
@@ -15526,6 +15800,16 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         user_id=message.get("from",{}).get("id")
         send_message(chat_id,materials_text(user_id))
         return True
+
+    if command in ("/desmantelar", "/reciclar"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private": send_message(chat_id,"♻️ El desmantelamiento múltiple se hace en privado.",reply_markup=_private_launch_keyboard("salvage")); return True
+        txt,kb=salvage_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/banco", "/prestamo", "/empeno"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private": send_message(chat_id,"🏦 Banco y Casa de Empeño se administran en privado.",reply_markup=_private_launch_keyboard("bank")); return True
+        txt,kb=bank_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
 
     if command in ("/mejorequipo", "/autoequipar"):
         user_id=message.get("from",{}).get("id")

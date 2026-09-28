@@ -5477,7 +5477,7 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
         c=get_db(); npc=c.execute("SELECT * FROM rpg_world_npcs WHERE chat_id=? AND thread_id=? AND npc_key=? AND status='active' AND expires_at>?",(int(chat_id),tid,key,now)).fetchone()
         if not npc: c.close(); return '🌫️ Ese viajero ya se marchó.'
         c.close()
-        _npc_remember(uid,key,action)
+        # La memoria se registra una sola vez en npc_record_event; evita doble conteo por clic.
         if action=='history': return npc_history_text(uid,key)
         if action=='mission': return _npc_offer_mission(uid,chat_id,key)
         c=get_db()
@@ -5489,7 +5489,7 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
             if uses>=3: c.close(); return '🩺 Eira cruza los brazos.\n\n—Ya te curé tres veces. Regresa cuando hayan pasado 3 horas.'
             char=get_active_character(uid)
             if not char: c.close(); return 'Necesitas un personaje activo.'
-            maxhp=effective_character_stats(char)['max_hp']; c.execute("UPDATE rpg_characters SET current_hp=? WHERE id=?",(int(maxhp),int(char['id']))); c.execute("INSERT INTO rpg_world_heals(user_id,window_started,uses) VALUES(?,?,1) ON CONFLICT(user_id) DO UPDATE SET window_started=EXCLUDED.window_started,uses=?",(int(uid),start,uses+1,uses+1)); c.commit(); c.close(); return f'🩺 Eira cerró tus heridas.\n❤️ HP restaurado a {maxhp}.\nCuraciones: {uses+1}/3.'
+            maxhp=effective_character_stats(char)['max_hp']; c.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(int(maxhp),now,int(char['id']))); c.execute("INSERT INTO rpg_world_heals(user_id,window_started,uses) VALUES(?,?,1) ON CONFLICT(user_id) DO UPDATE SET window_started=EXCLUDED.window_started,uses=?",(int(uid),start,uses+1,uses+1)); c.commit(); c.close(); return f'🩺 Eira cerró tus heridas.\n❤️ HP restaurado a {maxhp}.\nCuraciones: {uses+1}/3.'
         if key=='erick' and action=='enchant':
             char=get_active_character(uid)
             if not char: c.close(); return 'Necesitas un personaje activo.'
@@ -12758,7 +12758,7 @@ def handle_rpg_callback(query):
         try:
             _,nk,act=data.split(":",2)
             out=world_npc_callback(uid,chat_id,(msg or {}).get("message_thread_id"),nk,act)
-            if act != "history":
+            if act not in ("history","mission"):
                 try: npc_record_event(uid,nk,"interaction",f"Interactuaste con {WORLD_NPCS.get(nk,(nk,0))[0]}: {act}.",1 if act in ("heal","tip","help","gear","forge","weapons","armor","where","rumor","items","shop") else 0)
                 except Exception: logger.exception("No pude guardar recuerdo NPC")
             if isinstance(out,tuple): send_message(chat_id,out[0],reply_markup=out[1])
@@ -12901,7 +12901,7 @@ def handle_rpg_callback(query):
             if not m or m['status']!='open': c.rollback(); c.close(); send_message(chat_id,"Esa misión exclusiva ya no está disponible."); return True
             if int(m['target_user_id'])!=int(uid): c.rollback(); c.close(); telegram("answerCallbackQuery",{"callback_query_id":query.get("id"),"text":"🔒 Esta misión pertenece a otro aventurero.","show_alert":True}); return True
             c.execute("UPDATE rpg_exclusive_missions SET status='active',progress=0 WHERE id=?",(mid,)); c.commit(); c.close()
-        send_message(chat_id,f"🔓 {_world_user_mention(uid,chat_id)} aceptó «{m['title']}».\n🎯 Objetivo: consigue {int(m.get('goal') or 3)} victorias PvE.\n🪙 Premio: {int(m['reward']):,} KW")
+        send_message(chat_id,f"🔓 {_world_user_mention(uid,chat_id)} aceptó «{m['title']}».\n🎯 Objetivo: {str(m.get('body') or 'Completa el encargo indicado.')}\n📊 Progreso: 0/{int(m.get('goal') or 1):,}\n🪙 Premio: {int(m['reward']):,} KW")
         return True
     if data.startswith("mission_select:"):
         # Compatibilidad con botones antiguos: ya no se seleccionan misiones.
@@ -13521,12 +13521,12 @@ def _world_after_decision(user_id,chat_id=None):
     r=get_reputation(user_id); score=int(r.get('score') or 0); tier=reputation_tier(score)
     if score>=25:
         _world_queue_letter(user_id,'rep_respected','aurel','El guardián ha oído tu nombre','Tus actos ya circulan por Aeternus. Si sigues así, habrá gente dispuesta a confiarte asuntos que no pondrían en manos de cualquiera.')
-        _world_create_exclusive_mission(user_id,chat_id,'rep_respected','aurel','Ecos en el camino','Aurel pide que respondas personalmente a una llamada de auxilio.',1800,3)
+        _world_create_exclusive_mission(user_id,chat_id,'rep_respected','aurel','Ecos en el camino','Derrota 3 criaturas que amenazan una ruta de auxilio para Aurel.',1800,3,event_type='pve_win',goal=3)
     if score>=60:
         _world_queue_letter(user_id,'rep_hero','aurel','Una deuda de Aeternus','Ya no eres un desconocido. Hay personas que cuentan historias de lo que hiciste cuando nadie te obligaba.')
     if score<=-25:
         _world_queue_letter(user_id,'rep_doubtful','malkor','Negocios para gente interesante','La mala fama cierra puertas aburridas y abre otras mucho más rentables. Tengo algo que quizá quieras escuchar.')
-        _world_create_exclusive_mission(user_id,chat_id,'rep_doubtful','malkor','Un encargo sin testigos','Malkor tiene un trabajo que no ofrecería a alguien con reputación impecable.',2200,-2)
+        _world_create_exclusive_mission(user_id,chat_id,'rep_doubtful','malkor','Un encargo sin testigos','Derrota 3 enemigos vinculados al encargo discreto de Malkor.',2200,-2,event_type='pve_win',goal=3)
     if score<=-60:
         _world_queue_letter(user_id,'rep_feared','valka','Ya saben quién eres','Tu nombre empieza a hacer que algunas conversaciones bajen de volumen. Eso puede ser una herramienta.')
 

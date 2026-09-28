@@ -10058,7 +10058,7 @@ def _opening_progress_tick(chat_id,st,now=None):
                 "Aeternus, Guardián de la Primera Puerta, ha despertado. Desde ahora toda la comunidad comparte el mismo HP. Cada aventurero dispone de 5 ataques diarios.\n\n"
                 f"❤️ HP mundial: {int(st.get('boss_hp') or cfg['boss_hp']):,}/{int(st.get('boss_max_hp') or cfg['boss_hp']):,}\n"
                 "🏆 Los participantes válidos recibirán la recompensa comunitaria si logran derribarlo antes de que termine el festival.")
-            kb={"inline_keyboard":[[{"text":"⚔️ ENFRENTAR A AETERNUS","callback_data":"event_boss_attack"}],[{"text":"🛍️ Tienda de Apertura","callback_data":"event_shop"}]]}
+            kb={"inline_keyboard":[[{"text":"⚔️ ENFRENTAR A AETERNUS","callback_data":"event_boss_enter"}],[{"text":"🛍️ Tienda de Apertura","callback_data":"event_shop"}]]}
             try:
                 if not send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),ptxt,reply_markup=kb): send_message(chat_id,ptxt,reply_markup=kb)
             except Exception:
@@ -10208,7 +10208,36 @@ def event_boss_card(chat_id,user_id):
     p=event_player_row(chat_id,cfg['key'],user_id); day=_event_today_key(); used=int(p['attacks_today']) if p and p['attacks_day']==day else 0
     hp=max(0,int(st['boss_hp'])); mx=max(1,int(st['boss_max_hp'])); pct=100*hp/mx
     txt=(f"👑 {cfg['boss']}\n{cfg['icon']} {cfg['title']} — {cfg['year']}\n\n❤️ {hp:,}/{mx:,} HP ({pct:.1f}%)\n⚔️ Tus ataques de hoy: {used}/{RPG_EVENT_ATTACKS_PER_DAY}\n💥 Tu contribución: {int(p['total_damage'] if p else 0):,}\n🪙 Moneda del evento: {int(p['currency'] if p else 0):,}\n\nCada día tienes 5 ataques. El primer ataque del día entrega materiales de participación.")
-    kb=None if int(st['boss_defeated']) else {"inline_keyboard":[[{"text":"⚔️ ATACAR","callback_data":"event_boss_attack"}],[{"text":"🛍️ Tienda del evento","callback_data":"event_shop"}]]}
+    kb=None if int(st['boss_defeated']) else {"inline_keyboard":[[{"text":"⚔️ ENTRAR AL COMBATE","callback_data":"event_boss_enter"}],[{"text":"🛍️ Tienda del evento","callback_data":"event_shop"}]]}
+    return txt,kb
+
+def event_boss_combat_panel(chat_id,user_id):
+    """Panel de entrada al World Boss del evento; no altera HP hasta pulsar GOLPEAR."""
+    st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
+    if not st or not cfg or st.get('status')!='active':
+        return "📅 No hay un World Boss de evento activo.",None
+    if cfg['key']=='opening_2026' and not _opening_boss_is_unlocked(st):
+        left=_opening_boss_unlock_at(st)-int(time.time())
+        return f"🌌 Aeternus todavía no ha despertado.\n⏳ Aparece en: {_event_countdown(left)}",None
+    if int(st.get('boss_defeated') or 0):
+        return f"💀 {cfg['boss']} ya fue derrotado por la comunidad.",None
+    char=get_active_character(user_id)
+    if not char:
+        return "🧙 Primero crea y activa un personaje para entrar al combate.",None
+    p=event_player_row(chat_id,cfg['key'],user_id); day=_event_today_key()
+    used=int(p['attacks_today']) if p and p['attacks_day']==day else 0
+    hp=max(0,int(st['boss_hp'])); mx=max(1,int(st['boss_max_hp'])); pct=100*hp/mx
+    remaining=max(0,RPG_EVENT_ATTACKS_PER_DAY-used)
+    txt=(f"⚔️ COMBATE CONTRA {cfg['boss'].upper()}\n\n"
+         f"🧙 {char['name']} · Nv. {char['level']}\n"
+         f"❤️ Boss: {hp:,}/{mx:,} HP ({pct:.1f}%)\n"
+         f"⚔️ Ataques disponibles hoy: {remaining}/{RPG_EVENT_ATTACKS_PER_DAY}\n"
+         f"💥 Tu contribución total: {int(p['total_damage'] if p else 0):,}\n\n"
+         "Cada golpe consume 1 de tus ataques diarios y daña el HP mundial compartido.")
+    kb={"inline_keyboard":[
+        [{"text":"⚔️ GOLPEAR","callback_data":"event_boss_attack"}],
+        [{"text":"🔄 ACTUALIZAR","callback_data":"event_boss_enter"},{"text":"🛍️ TIENDA","callback_data":"event_shop"}]
+    ]}
     return txt,kb
 
 def event_boss_attack(chat_id,user_id):
@@ -13458,15 +13487,23 @@ def handle_rpg_callback(query):
         ok,msg2=clan_leave(uid); send_message(chat_id,msg2,reply_markup=clan_keyboard(uid)); return True
     if data=="clan_cancel":
         send_message(chat_id,clan_card(uid),reply_markup=clan_keyboard(uid)); return True
+    if data=="event_boss_enter":
+        if not is_active_rpg_chat(chat_id,thread_id):
+            send_message(chat_id,"📍 Este World Boss pertenece al chat/topic RPG activo. Usa /rpgaqui en el lugar correcto."); return True
+        txt,kb=event_boss_combat_panel(chat_id,uid)
+        cfg=_event_cfg_from_state(_event_auto_sync(chat_id))
+        sent=send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),txt,reply_markup=kb) if cfg else None
+        if not sent: send_message(chat_id,txt,reply_markup=kb)
+        return True
     if data=="event_boss_attack":
-        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 Este botón pertenece a un chat RPG antiguo. Usa /rpgaqui en el chat correcto y abre /bossevento allí."); return True
+        if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Este botón pertenece a un chat RPG antiguo. Usa /rpgaqui en el chat correcto y abre /bossevento allí."); return True
         ok,msg2=event_boss_attack(chat_id,uid); send_message(chat_id,msg2)
         txt,kb=event_boss_card(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
     if data=="event_shop":
-        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 La tienda del evento solo funciona en el chat elegido con /rpgaqui."); return True
+        if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 La tienda del evento solo funciona en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
     if data.startswith("event_buy:"):
-        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 Esa tienda ya no pertenece al chat RPG activo."); return True
+        if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Esa tienda ya no pertenece al chat RPG activo."); return True
         kind=data.split(":",1)[1]; ok,msg2=event_buy(chat_id,uid,kind); send_message(chat_id,msg2); return True
     if data.startswith("rpg_dungeon_enter:"):
         try: dungeon_id=int(data.split(":",1)[1])

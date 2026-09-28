@@ -6269,6 +6269,9 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 if drop: announce_rpg_drop(chat_id,{"id":user_id},drop)
                 # Material común independiente: no reemplaza el loot normal.
                 dust_chance=0.65 if encounter_rarity=="normal" else 0.80
+                # Kiwito Fundador añade +5 puntos porcentuales a la probabilidad
+                # de obtener Polvo de Forja en victorias PvE.
+                dust_chance=min(1.0,dust_chance + (_pet_bonus(user_id,'forge_material')/100.0))
                 if random.random()<dust_chance:
                     qty=1 if random.random()<0.85 else 2
                     got=0
@@ -8145,7 +8148,17 @@ def _equipped_pet(user_id):
 
 def _pet_bonus(user_id, kind):
     pet=_equipped_pet(user_id)
-    return float(pet.get('pct',0)) + max(0,int(pet.get('level',1))-1) if pet and pet.get('bonus')==kind else 0
+    if not pet:
+        return 0
+    # Kiwito Fundador es la mascota conmemorativa de la Gran Apertura:
+    # sus tres efectos son fijos y sólo aplican mientras esté equipado.
+    if str(pet.get('pet_key') or '')=='kiwito_fundador':
+        if kind in ('exp','kiwons'):
+            return 10.0
+        if kind=='forge_material':
+            return 5.0
+        return 0
+    return float(pet.get('pct',0)) + max(0,int(pet.get('level',1))-1) if pet.get('bonus')==kind else 0
 
 
 def _fang_count(user_id):
@@ -9979,6 +9992,14 @@ for _ey in (2026,2027,2028):
 def _opening_cfg():
     return {"key":"opening_2026","year":2026,"month":10,"icon":"🎊","title":"Festival de Apertura","boss":"Aeternus, Guardián de la Primera Puerta","pet":"Kiwito Fundador","currency":"🎟️ Fichas de Apertura","boss_hp":1200000,"weapon":"Hoja del Fundador — 2026","armor":"Emblema del Fundador — 2026"}
 
+# Mascota exclusiva de la Gran Apertura. Clave propia para que su arte pueda
+# generarse incluso antes de comprarla y no colisione con la mascota de octubre.
+RPG_PETS["kiwito_fundador"]={
+    "name":"Kiwito Fundador","icon":"🐾","rarity":"Evento","weight":0,
+    "bonus":"opening_founder","pct":0,
+    "desc":"+10% EXP / +10% KW / +5% probabilidad de Polvo de Forja en PvE. Exclusiva de la Gran Apertura."
+}
+
 def _event_today_key(): return time.strftime('%Y-%m-%d',time.localtime())
 
 def opening_event_bonus_active():
@@ -10188,7 +10209,7 @@ def event_shop_text(chat_id,user_id):
              "🔨 15 Polvos de Forja — 240 · SIN LÍMITE\n"
              "💰 Cofre +10,000 KW — 100 · SIN LÍMITE\n"
              "💰 Cofre +30,000 KW — 270 · SIN LÍMITE\n"
-             f"🐾 {cfg['pet']} — 400 · límite 1\n\n"
+             f"🐾 {cfg['pet']} — 400 · límite 1 · +10% EXP / +10% KW / +5% materiales de Forja\n\n"
              "✨ Los bonus de las piezas se aplican sólo mientras estén EQUIPADAS y se acumulan hasta 40% EXP / 40% KW.\n"
              "🔥 Durante la Apertura además continúa el bonus global del festival en PvE.\n"
              "Las piezas Festividad permanecen después del evento.")
@@ -10269,7 +10290,12 @@ def event_buy(chat_id,user_id,kind):
         change_kiwons(user_id,10000,'event_shop_kw',chat_id=chat_id,note=cfg['key']); return True,"💰 Cofre abierto: +10,000 KW."
     if kind=='kw30k':
         change_kiwons(user_id,30000,'event_shop_kw',chat_id=chat_id,note=cfg['key']); return True,"💰 Cofre abierto: +30,000 KW."
-    petkey=f"eventpet_{cfg['year']}_{cfg['month']:02d}"; RPG_PETS[petkey]={"name":cfg['pet'],"icon":cfg['icon'],"rarity":"Evento","weight":0,"bonus":"exp","pct":5,"desc":"+5% EXP. Mascota exclusiva de temporada."}
+    if cfg['key']=='opening_2026':
+        petkey='kiwito_fundador'
+        # Ya está registrado globalmente con sus tres bonus inaugurales.
+    else:
+        petkey=f"eventpet_{cfg['year']}_{cfg['month']:02d}"
+        RPG_PETS[petkey]={"name":cfg['pet'],"icon":cfg['icon'],"rarity":"Evento","weight":0,"bonus":"exp","pct":5,"desc":"+5% EXP. Mascota exclusiva de temporada."}
     with db_lock:
         c=get_db(); anyp=c.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? LIMIT 1",(int(user_id),)).fetchone(); c.execute("INSERT INTO rpg_pets_owned(user_id,pet_key,copies,equipped,obtained_at) VALUES(?,?,1,?,?) ON CONFLICT(user_id,pet_key) DO UPDATE SET copies=rpg_pets_owned.copies+1",(int(user_id),petkey,0 if anyp else 1,int(time.time()))); c.commit(); c.close()
     return True,f"🐾 {cfg['pet']} se unió a tu colección."

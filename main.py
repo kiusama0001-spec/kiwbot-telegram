@@ -10233,6 +10233,8 @@ def event_boss_combat_panel(chat_id,user_id):
          f"❤️ Boss: {hp:,}/{mx:,} HP ({pct:.1f}%)\n"
          f"⚔️ Ataques disponibles hoy: {remaining}/{RPG_EVENT_ATTACKS_PER_DAY}\n"
          f"💥 Tu contribución total: {int(p['total_damage'] if p else 0):,}\n\n"
+         "🎲 Cada GOLPEAR lanza 2 dados reales de Telegram.\n"
+         "⚔️ Daño = tu ATK × dado 1 × dado 2.\n"
          "Cada golpe consume 1 de tus ataques diarios y daña el HP mundial compartido.")
     kb={"inline_keyboard":[
         [{"text":"⚔️ GOLPEAR","callback_data":"event_boss_attack"}],
@@ -10248,13 +10250,39 @@ def event_boss_attack(chat_id,user_id):
     if int(st['boss_defeated']):return False,"👑 Ese World Boss ya fue derrotado."
     if not char:return False,"Primero crea y activa un personaje."
     day=_event_today_key(); now=int(time.time())
+
+    # Validación previa para no lanzar dados cuando el ataque ya no es válido.
     with db_lock:
         c=get_db(); p=event_player_row(chat_id,cfg['key'],user_id,True,c)
         used=int(p['attacks_today']) if p['attacks_day']==day else 0
-        if used>=RPG_EVENT_ATTACKS_PER_DAY: c.rollback(); c.close(); return False,"🌙 Ya usaste tus 5 ataques de hoy. Vuelven mañana."
+        st2=c.execute("SELECT * FROM rpg_event_state WHERE chat_id=? FOR UPDATE",(int(chat_id),)).fetchone()
+        if used>=RPG_EVENT_ATTACKS_PER_DAY:
+            c.rollback(); c.close(); return False,"🌙 Ya usaste tus 5 ataques de hoy. Vuelven mañana."
+        if not st2 or int(st2['boss_defeated']):
+            c.rollback(); c.close(); return False,"El World Boss ya cayó."
+        c.rollback(); c.close()
+
+    # Dos dados REALES de Telegram. Su producto multiplica el ATK efectivo del personaje.
+    dr1=send_dice(chat_id,'🎲'); dr2=send_dice(chat_id,'🎲')
+    # Da tiempo a Telegram para mostrar la animación de ambos dados antes del resultado.
+    time.sleep(2.2)
+    try: d1=int((((dr1 or {}).get('result') or {}).get('dice') or {}).get('value'))
+    except Exception:
+        d1=random.randint(1,6); logger.warning("Fallback RNG usado en World Boss: dado 1 no devolvió valor.")
+    try: d2=int((((dr2 or {}).get('result') or {}).get('dice') or {}).get('value'))
+    except Exception:
+        d2=random.randint(1,6); logger.warning("Fallback RNG usado en World Boss: dado 2 no devolvió valor.")
+
+    with db_lock:
+        c=get_db(); p=event_player_row(chat_id,cfg['key'],user_id,True,c)
+        used=int(p['attacks_today']) if p['attacks_day']==day else 0
+        if used>=RPG_EVENT_ATTACKS_PER_DAY:
+            c.rollback(); c.close(); return False,"🌙 Ya usaste tus 5 ataques de hoy. Vuelven mañana."
         st2=c.execute("SELECT * FROM rpg_event_state WHERE chat_id=? FOR UPDATE",(int(chat_id),)).fetchone()
         if not st2 or int(st2['boss_defeated']): c.rollback(); c.close(); return False,"El World Boss ya cayó."
-        eff=effective_character_stats(char); base=max(40,int(eff['atk'])*12 + int(char['level'])*5); dmg=max(1,int(round(base*random.uniform(.82,1.22))))
+        # Sin nerfeo: se usa el ATK efectivo completo que ya tiene el personaje.
+        eff=effective_character_stats(char); atk=max(1,int(eff['atk']))
+        multiplier=max(1,d1*d2); dmg=max(1,atk*multiplier)
         pet=_pet_bonus(user_id,'boss_damage'); dmg=int(round(dmg*(1+pet/100))) if pet else dmg
         if is_user_married(user_id): dmg=int(round(dmg*(1+RPG_MARRIAGE_BOSS_BONUS/100)))
         nh=max(0,int(st2['boss_hp'])-dmg); dead=nh<=0
@@ -10269,12 +10297,13 @@ def event_boss_attack(chat_id,user_id):
         try: grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"evento:{cfg['key']}:diario")
         except Exception: pass
         extra=f"\n🎁 Participación diaria: +{RPG_EVENT_DAILY_KW} KW · +8 fichas · material de forja."
+    rolltxt=f"🎲 {d1} × 🎲 {d2} = x{multiplier}\n⚔️ ATK {atk:,} × {multiplier} = {dmg:,} de daño"
     if dead:
         _event_distribute_boss_rewards(chat_id,cfg)
         if cfg['key']=='opening_2026' and _opening_once(chat_id,'boss_victory'):
             send_message(chat_id,"🌅 LA PRIMERA PUERTA HA SIDO CONQUISTADA\n\nEl núcleo de Aeternus se fractura y la luz atraviesa toda la muralla. Por primera vez, el camino más allá de la puerta queda completamente abierto.\n\n🏆 La comunidad derrotó al Guardián de la Primera Puerta. Su caída queda registrada como la primera gran victoria de Aeternus.\n\n🛍️ El Festival continúa hasta que termine su contador: todavía pueden conseguir fichas y gastar las que hayan reunido.")
-        return True,f"⚔️ {dmg:,} de daño.\n\n💀 ¡{cfg['boss']} HA CAÍDO!\nLa recompensa comunitaria fue desbloqueada para los participantes válidos.{extra}"
-    return True,f"⚔️ Golpeas a {cfg['boss']} por {dmg:,}.\n❤️ Le quedan {nh:,} HP.\n⚔️ Ataques restantes hoy: {RPG_EVENT_ATTACKS_PER_DAY-used-1}/5{extra}"
+        return True,f"{rolltxt}\n\n💀 ¡{cfg['boss']} HA CAÍDO!\nLa recompensa comunitaria fue desbloqueada para los participantes válidos.{extra}"
+    return True,f"{rolltxt}\n❤️ Le quedan {nh:,} HP.\n⚔️ Ataques restantes hoy: {RPG_EVENT_ATTACKS_PER_DAY-used-1}/5{extra}"
 
 def _event_distribute_boss_rewards(chat_id,cfg):
     with db_lock:
@@ -13498,7 +13527,7 @@ def handle_rpg_callback(query):
     if data=="event_boss_attack":
         if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Este botón pertenece a un chat RPG antiguo. Usa /rpgaqui en el chat correcto y abre /bossevento allí."); return True
         ok,msg2=event_boss_attack(chat_id,uid); send_message(chat_id,msg2)
-        txt,kb=event_boss_card(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
+        txt,kb=event_boss_combat_panel(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
     if data=="event_shop":
         if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 La tienda del evento solo funciona en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True

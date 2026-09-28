@@ -10248,11 +10248,37 @@ def marriage_bank_move(user_id, amount, mode):
             conn.rollback(); conn.close(); raise
 
 def marriage_gift_kw(user_id, amount, chat_id=0):
-    uid=int(user_id); row=_marriage_row(uid,("active",))
+    # Regalo directo entre los saldos PERSONALES de la pareja.
+    # Se hace en una sola transacción para que nunca pueda acreditar al receptor
+    # sin descontar exactamente la misma cantidad al remitente.
+    uid=int(user_id); amount=int(amount)
+    if amount<=0: return False,"La cantidad debe ser mayor que cero."
+    row=_marriage_row(uid,("active",))
     if not row: return False,"No tienes pareja en KiwRPG."
-    pid=_marriage_partner_id(row,uid); ok,res=transfer_kiwons(uid,pid,int(amount),chat_id=chat_id)
-    if not ok: return False,res
-    return True,f"🎁 Enviaste {int(amount):,} KW a {_player_name_by_id(pid)}."
+    pid=int(_marriage_partner_id(row,uid)); now=int(time.time())
+    lo,hi=sorted((uid,pid))
+    with db_lock:
+        conn=get_db()
+        try:
+            # Serializa regalos simultáneos entre la misma pareja.
+            conn.execute("SELECT pg_advisory_xact_lock(?)",((lo * 1000003 + hi) & 0x7fffffff,))
+            sender=conn.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(uid,)).fetchone()
+            receiver=conn.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(pid,)).fetchone()
+            sender_balance=int(sender['kiwons']) if sender else 0
+            if sender_balance < amount:
+                conn.rollback(); conn.close(); return False,f"No tienes suficientes KW. Saldo: {sender_balance:,} KW."
+            if receiver is None:
+                conn.execute("INSERT INTO players(user_id,display_name,kiwons,created_at,updated_at) VALUES(?,?,0,?,?) ON CONFLICT(user_id) DO NOTHING",(pid,_player_name_by_id(pid),now,now))
+            conn.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(amount,now,uid))
+            conn.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(amount,now,pid))
+            conn.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(uid,-amount,'marriage_gift_out',uid,pid,int(chat_id or 0),'Regalo a pareja',now))
+            conn.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,actor_id,other_user_id,chat_id,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(pid,amount,'marriage_gift_in',uid,uid,int(chat_id or 0),'Regalo de pareja',now))
+            check=conn.execute("SELECT kiwons FROM players WHERE user_id=?",(uid,)).fetchone()
+            remaining=int(check['kiwons']) if check else sender_balance-amount
+            conn.commit(); conn.close()
+            return True,f"🎁 Enviaste {amount:,} KW a {_player_name_by_id(pid)}.\n🪙 Tu saldo: {remaining:,} KW."
+        except Exception:
+            conn.rollback(); conn.close(); raise
 
 def _split_marriage_bank_locked(conn,row,now):
     mid=int(row['id']); bank=conn.execute("SELECT balance FROM rpg_marriage_bank WHERE marriage_id=? FOR UPDATE",(mid,)).fetchone(); bal=int(bank['balance']) if bank else 0

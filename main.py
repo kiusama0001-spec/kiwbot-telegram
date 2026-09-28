@@ -10263,9 +10263,9 @@ def event_boss_attack(chat_id,user_id):
         c.rollback(); c.close()
 
     # Dos dados REALES de Telegram. Su producto multiplica el ATK efectivo del personaje.
+    # IMPORTANTE: no dormimos el hilo del webhook. Telegram ya anima los dados por su cuenta;
+    # bloquear aquí podía hacer que Telegram cortara el callback antes de recibir el resultado.
     dr1=send_dice(chat_id,'🎲'); dr2=send_dice(chat_id,'🎲')
-    # Da tiempo a Telegram para mostrar la animación de ambos dados antes del resultado.
-    time.sleep(2.2)
     try: d1=int((((dr1 or {}).get('result') or {}).get('dice') or {}).get('value'))
     except Exception:
         d1=random.randint(1,6); logger.warning("Fallback RNG usado en World Boss: dado 1 no devolvió valor.")
@@ -10284,7 +10284,7 @@ def event_boss_attack(chat_id,user_id):
         eff=effective_character_stats(char); atk=max(1,int(eff['atk']))
         multiplier=max(1,d1*d2); dmg=max(1,atk*multiplier)
         pet=_pet_bonus(user_id,'boss_damage'); dmg=int(round(dmg*(1+pet/100))) if pet else dmg
-        if is_user_married(user_id): dmg=int(round(dmg*(1+RPG_MARRIAGE_BOSS_BONUS/100)))
+        dmg=max(1,int(round(dmg*marriage_boss_multiplier(user_id))))
         nh=max(0,int(st2['boss_hp'])-dmg); dead=nh<=0
         first_daily=(p['daily_reward_day']!=day)
         c.execute("UPDATE rpg_event_state SET boss_hp=?,boss_defeated=? WHERE chat_id=?",(nh,1 if dead else 0,int(chat_id)))
@@ -13526,8 +13526,15 @@ def handle_rpg_callback(query):
         return True
     if data=="event_boss_attack":
         if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Este botón pertenece a un chat RPG antiguo. Usa /rpgaqui en el chat correcto y abre /bossevento allí."); return True
-        ok,msg2=event_boss_attack(chat_id,uid); send_message(chat_id,msg2)
-        txt,kb=event_boss_combat_panel(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
+        ok,msg2=event_boss_attack(chat_id,uid)
+        # El resultado del golpe es prioritario: se envía siempre antes de reconstruir el panel.
+        send_message(chat_id,msg2)
+        try:
+            txt,kb=event_boss_combat_panel(chat_id,uid)
+            send_message(chat_id,txt,reply_markup=kb)
+        except Exception:
+            logger.exception("No pude refrescar el panel del World Boss después del golpe")
+        return True
     if data=="event_shop":
         if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 La tienda del evento solo funciona en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True

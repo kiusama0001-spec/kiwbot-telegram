@@ -6681,7 +6681,12 @@ def item_action_keyboard(row, char):
         else: buttons.append({"text":"🔒 No compatible","callback_data":f"rpg_locked:{row['id']}"})
     if row.get("equip_slot") and int(row.get("forge_level") or 0)<15:
         buttons.append({"text":f"🔨 Mejorar +{int(row.get('forge_level') or 0)}","callback_data":f"forge_upgrade:{row['id']}"})
-    if int(row.get("heal_percent") or 0)>0: buttons.append({"text":"🧪 Usar","callback_data":f"rpg_use:{row['id']}"})
+    # Consumibles utilizables: curación/reanimación y pociones temporales de combate.
+    # Las pociones de Fuerza/Hierro/Vitalidad no tienen heal_percent, por eso
+    # deben habilitar el botón por su item_key.
+    if int(row.get("heal_percent") or 0)>0 or str(row.get("item_key") or "") in COMBAT_POTION_KEYS:
+        label = "🧪 Tomar" if str(row.get("item_key") or "") in COMBAT_POTION_KEYS else "🧪 Usar"
+        buttons.append({"text":label,"callback_data":f"rpg_use:{row['id']}"})
     if int(row.get("tradeable") or 0) and not int(row.get("equipped") or 0) and not int(row.get("locked") or 0):
         buttons.append({"text":"💰 Vender","callback_data":f"rpg_sell_offer:{row['id']}"})
         buttons.append({"text":"🔄 Intercambiar","callback_data":f"rpg_trade_help:{row['id']}"})

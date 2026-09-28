@@ -11597,9 +11597,13 @@ VOICE_AI_MAX_SECONDS = max(5, min(90, int(os.getenv("KIWBOT_VOICE_MAX_SECONDS", 
 VOICE_AI_MAX_BYTES = max(500_000, min(20_000_000, int(os.getenv("KIWBOT_VOICE_MAX_BYTES", "8000000"))))
 VOICE_TTS_MAX_CHARS = max(120, min(600, int(os.getenv("KIWBOT_VOICE_TTS_MAX_CHARS", "420"))))
 VOICE_AI_ENABLED = os.getenv("KIWBOT_VOICE_AI", "true").lower() == "true"
-# Voz hablada: por defecto usa español de México en gTTS. Puede cambiarse en Render
-# con KIWBOT_TTS_TLD sin tocar el RPG (por ejemplo com.mx, es, com).
+# Voz de la Diva — Edge TTS neural, sin Azure key ni tarjeta.
+# Queda aislado del RPG y conserva fallback HTTP si Edge no está disponible.
 VOICE_TTS_TLD = os.getenv("KIWBOT_TTS_TLD", "com.mx").strip() or "com.mx"
+KIWBOT_DIVA_VOICE = os.getenv("KIWBOT_DIVA_VOICE", "es-MX-DaliaNeural").strip() or "es-MX-DaliaNeural"
+KIWBOT_DIVA_RATE = os.getenv("KIWBOT_DIVA_RATE", "+6%").strip() or "+6%"
+KIWBOT_DIVA_PITCH = os.getenv("KIWBOT_DIVA_PITCH", "+10Hz").strip() or "+10Hz"
+KIWBOT_DIVA_VOLUME = os.getenv("KIWBOT_DIVA_VOLUME", "+0%").strip() or "+0%"
 
 
 def _transcribe_voice_message(message):
@@ -11658,13 +11662,45 @@ def _tts_voice_text(text):
     value=re.sub(r"\s+", " ", value).strip()
     return value[:VOICE_TTS_MAX_CHARS]
 
-def _tts_spanish_mp3(text):
-    """Genera MP3 español mexicano sin bloquear el RPG por dependencias TTS ausentes."""
-    clean=_tts_voice_text(text)
+def _tts_edge_diva_mp3(clean):
+    """TTS neural gratuito vía edge-tts. No requiere Azure key. Devuelve b'' al fallar."""
     if not clean:
         return b""
-    # Google Translate TTS directo: evita importar gTTS (no está instalado en Render)
-    # y usa español de México. Timeouts cortos para que una caída de TTS no congele workers.
+    try:
+        import asyncio, tempfile, os as _os
+        import edge_tts
+
+        async def _synth(path):
+            communicate=edge_tts.Communicate(
+                clean,
+                voice=KIWBOT_DIVA_VOICE,
+                rate=KIWBOT_DIVA_RATE,
+                volume=KIWBOT_DIVA_VOLUME,
+                pitch=KIWBOT_DIVA_PITCH,
+            )
+            await communicate.save(path)
+
+        fd,path=tempfile.mkstemp(prefix="kiwbot_diva_",suffix=".mp3")
+        _os.close(fd)
+        try:
+            # Los updates se procesan en workers síncronos; asyncio.run no invade el loop del RPG.
+            asyncio.run(asyncio.wait_for(_synth(path), timeout=15))
+            with open(path,"rb") as fh:
+                raw=fh.read()
+            if raw:
+                return raw
+        finally:
+            try: _os.remove(path)
+            except OSError: pass
+    except ModuleNotFoundError:
+        logger.warning("edge-tts no instalado; agrega edge-tts a requirements.txt. Usando fallback.")
+    except Exception:
+        logger.exception("Error Edge TTS Diva")
+    return b""
+
+
+def _tts_google_fallback_mp3(clean):
+    """Fallback: mantiene la conversación viva si Azure falla; no toca el RPG."""
     try:
         chunks=[]; rest=clean
         while rest:
@@ -11681,12 +11717,24 @@ def _tts_spanish_mp3(text):
                 headers={"User-Agent":"Mozilla/5.0"},timeout=10
             )
             if not r.ok or not r.content:
-                logger.warning("TTS es-MX HTTP %s",r.status_code); return b""
+                logger.warning("TTS fallback es-MX HTTP %s",r.status_code); return b""
             audio.append(bytes(r.content))
         return b"".join(audio)
     except Exception:
-        logger.exception("Error generando TTS español mexicano")
+        logger.exception("Error TTS fallback español mexicano")
         return b""
+
+
+def _tts_spanish_mp3(text):
+    """Voz neural de la Diva con Edge TTS; fallback HTTP si falla. No toca KiwRPG."""
+    clean=_tts_voice_text(text)
+    if not clean:
+        return b""
+    neural=_tts_edge_diva_mp3(clean)
+    if neural:
+        return neural
+    logger.warning("Edge TTS no disponible; usando fallback TTS para no bloquear el bot.")
+    return _tts_google_fallback_mp3(clean)
 
 
 def send_voice_bytes(chat_id, raw, reply_to_message_id=None):

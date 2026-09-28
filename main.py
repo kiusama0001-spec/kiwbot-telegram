@@ -222,7 +222,7 @@ executor = ThreadPoolExecutor(
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 # Permite concurrencia de operaciones DB independientes; la atomicidad real se protege
 # con transacciones/row locks de PostgreSQL (FOR UPDATE) donde corresponde.
-db_lock = threading.BoundedSemaphore(int(os.getenv("KIWBOT_DB_CONCURRENCY", "8")))
+db_lock = threading.BoundedSemaphore(int(os.getenv("KIWBOT_DB_CONCURRENCY", "10")))
 
 # Pool de conexiones: evita abrir una conexión TLS nueva a Supabase en cada consulta.
 DB_POOL = None
@@ -3625,6 +3625,46 @@ def local_reply(chat_id, user_id, user_text, user_name="Usuario"):
 # IA
 # =========================================================
 
+AI_LONG_TERM_CONTEXT_LIMIT = max(5, min(100, int(os.getenv("KIWBOT_AI_MEMORY_LIMIT", "30"))))
+AI_TEXT_MAX_TOKENS = max(80, min(500, int(os.getenv("KIWBOT_AI_TEXT_MAX_TOKENS", "300"))))
+AI_VOICE_MAX_TOKENS = max(60, min(300, int(os.getenv("KIWBOT_AI_VOICE_MAX_TOKENS", "180"))))
+
+def _get_ai_context_fast(chat_id,user_id):
+    """Carga memoria corta + permanente usando UNA conexión PostgreSQL."""
+    cid=int(chat_id); uid=int(user_id)
+    with db_lock:
+        conn=get_db()
+        mem=conn.execute("""SELECT role,content FROM bot_memory
+            WHERE chat_id=? AND user_id=? ORDER BY created_at ASC LIMIT ?""",
+            (cid,uid,MAX_MEMORY_MESSAGES)).fetchall()
+        long_rows=conn.execute("""SELECT scope,memory FROM long_term_memory WHERE
+            (scope='user' AND owner_id=?) OR
+            (scope='chat' AND owner_id=? AND chat_id=?) OR
+            (scope='bot' AND owner_id=0)
+            ORDER BY updated_at DESC LIMIT ?""",
+            (uid,cid,cid,AI_LONG_TERM_CONTEXT_LIMIT)).fetchall()
+        conn.close()
+    return ([{"role":r["role"],"content":r["content"]} for r in mem],
+            [{"scope":r["scope"],"memory":r["memory"]} for r in long_rows])
+
+def _queue_ai_memory_pair(chat_id,user_id,user_text,reply):
+    """Guarda ambos turnos en una transacción fuera del camino crítico de respuesta."""
+    cid=int(chat_id); uid=int(user_id); now=int(time.time())
+    def _work():
+        try:
+            with db_lock:
+                conn=get_db()
+                conn.execute("INSERT INTO bot_memory(chat_id,user_id,role,content,created_at) VALUES(?,?,?,?,?)",(cid,uid,'user',str(user_text),now))
+                conn.execute("INSERT INTO bot_memory(chat_id,user_id,role,content,created_at) VALUES(?,?,?,?,?)",(cid,uid,'assistant',str(reply),now+1))
+                conn.execute("""DELETE FROM bot_memory WHERE id NOT IN (
+                    SELECT id FROM bot_memory WHERE chat_id=? AND user_id=? ORDER BY created_at DESC,id DESC LIMIT ?
+                ) AND chat_id=? AND user_id=?""",(cid,uid,MAX_MEMORY_MESSAGES,cid,uid))
+                conn.commit(); conn.close()
+        except Exception:
+            logger.exception("Error guardando memoria IA en segundo plano")
+    try: executor.submit(_work)
+    except Exception: _work()
+
 def generate_reply(
     chat_id,
     user_id,
@@ -3638,15 +3678,9 @@ def generate_reply(
             "en este momento."
         )
 
-    memory = get_memory(
-        chat_id,
-        user_id
-    )
-
-    long_term = get_long_term_memories(
-        user_id,
-        chat_id
-    )
+    _ai_started=time.monotonic()
+    memory,long_term = _get_ai_context_fast(chat_id,user_id)
+    _ai_context_elapsed=time.monotonic()-_ai_started
 
     identity_instruction = ""
 
@@ -3729,7 +3763,7 @@ Tu respuesta será convertida directamente a una nota de voz. Habla como una per
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.85,
-                max_tokens=500
+                max_tokens=(AI_VOICE_MAX_TOKENS if voice_mode else AI_TEXT_MAX_TOKENS)
             )
         )
 
@@ -3741,20 +3775,10 @@ Tu respuesta será convertida directamente a una nota de voz. Habla como una per
             .strip()
         )
 
-        add_memory(
-            chat_id,
-            user_id,
-            "user",
-            user_text
-        )
-
-        add_memory(
-            chat_id,
-            user_id,
-            "assistant",
-            reply
-        )
-
+        _queue_ai_memory_pair(chat_id,user_id,user_text,reply)
+        _ai_total=time.monotonic()-_ai_started
+        if _ai_total>=2.0:
+            logger.info("IA timing: context=%.3fs groq+total=%.3fs voice=%s",_ai_context_elapsed,_ai_total,bool(voice_mode))
         return reply
 
     except Exception as e:
@@ -4634,39 +4658,42 @@ def toggle_secret_blades(user_id, activate=True):
         return True, None
 
 
+_owner_secret_character_ready = False
+_owner_secret_character_lock = RLock()
+
 def ensure_owner_secret_character(user):
-    """Crea una sola vez el personaje secreto exclusivo de Kiu."""
+    """Crea una sola vez el personaje secreto exclusivo de Kiu.
+
+    PERFORMANCE: antes consultaba PostgreSQL en CADA update de Kiu. Tras verificarlo
+    una vez por proceso queda en caché; la BD sigue siendo la fuente de verdad.
+    """
+    global _owner_secret_character_ready
     if not user or not is_owner(user.get("id")):
         return
-
-    user_id = int(user.get("id"))
-    now = int(time.time())
-
-    with db_lock:
-        conn = get_db()
-        exists = conn.execute("""
-            SELECT id FROM characters
-            WHERE user_id=? AND LOWER(name)=LOWER(?)
-            LIMIT 1
-        """, (user_id, "One Winged Angel")).fetchone()
-
-        if not exists:
-            conn.execute("""
-                INSERT INTO characters
-                (user_id, name, class_name, level, exp, hp, max_hp, atk, defense,
-                 is_active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-            """, (
-                user_id,
-                "One Winged Angel",
-                "The Cleaner",
-                1, 0,
-                130, 130,
-                18, 9,
-                now, now
-            ))
-            conn.commit()
-        conn.close()
+    if _owner_secret_character_ready:
+        return
+    with _owner_secret_character_lock:
+        if _owner_secret_character_ready:
+            return
+        user_id = int(user.get("id"))
+        now = int(time.time())
+        with db_lock:
+            conn = get_db()
+            exists = conn.execute("""
+                SELECT id FROM characters
+                WHERE user_id=? AND LOWER(name)=LOWER(?)
+                LIMIT 1
+            """, (user_id, "One Winged Angel")).fetchone()
+            if not exists:
+                conn.execute("""
+                    INSERT INTO characters
+                    (user_id, name, class_name, level, exp, hp, max_hp, atk, defense,
+                     is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                """, (user_id,"One Winged Angel","The Cleaner",1,0,130,130,18,9,now,now))
+                conn.commit()
+            conn.close()
+        _owner_secret_character_ready = True
 
 
 # =========================================================
@@ -9098,15 +9125,24 @@ OMEGA_TURNS_PER_RUN=10
 OMEGA_ANNOUNCE_SECONDS=2*3600
 OMEGA_REWARDS={1:(50000,5000),2:(30000,3000),3:(15000,2000)}
 
+_boss_test_cache = {}
+_boss_test_cache_lock = RLock()
+
 def _boss_test_enabled(user_id):
+    uid=int(user_id); now=time.monotonic()
+    with _boss_test_cache_lock:
+        cached=_boss_test_cache.get(uid)
+        if cached and now-cached[1] < 60:
+            return cached[0]
     try:
         with db_lock:
-            conn=get_db()
-            row=conn.execute("SELECT enabled FROM rpg_boss_test_users WHERE user_id=?",(int(user_id),)).fetchone()
-            conn.close()
-        return bool(row and int(row["enabled"])==1)
+            conn=get_db(); row=conn.execute("SELECT enabled FROM rpg_boss_test_users WHERE user_id=?",(uid,)).fetchone(); conn.close()
+        value=bool(row and int(row["enabled"])==1)
     except Exception:
-        return False
+        value=False
+    with _boss_test_cache_lock:
+        _boss_test_cache[uid]=(value,now)
+    return value
 
 def _boss_stats_for(user_id,char):
     eff=effective_character_stats(char)
@@ -9126,6 +9162,8 @@ def toggle_boss_test(chat_id,user_id):
                         ON CONFLICT(user_id) DO UPDATE SET enabled=EXCLUDED.enabled,updated_at=EXCLUDED.updated_at""",
                      (int(user_id),1 if enabled else 0,now))
         conn.commit(); conn.close()
+    with _boss_test_cache_lock:
+        _boss_test_cache[int(user_id)]=(bool(enabled),time.monotonic())
     char=get_active_character(user_id)
     if char:
         eff=_boss_stats_for(user_id,char); new_max=int(eff['max_hp'])

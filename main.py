@@ -5554,8 +5554,11 @@ def _ensure_npc_moral_jobs_db():
             title TEXT NOT NULL,target_name TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',
             target_hp BIGINT NOT NULL DEFAULT 100,target_max_hp BIGINT NOT NULL DEFAULT 100,attacks BIGINT NOT NULL DEFAULT 0,
             listened BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL)""")
+            c.execute("ALTER TABLE rpg_npc_moral_jobs ADD COLUMN IF NOT EXISTS spawn_started_at BIGINT NOT NULL DEFAULT 0")
             c.execute("CREATE INDEX IF NOT EXISTS idx_npc_moral_jobs_user ON rpg_npc_moral_jobs(user_id,status,updated_at)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_npc_moral_jobs_chat ON rpg_npc_moral_jobs(chat_id,status,updated_at)")
+            # Un viajero que aparece trae UN encargo público: el primer jugador que lo reclama se lo queda.
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_npc_moral_spawn_claim ON rpg_npc_moral_jobs(chat_id,npc_key,spawn_started_at) WHERE spawn_started_at>0")
             c.commit(); c.close()
         _npc_moral_schema_ready = True
 
@@ -5570,15 +5573,52 @@ def _npc_job_card(row, reveal=False):
     return '\n'.join(lines),kb
 
 def _npc_offer_moral_job(user_id,chat_id,key):
+    """Reclama el encargo del viajero actual.
+    - Un spawn = un solo dueño (primer clic gana).
+    - Un jugador nunca vuelve a recibir un encargo que ya resolvió con ese NPC.
+    - Escuchar no lo consume; matar/perdonar sí lo deja completado.
+    """
     _ensure_npc_moral_jobs_db(); uid=int(user_id); cid=int(chat_id); now=int(time.time()); char=get_active_character(uid)
     if not char: return '🕯️ Necesitas un personaje activo antes de aceptar un encargo.',None
+    tid=int(get_current_message_thread_id() or 0)
     with db_lock:
-        c=get_db(); old=c.execute("SELECT * FROM rpg_npc_moral_jobs WHERE user_id=? AND status='active' ORDER BY id DESC LIMIT 1",(uid,)).fetchone()
-        if old: c.close(); return _npc_job_card(old)
-        scenario=random.choice(_npc_moral_pool(key)); eff=effective_character_stats(char); mh=max(80,int(eff['atk'])*5+random.randint(25,65))
-        payload=json.dumps(scenario,ensure_ascii=False)
-        row=c.execute("""INSERT INTO rpg_npc_moral_jobs(user_id,chat_id,npc_key,title,target_name,payload,status,target_hp,target_max_hp,attacks,listened,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,'active',?,?,0,0,?,?) RETURNING *""",(uid,cid,str(key),scenario['title'],scenario['target'],payload,mh,mh,now,now)).fetchone(); c.commit(); c.close()
+        c=get_db()
+        try:
+            npc=c.execute("SELECT spawned_at FROM rpg_world_npcs WHERE chat_id=? AND thread_id=? AND npc_key=? AND status='active' AND expires_at>?",(cid,tid,str(key),now)).fetchone()
+            if not npc:
+                c.close(); return '🌫️ Ese viajero ya se marchó.',None
+            spawn_at=int(npc['spawned_at'])
+            # Si alguien ya tomó el encargo de ESTA aparición, nadie más puede apropiárselo.
+            claimed=c.execute("SELECT * FROM rpg_npc_moral_jobs WHERE chat_id=? AND npc_key=? AND spawn_started_at=? ORDER BY id DESC LIMIT 1",(cid,str(key),spawn_at)).fetchone()
+            if claimed:
+                c.close()
+                if int(claimed['user_id'])!=uid:
+                    return '🔒 Demasiado tarde. Otro aventurero tomó primero el encargo de este viajero. El primero que lo agarra, se lo queda.',None
+                if str(claimed['status'])!='active':
+                    return '📜 Ya resolviste el encargo de esta aparición. Espera a que el mundo vuelva a traer una nueva oportunidad.',None
+                return _npc_job_card(claimed)
+            # Un jugador sólo puede llevar un encargo moral activo a la vez.
+            old=c.execute("SELECT * FROM rpg_npc_moral_jobs WHERE user_id=? AND status='active' ORDER BY id DESC LIMIT 1",(uid,)).fetchone()
+            if old:
+                c.close(); return _npc_job_card(old)
+            # Excluye permanentemente los títulos que este jugador YA resolvió con este NPC.
+            done=c.execute("SELECT title FROM rpg_npc_moral_jobs WHERE user_id=? AND npc_key=? AND status IN ('spared','killed')",(uid,str(key))).fetchall()
+            done_titles={str(r['title']) for r in done}
+            available=[x for x in _npc_moral_pool(key) if str(x['title']) not in done_titles]
+            if not available:
+                c.close(); return f'🏁 Ya completaste los {NPC_MORAL_POOL_SIZE} encargos disponibles de {WORLD_NPCS.get(str(key),(str(key),0))[0]}.',None
+            scenario=random.choice(available); eff=effective_character_stats(char); mh=max(80,int(eff['atk'])*5+random.randint(25,65))
+            payload=json.dumps(scenario,ensure_ascii=False)
+            row=c.execute("""INSERT INTO rpg_npc_moral_jobs(user_id,chat_id,npc_key,title,target_name,payload,status,target_hp,target_max_hp,attacks,listened,created_at,updated_at,spawn_started_at)
+                VALUES(?,?,?,?,?,?,'active',?,?,0,0,?,?,?) ON CONFLICT DO NOTHING RETURNING *""",(uid,cid,str(key),scenario['title'],scenario['target'],payload,mh,mh,now,now,spawn_at)).fetchone()
+            c.commit()
+            if not row:
+                winner=c.execute("SELECT * FROM rpg_npc_moral_jobs WHERE chat_id=? AND npc_key=? AND spawn_started_at=? ORDER BY id DESC LIMIT 1",(cid,str(key),spawn_at)).fetchone(); c.close()
+                if winner and int(winner['user_id'])==uid and str(winner['status'])=='active': return _npc_job_card(winner)
+                return '🔒 Te ganaron por un instante. Otro aventurero reclamó primero este encargo.',None
+            c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
     npc_record_event(uid,str(key),f"encargo:{row['id']}",f"Te ofreció el encargo «{row['title']}».",1)
     return _npc_job_card(row)
 
@@ -11614,38 +11654,86 @@ def send_voice_bytes(chat_id, raw, reply_to_message_id=None):
         logger.exception("Error enviando voz KiwBot"); return None
 
 
+_ai_conversation_schema_ready = False
+_ai_conversation_schema_lock = RLock()
+
+def _ensure_ai_conversation_messages_db():
+    global _ai_conversation_schema_ready
+    if _ai_conversation_schema_ready: return
+    with _ai_conversation_schema_lock:
+        if _ai_conversation_schema_ready: return
+        with db_lock:
+            c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS kiwbot_ai_conversation_messages(
+                chat_id BIGINT NOT NULL,message_id BIGINT NOT NULL,created_at BIGINT NOT NULL,
+                PRIMARY KEY(chat_id,message_id))""")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ai_conv_msg_created ON kiwbot_ai_conversation_messages(created_at)")
+            c.commit(); c.close()
+        _ai_conversation_schema_ready=True
+
+def _telegram_result_message_id(result):
+    try:
+        if isinstance(result,dict):
+            body=result.get('result') if isinstance(result.get('result'),dict) else result
+            return int(body.get('message_id') or 0)
+    except Exception: pass
+    return 0
+
+def mark_ai_conversation_message(chat_id,result):
+    mid=_telegram_result_message_id(result)
+    if not mid: return
+    _ensure_ai_conversation_messages_db(); now=int(time.time())
+    with db_lock:
+        c=get_db(); c.execute("INSERT INTO kiwbot_ai_conversation_messages(chat_id,message_id,created_at) VALUES(?,?,?) ON CONFLICT(chat_id,message_id) DO UPDATE SET created_at=EXCLUDED.created_at",(int(chat_id),mid,now)); c.execute("DELETE FROM kiwbot_ai_conversation_messages WHERE created_at<?",(now-7*86400,)); c.commit(); c.close()
+
+def is_reply_to_ai_conversation(message):
+    reply=(message or {}).get('reply_to_message') or {}; mid=int(reply.get('message_id') or 0); cid=int(((message or {}).get('chat') or {}).get('id') or 0)
+    if not mid or not cid: return False
+    _ensure_ai_conversation_messages_db()
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT 1 FROM kiwbot_ai_conversation_messages WHERE chat_id=? AND message_id=?",(cid,mid)).fetchone(); c.close()
+    return bool(row)
+
+def _spoken_addresses_kiwbot(text):
+    t=normalize_text(str(text or ''))
+    return any(x in t for x in ('kiwbot','kiw bot','kiwi bot'))
+
 def handle_ai_voice_message(message):
-    """Nota de voz -> Whisper -> IA/local -> TTS -> nota de voz.
-    En grupos conserva REQUIRE_MENTION; en privado responde directamente.
+    """Voz conversacional aislada del RPG.
+    Privado: voz directa. Grupo: sólo reply a una respuesta CONVERSACIONAL de la Diva
+    o una voz que diga KiwBot. Los mensajes RPG nunca se marcan como conversación.
+    Las Relámpago se consumen antes de llegar aquí.
     """
-    if not VOICE_AI_ENABLED or not (message or {}).get("voice"):
-        return False
-    chat=(message.get("chat") or {}); user=(message.get("from") or {})
-    chat_id=chat.get("id"); uid=user.get("id")
+    if not VOICE_AI_ENABLED or not (message or {}).get("voice"): return False
+    chat=(message.get("chat") or {}); user=(message.get("from") or {}); chat_id=chat.get("id"); uid=user.get("id")
     if not chat_id or not uid: return False
-    # Respeta exactamente la política conversacional del bot en grupos.
-    if chat.get("type") in ("group","supergroup") and REQUIRE_MENTION and not bot_was_mentioned(message):
+    group=chat.get('type') in ('group','supergroup')
+    reply_to_diva=is_reply_to_ai_conversation(message) if group else True
+    # Si responde a un mensaje DEL BOT que no fue marcado como conversación de la Diva,
+    # es un mensaje KiwRPG (encuentro, boss, NPC, recompensa, misión, etc.): jamás despierta la IA.
+    if group and is_reply_to_bot(message) and not reply_to_diva:
         return False
+    # Hay que transcribir para poder detectar una invocación hablada ("KiwBot...").
     spoken,err=_transcribe_voice_message(message)
     if err:
-        send_message(chat_id,err,reply_to_message_id=message.get("message_id")); return True
-    if not spoken: return True
-    first_name=user.get("first_name") or user.get("username") or "Usuario"
-    # Quita una posible mención transcrita/escrita igual que el chat de texto.
+        if not group or reply_to_diva:
+            send_message(chat_id,err,reply_to_message_id=message.get('message_id')); return True
+        return False
+    if not spoken: return bool(reply_to_diva)
+    addressed=(reply_to_diva or bot_was_mentioned(message) or _spoken_addresses_kiwbot(spoken))
+    if group and not addressed: return False
+    first_name=user.get('first_name') or user.get('username') or 'Usuario'
     spoken=clean_bot_mention(spoken).strip() or spoken
     try:
-        reply=(generate_reply(chat_id,uid,spoken,first_name) if is_ai_enabled(chat_id)
-               else local_reply(chat_id,uid,spoken,first_name))
+        reply=(generate_reply(chat_id,uid,spoken,first_name) if is_ai_enabled(chat_id) else local_reply(chat_id,uid,spoken,first_name))
     except Exception:
-        logger.exception("Error generando respuesta a voz")
-        send_message(chat_id,"🎙️ Te escuché, pero se me trabó la respuesta. Intenta otra vez.",reply_to_message_id=message.get("message_id")); return True
+        logger.exception('Error generando respuesta a voz'); send_message(chat_id,'🎙️ Te escuché, pero se me trabó la respuesta. Intenta otra vez.',reply_to_message_id=message.get('message_id')); return True
     raw=_tts_spanish_mp3(reply)
-    if raw and send_voice_bytes(chat_id,raw,reply_to_message_id=message.get("message_id")):
-        return True
-    # Fallback seguro: jamás perder una respuesta porque falle TTS.
-    send_message(chat_id,reply,reply_to_message_id=message.get("message_id"))
+    if raw:
+        result=send_voice_bytes(chat_id,raw,reply_to_message_id=message.get('message_id'))
+        if result:
+            mark_ai_conversation_message(chat_id,result); return True
+    result=send_message(chat_id,reply,reply_to_message_id=message.get('message_id')); mark_ai_conversation_message(chat_id,result)
     return True
-
 
 def _quick_transcribe_voice(message):
     """Transcribe una nota de voz para misiones relámpago. No guarda el audio."""
@@ -18116,7 +18204,7 @@ def process_update(
         # En grupos KiwBot conversa SOLO cuando lo mencionan con @usuario.
         # Responder a un mensaje del bot ya no lo despierta. Comandos, moderación y
         # Misiones Relámpago se procesan antes de este punto y siguen funcionando.
-        if chat.get("type") in ("group","supergroup") and REQUIRE_MENTION and not bot_was_mentioned(message):
+        if chat.get("type") in ("group","supergroup") and REQUIRE_MENTION and not message.get("voice") and not bot_was_mentioned(message):
             return
 
         # Conversación por voz. Se ejecuta DESPUÉS de castigo, flood y moderación,
@@ -18276,13 +18364,14 @@ def process_update(
                 first_name
             )
 
-        send_message(
+        _ai_sent = send_message(
             chat_id,
             reply,
             reply_to_message_id=message.get(
                 "message_id"
             )
         )
+        mark_ai_conversation_message(chat_id, _ai_sent)
 
     except Exception as e:
 

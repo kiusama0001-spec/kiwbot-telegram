@@ -7941,10 +7941,8 @@ def salvage_confirm(user_id):
 
 
 def _bank_credit_limit(user_id):
-    ch=get_active_character(user_id); level=int(ch['level']) if ch else 1
-    rep=int(get_reputation(user_id).get('score') or 0)
-    base=20_000+level*2_500+max(-10_000,min(50_000,rep*500))
-    return max(10_000,min(250_000,base))
+    # Hasta 500,000 KW. Solo puede existir un préstamo activo por jugador.
+    return 500_000
 
 
 def _bank_apply_default(user_id):
@@ -7977,7 +7975,7 @@ def bank_text_keyboard(user_id):
     _ensure_economy_viva_db(); seized=_bank_apply_default(user_id); uid=int(user_id); now=int(time.time()); limit=_bank_credit_limit(uid)
     with db_lock:
         c=get_db(); loan=c.execute("SELECT * FROM rpg_bank_loans WHERE user_id=? AND status='active' ORDER BY id DESC LIMIT 1",(uid,)).fetchone(); pawns=c.execute("SELECT COUNT(*) n FROM rpg_pawns WHERE user_id=? AND status='active'",(uid,)).fetchone(); c.close()
-    lines=["🏦 BANCO DE AETERNUS","",f"🪙 Saldo: {get_kiwons(uid):,} KW",f"💳 Límite de crédito: {limit:,} KW",f"🧾 Comisión al pedir: {RPG_BANK_COMMISSION_PCT}% · Interés: {RPG_BANK_INTEREST_PCT}% · Plazo: {RPG_BANK_LOAN_DAYS} días"]
+    lines=["🏦 BANCO DE AETERNUS","",f"🪙 Saldo: {get_kiwons(uid):,} KW",f"💳 Puedes solicitar hasta: {limit:,} KW",f"🧾 Comisión: {RPG_BANK_COMMISSION_PCT}% · Interés: {RPG_BANK_INTEREST_PCT}% · Plazo: {RPG_BANK_LOAN_DAYS} días","💰 Recibes completo lo que pides; comisión e interés se suman a la deuda."]
     kb=[]
     if loan:
         due=max(0,int(loan['total_due'])-int(loan.get('paid') or 0)); days=max(0,(int(loan['due_at'])-now+86399)//86400)
@@ -7985,8 +7983,8 @@ def bank_text_keyboard(user_id):
         for amt in (1000,5000,10000): kb.append([{'text':f'💸 Pagar {amt:,} KW','callback_data':f'bank_pay:{amt}'}])
         kb.append([{'text':'💰 Liquidar deuda','callback_data':'bank_payall'}])
     else:
-        opts=sorted(set(x for x in (10_000,25_000,50_000,100_000,limit) if x<=limit and x>=10_000))
-        for amt in opts[-4:]: kb.append([{'text':f'🏦 Pedir {amt:,} KW','callback_data':f'bank_borrow:{amt}'}])
+        opts=(10_000,25_000,50_000,100_000,250_000,500_000)
+        for amt in opts: kb.append([{'text':f'🏦 Pedir {amt:,} KW','callback_data':f'bank_borrow:{amt}'}])
     kb.append([{'text':'💎 Casa de empeño','callback_data':'pawn_home'},{'text':'♻️ Desmantelar','callback_data':'salvage_home'}])
     if seized: lines += ["", "⚠️ PRÉSTAMO VENCIDO: el banco ejecutó la deuda.", "📦 Bienes embargados: "+(', '.join(seized) if seized else 'ninguno'), "⚖️ Reputación: -10"]
     lines += ["", "⚠️ Si no pagas al vencer: el banco cobra tu KW disponible, puede embargar primero tu equipo no equipado de mayor valor y tu reputación baja 10 puntos."]
@@ -7996,7 +7994,9 @@ def bank_text_keyboard(user_id):
 def bank_borrow(user_id,amount):
     _ensure_economy_viva_db(); uid=int(user_id); amount=int(amount); now=int(time.time()); limit=_bank_credit_limit(uid)
     if amount<10_000 or amount>limit: return False,f"🏦 Tu límite actual es {limit:,} KW."
-    commission=max(1,round(amount*RPG_BANK_COMMISSION_PCT/100)); interest=max(1,round(amount*RPG_BANK_INTEREST_PCT/100)); received=amount-commission; due=amount+interest
+    commission=max(1,round(amount*RPG_BANK_COMMISSION_PCT/100)); interest=max(1,round(amount*RPG_BANK_INTEREST_PCT/100))
+    # Se entrega íntegro el capital. Comisión e interés se cobran al pagar.
+    received=amount; due=amount+commission+interest
     with db_lock:
         c=get_db()
         try:
@@ -8007,7 +8007,7 @@ def bank_borrow(user_id,amount):
             c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(received,now,uid))
             c.execute("INSERT INTO rpg_bank_loans(user_id,principal,commission,interest,total_due,paid,status,created_at,due_at) VALUES(?,?,?,?,?,0,'active',?,?)",(uid,amount,commission,interest,due,now,now+RPG_BANK_LOAN_DAYS*86400))
             c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,note,created_at) VALUES(?,?,'bank_loan',?,?)",(uid,received,f'Préstamo {amount}; comisión {commission}; deuda {due}',now))
-            c.commit(); c.close(); return True,f"🏦 Préstamo aprobado.\n💰 Crédito: {amount:,} KW\n🧾 Comisión {RPG_BANK_COMMISSION_PCT}%: -{commission:,}\n🪙 Recibes: {received:,} KW\n📌 Debes devolver: {due:,} KW en {RPG_BANK_LOAN_DAYS} días."
+            c.commit(); c.close(); return True,f"🏦 Préstamo aprobado.\n💰 Recibes: {received:,} KW completos\n🧾 Comisión {RPG_BANK_COMMISSION_PCT}%: {commission:,} KW\n📈 Interés {RPG_BANK_INTEREST_PCT}%: {interest:,} KW\n📌 Total a liquidar: {due:,} KW en {RPG_BANK_LOAN_DAYS} días.\n🔒 No puedes pedir otro préstamo hasta liquidar éste."
         except Exception: c.rollback(); c.close(); raise
 
 
@@ -13797,14 +13797,14 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🌎 Reiniciar mundo","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/banco — Préstamos con comisión, interés, morosidad y Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
@@ -15805,6 +15805,17 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         user_id=message.get("from",{}).get("id")
         if chat.get("type")!="private": send_message(chat_id,"♻️ El desmantelamiento múltiple se hace en privado.",reply_markup=_private_launch_keyboard("salvage")); return True
         txt,kb=salvage_text_keyboard(user_id); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/pagar", "/liquidar", "/liquidarprestamo"):
+        user_id=message.get("from",{}).get("id")
+        if chat.get("type")!="private":
+            send_message(chat_id,"🏦 Los pagos del Banco de Aeternus se hacen en privado.",reply_markup=_private_launch_keyboard("bank")); return True
+        amount=None
+        if command=="/pagar" and len(parts)>1:
+            raw=re.sub(r"[^0-9]","",parts[1])
+            if raw: amount=max(1,int(raw))
+        ok,msg2=bank_pay(user_id,amount)
+        txt,kb=bank_text_keyboard(user_id); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
 
     if command in ("/banco", "/prestamo", "/empeno"):
         user_id=message.get("from",{}).get("id")

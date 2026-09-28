@@ -13230,6 +13230,16 @@ def handle_rpg_callback(query):
                 send_message(chat_id,"📜 La guía completa de comandos se abre en privado para no llenar el chat del juego.",reply_markup=_private_launch_keyboard("commands")); return True
             send_message(chat_id,rpg_commands_text(uid)); return True
         if act=="how": send_message(chat_id,"❓ CÓMO JUGAR\n\n1. Crea un personaje.\n2. Usa /encuentro para combatir y /misiones para progresar.\n3. Equipa y mejora objetos.\n4. Visita /taberna, Bosses, eventos y NPC viajeros.\n5. El mundo recuerda: tus decisiones cambian reputación, NPC, cartas y oportunidades.\n6. Los NPC pueden recordar cómo los trataste y reaccionar después.\n7. /encuentro tiene 15 usos personales al día; los eventos automáticos son independientes."); return True
+        if act=="boss":
+            # Acceso desde Bienvenida al World Boss de la temporada REALMENTE activa.
+            # event_boss_card conserva HP, límite diario, derrota, recompensas y reglas del evento.
+            boss_txt,boss_kb=event_boss_card(chat_id,uid)
+            st=_event_get(chat_id); cfg=_event_cfg_from_state(st) if st and st.get('status')=='active' else None
+            if cfg and not send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),boss_txt,reply_markup=boss_kb):
+                send_message(chat_id,boss_txt,reply_markup=boss_kb)
+            elif not cfg:
+                send_message(chat_id,boss_txt,reply_markup=boss_kb)
+            return True
         if act=="create": send_character_creator(chat_id,uid,origin_chat_id=chat_id); return True
         if act=="switch":
             rows=get_characters(uid); kb={"inline_keyboard":[[{"text":f"{'⭐ ' if int(r['is_active']) else ''}{r['name']} · Nv.{r['level']}","callback_data":f"rpg_switch:{int(r['id'])}"}] for r in rows]} if rows else None
@@ -13955,6 +13965,7 @@ def rpg_story_text():
 def rpg_welcome_keyboard(user_id):
     rows=[[{"text":"📖 Historia","callback_data":"welcome:history"},{"text":"📜 Comandos","callback_data":"welcome:commands"}],
           [{"text":"❓ Cómo jugar","callback_data":"welcome:how"}],
+          [{"text":"👑 Boss actual","callback_data":"welcome:boss"}],
           [{"text":"⚔️ CREAR PERSONAJE","callback_data":"welcome:create"}],
           [{"text":"🔄 Cambiar personaje","callback_data":"welcome:switch"}]]
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])

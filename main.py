@@ -221,6 +221,13 @@ _DUNGEON_REWARD_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(2, min(4, int(os.getenv("KIWBOT_DUNGEON_REWARD_WORKERS", "4"))))
 )
 
+# ACKs de botones Telegram: no deben frenar la lógica del juego esperando una
+# ida/vuelta HTTP sólo para quitar el spinner del botón. Pool aislado: IA/TTS/RPG
+# conservan sus workers y las reglas del juego no cambian.
+_CALLBACK_ACK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(3, int(os.getenv("KIWBOT_CALLBACK_ACK_WORKERS", "2"))))
+)
+
 
 # =========================================================
 # POSTGRESQL / SUPABASE
@@ -6915,10 +6922,31 @@ def activate_combat_potion(user_id,item_key):
     return True,f"🧪 Efecto activado: +{mag}% {effect.upper()} durante 30 minutos. No se acumula; una nueva poción refresca/reemplaza el efecto."
 
 def effective_character_stats(char):
-    b=equipped_bonuses(char["id"])
+    """Stats efectivos con una sola sesión DB en el camino caliente.
+
+    Conserva exactamente la misma matemática histórica: equipo/forja/encanto,
+    Los Primeros, nivel, Espadas del Ángel y pociones. Sólo evita abrir tres
+    conexiones separadas para calcular un mismo golpe.
+    """
+    cid=int(char["id"]); uid=int(char.get("user_id") or 0); now=int(time.time())
+    with db_lock:
+        conn=get_db()
+        equip_rows=conn.execute("""SELECT x.atk_bonus,x.def_bonus,x.hp_bonus,x.equip_slot,
+                                          i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp
+                                   FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+                                   WHERE i.character_id=? AND i.equipped=1""",(cid,)).fetchall()
+        founder_row=conn.execute("SELECT 1 FROM rpg_chronicle_titles WHERE user_id=? AND title_key='los_primeros'",(uid,)).fetchone() if uid else None
+        potion_rows=conn.execute("SELECT effect_key,magnitude FROM rpg_combat_potion_effects WHERE user_id=? AND expires_at>?",(uid,now)).fetchall() if uid else []
+        conn.close()
+
+    b={"atk":0,"defense":0,"hp":0}
+    for r in equip_rows:
+        fb=_forge_level_bonus(r.get("equip_slot"),r.get("forge_level") or 0)
+        b["atk"]+=int(r.get("atk_bonus") or 0)+int(fb.get("atk") or 0)+int(r.get("enchant_atk") or 0)
+        b["defense"]+=int(r.get("def_bonus") or 0)+int(fb.get("defense") or 0)+int(r.get("enchant_def") or 0)
+        b["hp"]+=int(r.get("hp_bonus") or 0)+int(fb.get("hp") or 0)+int(r.get("enchant_hp") or 0)
+
     lvlb=rpg_level_character_bonus(char)
-    # Habilidad exclusiva de The Cleaner: las Espadas del Ángel son un estado,
-    # no ocupan slot de equipo, pero su +6 ATK sí participa en el daño real.
     secret_atk=0
     try:
         if (str(char.get("class_name") or "")=="The Cleaner"
@@ -6927,16 +6955,23 @@ def effective_character_stats(char):
             secret_atk=6
     except Exception:
         secret_atk=0
-    founder=founder_battle_bonus(char.get("user_id"))
-    pre_atk=int(char["atk"])+b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]; pre_def=int(char["defense"])+b["defense"]+lvlb["defense"]+founder["defense"]; pre_hp=int(char["max_hp"])+b["hp"]+lvlb["hp"]+founder["hp"]
-    pot=combat_potion_bonuses(char.get("user_id"),pre_atk,pre_def,pre_hp)
-    total_bonus={"atk":b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]+pot["atk"],"defense":b["defense"]+lvlb["defense"]+founder["defense"]+pot["defense"],"hp":b["hp"]+lvlb["hp"]+founder["hp"]+pot["hp"]}
+    founder={"atk":3,"defense":3,"hp":30} if founder_row else {"atk":0,"defense":0,"hp":0}
+    pre_atk=int(char["atk"])+b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]
+    pre_def=int(char["defense"])+b["defense"]+lvlb["defense"]+founder["defense"]
+    pre_hp=int(char["max_hp"])+b["hp"]+lvlb["hp"]+founder["hp"]
+    bases={"atk":pre_atk,"defense":pre_def,"hp":pre_hp}; pot={"atk":0,"defense":0,"hp":0}
+    for r in potion_rows:
+        k=str(r.get("effect_key") or ""); mag=int(r.get("magnitude") or 0)
+        if k in pot:
+            pot[k]=max(pot[k],int(round(bases[k]*mag/100.0)))
+    total_bonus={"atk":b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]+pot["atk"],
+                 "defense":b["defense"]+lvlb["defense"]+founder["defense"]+pot["defense"],
+                 "hp":b["hp"]+lvlb["hp"]+founder["hp"]+pot["hp"]}
     return {"atk":int(char["atk"])+total_bonus["atk"],
             "defense":int(char["defense"])+total_bonus["defense"],
             "max_hp":int(char["max_hp"])+total_bonus["hp"],
-            "bonus":total_bonus,
-            "level_bonus":lvlb,
-            "secret_blades_atk":secret_atk}
+            "bonus":total_bonus,"level_bonus":lvlb,"secret_blades_atk":secret_atk}
+
 
 def item_compatibility(item, char):
     if not item.get("equip_slot"): return False,"Este objeto no es equipable."
@@ -12332,36 +12367,62 @@ def dungeon_card(dungeon):
 
 
 def dungeon_keyboard(dungeon,user_id):
+    """Teclado de mazmorra con una sola adquisición de conexión PostgreSQL.
+
+    Antes cada render abría conexiones independientes para personaje, miembro,
+    niveles, Hidden Blade, gacha y RECUERDO. La información es la misma; sólo se
+    agrupan las lecturas para reducir latencia de red/pool.
+    """
     if not dungeon or dungeon.get('status')!='active': return None
-    did=int(dungeon['id']); uid=int(user_id); char=get_active_character(uid)
-    if not char: return None
+    did=int(dungeon['id']); uid=int(user_id)
+    _ensure_technique_levels_table(); _ensure_special_techniques_table()
     with db_lock:
-        c=get_db(); m=c.execute("SELECT * FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(did,uid)).fetchone(); c.close()
-    if not m: return {"inline_keyboard":[[{"text":"🏰 Unirme","callback_data":f"rpg_dungeon_enter:{did}"}]]}
+        c=get_db()
+        char=c.execute("SELECT * FROM characters WHERE user_id=? AND is_active=1",(uid,)).fetchone()
+        if not char:
+            c.close(); return None
+        m=c.execute("SELECT * FROM rpg_dungeon_party_members WHERE dungeon_id=? AND user_id=?",(did,uid)).fetchone()
+        if not m:
+            c.close(); return {"inline_keyboard":[[{"text":"🏰 Unirme","callback_data":f"rpg_dungeon_enter:{did}"}]]}
+        level_rows=c.execute("SELECT technique_key,level FROM rpg_technique_levels WHERE user_id=?",(uid,)).fetchall()
+        hidden=bool(c.execute("SELECT 1 FROM rpg_special_techniques WHERE user_id=? AND technique_key='hidden_blade'",(uid,)).fetchone())
+        gear_rows=c.execute("""SELECT x.item_key,x.name,x.rarity FROM rpg_inventory i
+                               JOIN rpg_items x ON x.item_key=i.item_key
+                               WHERE i.user_id=? AND i.character_id=? AND i.equipped=1
+                                 AND (x.rarity='recuerdo' OR (x.rarity='mitico' AND x.item_key LIKE 'gacha_weapon_%%_mitico_%%'))
+                               ORDER BY i.id DESC""",(uid,int(char['id']))).fetchall()
+        c.close()
+
     if int(dungeon.get('turn_user_id') or 0)!=uid:
         elapsed=max(0,int(time.time())-int(dungeon.get('turn_started_at') or 0)); wait=max(0,RPG_TURN_TIMEOUT_SECONDS-elapsed)
         return {"inline_keyboard":[[{"text":f"⏳ Esperando turno · {wait}s","callback_data":f"dungeon_wait:{did}"}],[{"text":"🔄 Actualizar","callback_data":f"dungeon_refresh:{did}"}]]}
 
-    # Una sola lectura para los niveles de las técnicas. Antes se hacían varias
-    # consultas (y hasta DDL) cada vez que se dibujaba esta tarjeta.
-    levels=technique_levels_for_user(uid)
+    levels={str(r['technique_key']):max(1,min(RPG_TECHNIQUE_MAX_LEVEL,int(r['level']))) for r in level_rows}
     abs_=rpg_abilities_for(char['class_name']); rows=[]
     cds={'special':int(m.get('special_cd') or 0),'ultimate':int(m.get('ultimate_cd') or 0),'hidden':int(m.get('hidden_cd') or 0)}
     def b(a):
         cd=cds['ultimate'] if a.get('ultimate') else cds['special'] if a.get('special') else 0
-        lvl=levels.get(str(a['key']),1)
-        power=float(a['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+        lvl=levels.get(str(a['key']),1); power=float(a['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
         return {"text":(f"⏳ {a['name']} ({cd})" if cd>0 else f"{a['emoji']} {a['name']} · ×{power:.2f}"),"callback_data":f"dungeon_atk:{did}:{a['key']}" if cd<=0 else f"dungeon_wait:{did}"}
     rows.append([b(abs_[0]),b(abs_[1])]); rows.append([b(abs_[2])])
-    if has_special_technique(uid,'hidden_blade'):
+    if hidden:
         hcd=cds['hidden']; lvl=levels.get('hidden_blade',1); power=float(HIDDEN_BLADE_ABILITY['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
         rows.append([{"text":f"⏳ Hidden Blade ({hcd})" if hcd>0 else f"🗡️ Hidden Blade · ×{power:.2f}","callback_data":f"dungeon_atk:{did}:hidden_blade" if hcd<=0 else f"dungeon_wait:{did}"}])
-    wab=_equipped_gacha_weapon_ability(uid,int(char['id']))
-    if wab: rows.append([{"text":f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}","callback_data":f"dungeon_atk:{did}:{wab['key']}"}])
-    rab=_equipped_recuerdo_ability(uid,int(char['id']))
-    if rab: rows.append([{'text':f"{rab['emoji']} {rab['name']} · RECUERDO · ×{rab['power']:.2f}",'callback_data':f"dungeon_atk:{did}:{rab['key']}"}])
+    gacha=[_gacha_ability_from_equipped_row(r) for r in gear_rows if str(r.get('rarity'))=='mitico']
+    for wab in gacha:
+        rows.append([{"text":f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}","callback_data":f"dungeon_atk:{did}:{wab['key']}"}])
+    recuerdos=[]
+    for r in gear_rows:
+        if str(r.get('rarity'))!='recuerdo': continue
+        base=RECUERDO_ABILITIES.get(str(r.get('item_key')))
+        if base:
+            rab=dict(base); rab['weapon_name']=str(r.get('name') or ''); recuerdos.append(rab)
+    for rab in recuerdos:
+        rcd=cds['special'] if rab.get('special') else 0
+        rows.append([{'text':f"⏳ {rab['name']} ({rcd})" if rcd>0 else f"{rab['emoji']} {rab['name']} · RECUERDO · ×{rab['power']:.2f}",
+                      'callback_data':f"dungeon_atk:{did}:{rab['key']}" if rcd<=0 else f"dungeon_wait:{did}"}])
     rows.append([{"text":"🛡️ Defender","callback_data":f"dungeon_def:{did}"},{"text":"🔄 Actualizar","callback_data":f"dungeon_refresh:{did}"}])
-    return {'inline_keyboard':rows}
+    return {"inline_keyboard":rows}
 
 
 def _spawn_dungeon(chatrow, now=None):
@@ -13961,7 +14022,14 @@ def tavern_callback(user_id,chat_id,data,thread_id=0):
 def handle_rpg_callback(query):
     user=query.get("from",{}); uid=user.get("id"); data=query.get("data",""); msg=query.get("message") or {}; chat_id=(msg.get("chat") or {}).get("id")
     thread_id=int(msg.get("message_thread_id") or 0)
-    telegram("answerCallbackQuery", {"callback_query_id":query.get("id")})
+    # El ACK genérico no forma parte de la resolución del juego. Enviarlo en
+    # paralelo evita sumar una llamada Telegram completa ANTES de cada botón.
+    _cbid=query.get("id")
+    if _cbid:
+        try:
+            _CALLBACK_ACK_EXECUTOR.submit(telegram,"answerCallbackQuery",{"callback_query_id":_cbid})
+        except Exception:
+            pass
 
     if data=='recuerdo_claim':
         ok,txt=recuerdo_claim_box(uid);kb={'inline_keyboard':[[{'text':'🌌 ABRIR LA CAJA','callback_data':'recuerdo_open'}]]} if ok else None;send_message(chat_id,txt,reply_markup=kb);return True

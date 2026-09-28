@@ -14896,8 +14896,6 @@ def recuerdo_claim_box(user_id):
         try:
             c.execute('SELECT pg_advisory_xact_lock(?)',(2026092801,));own=c.execute('SELECT * FROM rpg_recuerdo_claims WHERE user_id=? FOR UPDATE',(uid,)).fetchone()
             if own:c.rollback();c.close();return False,'🚫 Bonito intento.\n\nHead… sabíamos que ibas a volver a picarle. 😂\n\nUna caja por persona. Ya recibiste la tuya. No hay otra.\n\nDeja el botón en paz, muerto de hambre.\n\n— Kiu'
-            n=c.execute('SELECT COUNT(*) n FROM rpg_recuerdo_claims').fetchone()
-            if int(n['n'] or 0)>=2:c.rollback();c.close();return False,'🌌 Las dos Cajas del Primer Recuerdo ya encontraron a sus dueños.'
             c.execute("INSERT INTO rpg_recuerdo_claims(user_id,status,item_key,claimed_at,opened_at) VALUES(?,'claimed','',?,0)",(uid,now));c.commit();c.close()
             return True,'🎁 RECOMPENSA SECRETA DESBLOQUEADA\n\nJAJAJAJAJA.\n\n¿Quién les dijo que les iba a dar algo gratis, idiotas?\n\n...\n\nAh, cierto. Yo.\n\nBueno, pues por una vez no estaba mintiendo.\n\n🎲 Esa mugrosa cajita que seguramente esperaban que tuviera 3 Polvos de Forja y una poción acaba de provocar un ERROR.\n\nCOMÚN ❌\nPOCO COMÚN ❌\nRARO ❌\nULTRA RARO ❌\nLEGENDARIO ❌\nMÍTICO ❌\n\n🌌 RAREZA DESCONOCIDA DETECTADA: RECUERDO\n\nFelicidades, par de idiotas. Acaban de encontrar dos de los mejores objetos que existirán en KiwRPG.\n\nNo salen en drops. No existen en la Forja. No pueden comprarse. No están en ningún gacha. Y no pienso volver a meter esta rareza.\n\nSolo existen porque ustedes estuvieron aquí cuando comenzó todo.\n\n🎁 Caja del Primer Recuerdo\n\nY sí… el objeto que les toque tiene un movimiento que ningún objeto normal puede tener. 😂'
         except Exception:c.rollback();c.close();raise

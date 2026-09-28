@@ -6889,8 +6889,11 @@ COMBAT_POTION_KEYS={
 
 def combat_potion_bonuses(user_id, base_atk=0, base_def=0, base_hp=0):
     now=int(time.time())
+    # Camino caliente de combate: sólo leer efectos vigentes. No hacemos DELETE+COMMIT
+    # en cada golpe; las filas vencidas ya quedan excluidas por expires_at y un nuevo
+    # uso de poción las reemplaza por UPSERT. Esto evita una escritura PostgreSQL por turno.
     with db_lock:
-        c=get_db(); rows=c.execute("SELECT * FROM rpg_combat_potion_effects WHERE user_id=? AND expires_at>?",(int(user_id),now)).fetchall(); c.execute("DELETE FROM rpg_combat_potion_effects WHERE user_id=? AND expires_at<=?",(int(user_id),now)); c.commit(); c.close()
+        c=get_db(); rows=c.execute("SELECT effect_key,magnitude FROM rpg_combat_potion_effects WHERE user_id=? AND expires_at>?",(int(user_id),now)).fetchall(); c.close()
     out={"atk":0,"defense":0,"hp":0}
     for r in rows:
         mag=int(r['magnitude']); k=str(r['effect_key']); base={"atk":base_atk,"defense":base_def,"hp":base_hp}.get(k,0); out[k]=max(out[k],int(round(base*mag/100.0)))
@@ -8073,7 +8076,7 @@ def open_weapon_gacha(user_id):
                  f"{jackpot}\n\n🪙 Saldo: {get_kiwons(user_id):,} KW")
 
 
-RECUERDO_ABILITIES={'recuerdo_arma_primer_latido':{'key':'recuerdo_skill_latido','emoji':'🌠','name':'Primer Latido','power':1.72,'pen':.38,'high_roll_bonus':.20},'recuerdo_armadura_guardia_cero':{'key':'recuerdo_skill_juramento','emoji':'🛡️','name':'Juramento Cero','power':1.54,'pen':.25,'heal_pct':.10},'recuerdo_casco_testigo':{'key':'recuerdo_skill_memoria','emoji':'👑','name':'Memoria Viva','power':1.64,'pen':.32},'recuerdo_guantes_complices':{'key':'recuerdo_skill_caos','emoji':'💫','name':'Caos Compartido','power':1.69,'pen':.30,'high_roll_bonus':.25},'recuerdo_botas_comienzo':{'key':'recuerdo_skill_paso','emoji':'🌌','name':'Paso Imposible','power':1.62,'pen':.35,'execute':True},'recuerdo_sello_eterno':{'key':'recuerdo_skill_codigo','emoji':'❤️','name':'Nunca Fue Solo Código','power':1.66,'pen':.30,'heal_pct':.07}}
+RECUERDO_ABILITIES={'recuerdo_arma_primer_latido':{'key':'recuerdo_skill_latido','emoji':'🌠','name':'Primer Latido','power':1.72,'pen':.38,'high_roll_bonus':.20},'recuerdo_armadura_guardia_cero':{'key':'recuerdo_skill_juramento','emoji':'🛡️','name':'Juramento Cero','power':1.54,'pen':.25,'heal_pct':.10},'recuerdo_casco_testigo':{'key':'recuerdo_skill_memoria','emoji':'👑','name':'Memoria Viva','power':1.64,'pen':.32},'recuerdo_guantes_complices':{'key':'recuerdo_skill_caos','emoji':'💫','name':'Caos Compartido','power':1.69,'pen':.30,'high_roll_bonus':.25,'special':True,'cooldown':3},'recuerdo_botas_comienzo':{'key':'recuerdo_skill_paso','emoji':'🌌','name':'Paso Imposible','power':1.62,'pen':.35,'execute':True},'recuerdo_sello_eterno':{'key':'recuerdo_skill_codigo','emoji':'❤️','name':'Nunca Fue Solo Código','power':1.66,'pen':.30,'heal_pct':.07}}
 
 def _equipped_recuerdo_abilities(user_id,character_id=None):
     if not user_id:return []
@@ -12181,6 +12184,18 @@ def _dungeon_next_turn(rows,current_uid=0):
     i=ids.index(int(current_uid)); return ids[(i+1)%len(ids)]
 
 
+def _dungeon_living_rows(conn, rows):
+    """Filtra miembros vivos con una sola consulta, evitando N+1 SELECT por turno."""
+    rows=list(rows or [])
+    ids=[int(r['user_id']) for r in rows]
+    if not ids:
+        return []
+    marks=','.join('?' for _ in ids)
+    hp_rows=conn.execute(f"SELECT user_id,hp FROM characters WHERE is_active=1 AND user_id IN ({marks})",tuple(ids)).fetchall()
+    alive={int(r['user_id']) for r in hp_rows if int(r.get('hp') or 0)>0}
+    return [r for r in rows if int(r['user_id']) in alive]
+
+
 def _next_turn_after_removal(original_rows, removed_uid, remaining_rows):
     """Conserva la rotación cuando el jugador del turno es expulsado.
 
@@ -12205,11 +12220,17 @@ def _next_turn_after_removal(original_rows, removed_uid, remaining_rows):
 def _dungeon_spawn_shared_enemy(conn,dungeon,room):
     members=_dungeon_party_rows(conn,int(dungeon['id']))
     levels=[]; living=[]
+    member_ids=[int(m['user_id']) for m in members]
+    chars=[]
+    if member_ids:
+        marks=','.join('?' for _ in member_ids)
+        chars=conn.execute(f"SELECT user_id,level,hp FROM characters WHERE is_active=1 AND user_id IN ({marks})",tuple(member_ids)).fetchall()
+    by_uid={int(c['user_id']):c for c in chars}
     for m in members:
-        c=conn.execute("SELECT level,hp FROM characters WHERE user_id=? AND is_active=1 LIMIT 1",(int(m['user_id']),)).fetchone()
+        muid=int(m['user_id']); c=by_uid.get(muid)
         if c:
             levels.append(int(c['level']))
-            if int(c.get('hp') or 0)>0: living.append(int(m['user_id']))
+            if int(c.get('hp') or 0)>0: living.append(muid)
     level=max(levels or [1]); base=_select_enemy_for_level(level); scale=max(0,level-1)
     # Cooperativa: más vida según participantes, pero un solo objetivo compartido.
     party=max(1,len(members)); hp_mult=1.0+0.55*(party-1)
@@ -12508,10 +12529,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
                 hp=max(0,int(char['hp'])-edmg)
                 conn.execute("UPDATE characters SET hp=? WHERE id=?",(hp,int(char['id'])))
                 conn.execute("UPDATE rpg_dungeon_party_members SET special_cd=?,ultimate_cd=?,hidden_cd=?,defending=0 WHERE dungeon_id=? AND user_id=?",(nsc,nuc,nhc,did,uid))
-                live=[]
-                for rr in rows:
-                    cc=conn.execute("SELECT hp FROM characters WHERE user_id=? AND is_active=1",(int(rr['user_id']),)).fetchone()
-                    if cc and int(cc['hp'])>0: live.append(rr)
+                live=_dungeon_living_rows(conn,rows)
                 nxt=_dungeon_next_turn(live,uid) if live else 0
                 conn.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,did))
                 conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
@@ -12533,10 +12551,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
             conn.execute("UPDATE rpg_dungeon_party_members SET special_cd=?,ultimate_cd=?,hidden_cd=?,defending=0 WHERE dungeon_id=? AND user_id=?",(nsc,nuc,nhc,did,uid))
 
             if ehp>0:
-                live=[]
-                for rr in rows:
-                    cc=conn.execute("SELECT hp FROM characters WHERE user_id=? AND is_active=1",(int(rr['user_id']),)).fetchone()
-                    if cc and int(cc['hp'])>0: live.append(rr)
+                live=_dungeon_living_rows(conn,rows)
                 nxt=_dungeon_next_turn(live,uid) if live else 0
                 conn.execute("UPDATE rpg_dungeons SET enemy_hp=?,turn_user_id=?,turn_started_at=? WHERE id=?",(ehp,nxt,now if nxt else 0,did))
                 conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()

@@ -7631,12 +7631,13 @@ def weapon_gacha_text(user_id):
             "🏆 Las habilidades de arma están desactivadas SOLO en /duelopvp clasificatorio.\n🔄 La rama cambia automáticamente cada mes; las armas obtenidas no desaparecen.")
 
 def weapon_gacha_keyboard():
-    return {'inline_keyboard':[[{'text':f'🎲 TIRAR — {RPG_WEAPON_GACHA_COST:,} KW','callback_data':'weapon_gacha_open'}],[{'text':'🎒 Inventario','callback_data':'rpg_inventory:1'}]]}
+    return {'inline_keyboard':[[{'text':f'🎲 TIRAR — {RPG_WEAPON_GACHA_COST:,} KW','callback_data':'weapon_gacha_open'}],[{'text':'🎒 Inventario','callback_data':'rpg_show_inventory:1'}]]}
 
 def open_weapon_gacha(user_id):
     char=get_active_character(user_id)
     if not char: return False,'Primero necesitas un personaje activo.'
-    _ensure_weapon_gacha_items()
+    # Los objetos se sincronizan al abrir el menú, no en cada tirada.
+    # Evita varias escrituras/UPSERT innecesarias y hace el botón mucho más rápido.
     ok,balance,err=change_kiwons(user_id,-RPG_WEAPON_GACHA_COST,'weapon_gacha',note='Tirada gacha de armas')
     if not ok: return False,f"🪙 Necesitas {RPG_WEAPON_GACHA_COST:,} KW. Saldo: {get_kiwons(user_id):,} KW."
     tiers=list(RPG_WEAPON_GACHA_TIERS); weights=[RPG_WEAPON_GACHA_TIERS[x][1] for x in tiers]
@@ -7690,7 +7691,7 @@ def _equipped_gacha_weapon_abilities(user_id, character_id=None):
         c=get_db(); rows=c.execute("""SELECT x.item_key,x.name FROM rpg_inventory i
             JOIN rpg_items x ON x.item_key=i.item_key
             WHERE i.user_id=? AND i.character_id=? AND i.equipped=1
-              AND x.rarity='mitico' AND x.item_key LIKE 'gacha_weapon_%_mitico_%'
+              AND x.rarity='mitico' AND x.item_key LIKE 'gacha_weapon_%%_mitico_%%'
             ORDER BY i.id DESC""",(int(user_id),int(character_id))).fetchall(); c.close()
     return [_gacha_ability_from_equipped_row(r) for r in rows]
 
@@ -13080,6 +13081,30 @@ def handle_rpg_callback(query):
             send_message(chat_id,"🔒 La tienda de KiwRPG se abre en privado.",reply_markup=_private_launch_keyboard("shop")); return True
         balance,kb=rpg_shop_keyboard(uid)
         send_message(chat_id,f"🏪 TIENDA RPG\n\nCompra consumibles y equipo básico con Kiwons.\n🪙 Tu saldo: {balance:,} KW",reply_markup=kb); return True
+    if data=="marriage_home":
+        txt,kb=marriage_home_panel(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="marriage_bank_home":
+        txt,kb=marriage_bank_panel(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("marriage_bank:"):
+        try: _,mode,amount=data.split(":",2); amount=int(amount)
+        except Exception: return True
+        ok,msg2=marriage_bank_move(uid,amount,mode); txt,kb=marriage_bank_panel(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data.startswith("marriage_gift:"):
+        try: amount=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=marriage_gift_kw(uid,amount,chat_id); txt,kb=marriage_home_panel(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data=="marriage_items_home":
+        txt,kb=marriage_shared_inventory_panel(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="marriage_item_deposit_menu":
+        txt,kb=marriage_deposit_inventory_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith("marriage_item_put:"):
+        try: iid=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=marriage_shared_deposit(uid,iid); txt,kb=marriage_shared_inventory_panel(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
+    if data.startswith("marriage_item_take:"):
+        try: sid=int(data.split(":",1)[1])
+        except Exception: return True
+        ok,msg2=marriage_shared_withdraw(uid,sid); txt,kb=marriage_shared_inventory_panel(uid); send_message(chat_id,msg2+"\n\n"+txt,reply_markup=kb); return True
     if data=="weapon_gacha_open":
         if not _is_private_chat_obj(msg.get("chat")):
             send_message(chat_id,"🔒 El gacha de armas se abre en privado.",reply_markup=_private_launch_keyboard("weapon_gacha")); return True
@@ -13789,16 +13814,60 @@ def marriage_shared_withdraw(user_id,shared_id):
             c.execute("INSERT INTO rpg_inventory(user_id,character_id,item_key,serial_number,quantity,equipped,locked,acquired_at,acquired_from,world_id,original_owner_id) VALUES(?,?,?,?,?,0,0,?,'marriage_shared',?,?)",(uid,int(char['id']),r['item_key'],int(r.get('serial_number') or 0),int(r.get('quantity') or 1),now,world,int(r.get('deposited_by') or uid))); c.execute("DELETE FROM rpg_marriage_shared_inventory WHERE id=?",(sid,)); c.commit(); name=r['name'];c.close();return True,f"🎒 Retiraste {name} del almacén compartido."
         except Exception:c.rollback();c.close();raise
 
-def marriage_shared_inventory_text(user_id):
+def marriage_shared_inventory_panel(user_id):
     _ensure_world_memory_db(); uid=int(user_id); mid=_marriage_id_for_user(uid)
-    if not mid:return "💞 No tienes una pareja en KiwRPG."
+    if not mid:return "💞 No tienes una pareja en KiwRPG.",None
     with db_lock:
-        c=get_db(); rows=c.execute("SELECT s.id,s.quantity,s.deposited_by,x.name,x.rarity FROM rpg_marriage_shared_inventory s JOIN rpg_items x ON x.item_key=s.item_key WHERE s.marriage_id=? ORDER BY s.id DESC LIMIT 80",(mid,)).fetchall(); c.close()
-    lines=["💞 ALMACÉN MATRIMONIAL COMPARTIDO","","Los dos pueden depositar y retirar. Cada movimiento cambia propiedad de forma transaccional.",""]
-    if not rows:lines.append("— Vacío —")
-    for r in rows:lines.append(f"#{r['id']} · {r['name']} ×{int(r['quantity'] or 1)} · dejó {_player_name_by_id(int(r['deposited_by']))}")
-    lines += ["","Depositar: /depositaritempareja ID de tu inventario","Retirar: /retiraritempareja ID mostrado aquí"]
-    return "\n".join(lines)
+        c=get_db(); rows=c.execute("SELECT s.id,s.quantity,s.deposited_by,x.name,x.rarity FROM rpg_marriage_shared_inventory s JOIN rpg_items x ON x.item_key=s.item_key WHERE s.marriage_id=? ORDER BY s.id DESC LIMIT 30",(mid,)).fetchall(); c.close()
+    lines=["🎒 ALMACÉN DE PAREJA","","Aquí guardan objetos los dos. Toca un objeto para retirarlo.",""]
+    kb=[]
+    if not rows: lines.append("— Vacío —")
+    for r in rows:
+        lines.append(f"#{r['id']} · {r['name']} ×{int(r['quantity'] or 1)}")
+        kb.append([{'text':f"⬇️ Retirar · {str(r['name'])[:28]}",'callback_data':f"marriage_item_take:{int(r['id'])}"}])
+    kb.append([{'text':'⬆️ Depositar objeto','callback_data':'marriage_item_deposit_menu'}])
+    kb.append([{'text':'💰 Fondo KW','callback_data':'marriage_bank_home'},{'text':'💞 Pareja','callback_data':'marriage_home'}])
+    return "\n".join(lines),{'inline_keyboard':kb}
+
+def marriage_deposit_inventory_keyboard(user_id):
+    uid=int(user_id); world=current_rpg_world()
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT i.id,i.quantity,x.name FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? AND COALESCE(i.equipped,0)=0 AND COALESCE(i.locked,0)=0 AND COALESCE(x.tradeable,0)=1 AND i.item_key<>'anillo_bodas' ORDER BY i.id DESC LIMIT 25",(uid,world)).fetchall(); c.close()
+    kb=[[{'text':f"⬆️ {str(r['name'])[:30]} ×{int(r['quantity'] or 1)}",'callback_data':f"marriage_item_put:{int(r['id'])}"}] for r in rows]
+    kb.append([{'text':'⬅️ Almacén','callback_data':'marriage_items_home'}])
+    return ("⬆️ DEPOSITAR EN ALMACÉN\n\nElige el objeto que quieres compartir." if rows else "⬆️ DEPOSITAR EN ALMACÉN\n\nNo tienes objetos transferibles disponibles."),{'inline_keyboard':kb}
+
+def marriage_bank_panel(user_id):
+    info=marriage_bank_info(user_id)
+    if not info:return "💞 Necesitas estar casado para usar el fondo.",None
+    row,bal,contrib=info; uid=int(user_id); pid=_marriage_partner_id(row,uid)
+    txt=(f"💰 FONDO DE PAREJA\n\n🏦 Saldo compartido: {bal:,} KW\n"
+         f"• {_player_name_by_id(uid)} aportó: {contrib.get(uid,0):,} KW\n"
+         f"• {_player_name_by_id(pid)} aportó: {contrib.get(int(pid),0):,} KW\n\n"
+         "Usa los botones; ya no necesitas escribir comandos.")
+    kb={'inline_keyboard':[
+        [{'text':'➕ 1,000','callback_data':'marriage_bank:deposit:1000'},{'text':'➕ 5,000','callback_data':'marriage_bank:deposit:5000'},{'text':'➕ 10,000','callback_data':'marriage_bank:deposit:10000'}],
+        [{'text':'➖ 1,000','callback_data':'marriage_bank:withdraw:1000'},{'text':'➖ 5,000','callback_data':'marriage_bank:withdraw:5000'},{'text':'➖ 10,000','callback_data':'marriage_bank:withdraw:10000'}],
+        [{'text':'🎁 Regalar 1,000','callback_data':'marriage_gift:1000'},{'text':'🎁 5,000','callback_data':'marriage_gift:5000'}],
+        [{'text':'🎒 Almacén','callback_data':'marriage_items_home'},{'text':'💞 Pareja','callback_data':'marriage_home'}]
+    ]}
+    return txt,kb
+
+def marriage_home_panel(user_id):
+    uid=int(user_id); row=_marriage_row(uid,("active",))
+    if not row:return "💞 Actualmente no tienes pareja en KiwRPG.",None
+    pid=_marriage_partner_id(row,uid); since=int(row.get('accepted_at') or 0)
+    date=time.strftime('%d/%m/%Y',time.localtime(since)) if since else '—'; days=max(0,(int(time.time())-since)//86400) if since else 0
+    info=marriage_bank_info(uid); bank=info[1] if info else 0
+    txt=(f"💞 PAREJA KIWRPG\n\n{_player_name_by_id(uid)} + {_player_name_by_id(pid)}\n"
+         f"💍 Desde: {date} · {days} días\n⚔️ +{RPG_MARRIAGE_BOSS_BONUS}% daño juntos contra Bosses\n💰 Fondo: {bank:,} KW\n\n"
+         "💰 Fondo = dinero compartido\n🎒 Almacén = objetos compartidos")
+    kb={'inline_keyboard':[[{'text':'💰 Fondo KW','callback_data':'marriage_bank_home'},{'text':'🎒 Almacén','callback_data':'marriage_items_home'}],[{'text':'🎁 Regalar KW','callback_data':'marriage_gift:1000'}]]}
+    return txt,kb
+
+def marriage_shared_inventory_text(user_id):
+    # Compatibilidad con llamadas antiguas; la interfaz nueva usa botones.
+    return marriage_shared_inventory_panel(user_id)[0]
 
 # =========================================================
 # COMANDOS
@@ -14685,8 +14754,7 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command in ("/fondopareja", "/fondoboda"):
         info=marriage_bank_info(user_id)
         if not info: send_message(chat_id,"💞 Necesitas estar casado para tener un fondo de pareja."); return True
-        row,bal,contrib=info; pid=_marriage_partner_id(row,user_id)
-        send_message(chat_id,f"💰 FONDO DE PAREJA\n\n💞 {_player_name_by_id(user_id)} + {_player_name_by_id(pid)}\n🏦 Saldo compartido: {bal:,} KW\n\nAportado históricamente:\n• {_player_name_by_id(user_id)}: {contrib.get(int(user_id),0):,} KW\n• {_player_name_by_id(pid)}: {contrib.get(int(pid),0):,} KW\n\n/depositarpareja 1000\n/retirarpareja 1000\n/regalarpareja 500"); return True
+        txt2,kb2=marriage_bank_panel(user_id); send_message(chat_id,txt2,reply_markup=kb2); return True
 
     if command in ("/depositarpareja", "/depositarboda", "/retirarpareja", "/retirarboda", "/regalarpareja"):
         parts=str(text or '').strip().split(); amount=int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 0
@@ -14696,16 +14764,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         send_message(chat_id,msg2); return True
 
     if command in ("/pareja", "/matrimonio", "/matrimonioestado"):
-        row=_marriage_row(user_id,("active",))
-        if not row: send_message(chat_id,"💞 Actualmente no tienes pareja en KiwRPG."); return True
-        pid=_marriage_partner_id(row,user_id)
-        since=int(row.get('accepted_at') or 0); date=time.strftime('%d/%m/%Y',time.localtime(since)) if since else '—'
-        info=marriage_bank_info(user_id); bank=info[1] if info else 0; days=max(0,(int(time.time())-since)//86400) if since else 0
-        send_message(chat_id,f"💞 PAREJA KIWRPG\n\n{_player_name_by_id(user_id)} + {_player_name_by_id(pid)}\n💍 Desde: {date} · {days} días\n⚔️ Bonus juntos: +{RPG_MARRIAGE_BOSS_BONUS}% daño contra Bosses\n💰 Fondo compartido: {bank:,} KW\n\n🎒 /inventariopareja · 💰 /fondopareja · 🎁 /regalarpareja")
-        return True
+        txt2,kb2=marriage_home_panel(user_id); send_message(chat_id,txt2,reply_markup=kb2); return True
 
     if command in ("/inventariopareja", "/mochilapareja"):
-        send_message(chat_id,marriage_shared_inventory_text(user_id)); return True
+        txt2,kb2=marriage_shared_inventory_panel(user_id); send_message(chat_id,txt2,reply_markup=kb2); return True
 
     if command in ("/compartiritem", "/pasaritem"):
         parts=str(text or "").strip().split()

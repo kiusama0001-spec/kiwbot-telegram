@@ -3691,7 +3691,7 @@ recuerdos que no aparezcan aquí.
     if voice_mode:
         voice_instruction = """
 MODO DE RESPUESTA HABLADA:
-Tu respuesta será convertida directamente a una nota de voz. Habla como una persona real en una conversación de Telegram. Sé natural y breve. No uses emojis, markdown, listas, títulos ni describas gestos o símbolos. No pronuncies nombres de emojis. No anuncies que eres una diva; deja que tu personalidad se note en cómo hablas.
+Tu respuesta será convertida directamente a una nota de voz. Habla como una persona real en una conversación de Telegram. Sé natural y breve. No uses emojis, markdown, listas, títulos ni describas gestos o símbolos. No pronuncies nombres de emojis. No anuncies que eres una diva; deja que tu personalidad se note en cómo hablas. Si quien habla es Kiu, llámalo «Amo Kiu» de forma natural durante la respuesta y usa siempre masculino.
 """
 
     messages = [
@@ -5568,6 +5568,18 @@ def _ensure_npc_moral_jobs_db():
             c.execute("ALTER TABLE rpg_npc_moral_jobs ADD COLUMN IF NOT EXISTS spawn_started_at BIGINT NOT NULL DEFAULT 0")
             c.execute("CREATE INDEX IF NOT EXISTS idx_npc_moral_jobs_user ON rpg_npc_moral_jobs(user_id,status,updated_at)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_npc_moral_jobs_chat ON rpg_npc_moral_jobs(chat_id,status,updated_at)")
+            # Historial definitivo separado del log de ejecuciones. Impide repetir un encargo
+            # aunque el NPC reaparezca, se reinicie Render o existan filas antiguas duplicadas.
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_moral_completed(
+                user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,title TEXT NOT NULL,
+                outcome TEXT NOT NULL,completed_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id,npc_key,title))""")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_npc_moral_completed_user_npc ON rpg_npc_moral_completed(user_id,npc_key)")
+            # Migra automáticamente encargos ya terminados antes de este arreglo.
+            c.execute("""INSERT INTO rpg_npc_moral_completed(user_id,npc_key,title,outcome,completed_at)
+                SELECT user_id,npc_key,title,status,MAX(updated_at) FROM rpg_npc_moral_jobs
+                WHERE status IN ('spared','killed') GROUP BY user_id,npc_key,title,status
+                ON CONFLICT(user_id,npc_key,title) DO NOTHING""")
             # Un viajero que aparece trae UN encargo público: el primer jugador que lo reclama se lo queda.
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_npc_moral_spawn_claim ON rpg_npc_moral_jobs(chat_id,npc_key,spawn_started_at) WHERE spawn_started_at>0")
             c.commit(); c.close()
@@ -5630,7 +5642,7 @@ def _npc_offer_moral_job(user_id,chat_id,key):
             if old:
                 c.close(); return _npc_job_card(old)
             # Excluye permanentemente los títulos que este jugador YA resolvió con este NPC.
-            done=c.execute("SELECT title FROM rpg_npc_moral_jobs WHERE user_id=? AND npc_key=? AND status IN ('spared','killed')",(uid,str(key))).fetchall()
+            done=c.execute("SELECT title FROM rpg_npc_moral_completed WHERE user_id=? AND npc_key=?",(uid,str(key))).fetchall()
             done_titles={str(r['title']) for r in done}
             available=[x for x in _npc_moral_pool(key) if str(x['title']) not in done_titles]
             if not available:
@@ -5664,6 +5676,7 @@ def npc_moral_job_action(user_id,chat_id,job_id,action):
                 c.execute("UPDATE rpg_npc_moral_jobs SET listened=1,updated_at=? WHERE id=?",(now,int(job_id))); c.commit(); row=dict(row); row['listened']=1; c.close(); return _npc_job_card(row,True)
             if action=='spare':
                 rep=4 if int(row.get('listened') or 0) else 2; rep=max(-1,rep-attacks); reward=max(300,1200-attacks*180)
+                c.execute("INSERT INTO rpg_npc_moral_completed(user_id,npc_key,title,outcome,completed_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,npc_key,title) DO NOTHING",(uid,str(row['npc_key']),str(row['title']),'spared',now))
                 c.execute("UPDATE rpg_npc_moral_jobs SET status='spared',updated_at=? WHERE id=?",(now,int(job_id))); c.commit(); c.close()
                 change_kiwons(uid,reward,'npc_encargo_spare',actor_id=uid,chat_id=int(chat_id),note=str(row['title']))
                 record_world_decision(uid,f"npc_moral_spare:{job_id}",f"Perdonaste a {row['target_name']} tras {attacks} ataque(s) en «{row['title']}».",rep,npc_key=str(row['npc_key']),traits={'merciful':1,'honorable':1} if attacks<=1 else {'merciful':1},chat_id=int(chat_id))
@@ -5676,6 +5689,7 @@ def npc_moral_job_action(user_id,chat_id,job_id,action):
             c.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(newphp,now,int(char['id'])))
             if hp<=0:
                 cruelty=max(1,attacks); rep=-min(8,2+cruelty); reward=2200+min(1200,attacks*150)
+                c.execute("INSERT INTO rpg_npc_moral_completed(user_id,npc_key,title,outcome,completed_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,npc_key,title) DO NOTHING",(uid,str(row['npc_key']),str(row['title']),'killed',now))
                 c.execute("UPDATE rpg_npc_moral_jobs SET status='killed',target_hp=0,attacks=?,updated_at=? WHERE id=?",(attacks,now,int(job_id))); c.commit(); c.close()
                 change_kiwons(uid,reward,'npc_encargo_kill',actor_id=uid,chat_id=int(chat_id),note=str(row['title']))
                 record_world_decision(uid,f"npc_moral_kill:{job_id}",f"Mataste a {row['target_name']} después de {attacks} ataque(s) en «{row['title']}».",rep,npc_key=str(row['npc_key']),traits={'cruel':max(1,attacks),'opportunist':1},chat_id=int(chat_id))
@@ -11583,6 +11597,9 @@ VOICE_AI_MAX_SECONDS = max(5, min(90, int(os.getenv("KIWBOT_VOICE_MAX_SECONDS", 
 VOICE_AI_MAX_BYTES = max(500_000, min(20_000_000, int(os.getenv("KIWBOT_VOICE_MAX_BYTES", "8000000"))))
 VOICE_TTS_MAX_CHARS = max(120, min(1200, int(os.getenv("KIWBOT_VOICE_TTS_MAX_CHARS", "700"))))
 VOICE_AI_ENABLED = os.getenv("KIWBOT_VOICE_AI", "true").lower() == "true"
+# Voz hablada: por defecto usa español de México en gTTS. Puede cambiarse en Render
+# con KIWBOT_TTS_TLD sin tocar el RPG (por ejemplo com.mx, es, com).
+VOICE_TTS_TLD = os.getenv("KIWBOT_TTS_TLD", "com.mx").strip() or "com.mx"
 
 
 def _transcribe_voice_message(message):
@@ -11651,7 +11668,7 @@ def _tts_spanish_mp3(text):
     try:
         from gtts import gTTS
         buf=io.BytesIO()
-        gTTS(text=clean,lang="es",slow=False).write_to_fp(buf)
+        gTTS(text=clean,lang="es",tld=VOICE_TTS_TLD,slow=False).write_to_fp(buf)
         raw=buf.getvalue()
         if raw: return raw
     except Exception:
@@ -11773,6 +11790,10 @@ def handle_ai_voice_message(message):
     spoken=clean_bot_mention(spoken).strip() or spoken
     try:
         reply=(generate_reply(chat_id,uid,spoken,first_name,voice_mode=True) if is_ai_enabled(chat_id) else local_reply(chat_id,uid,spoken,first_name))
+        # La instrucción del modelo suele bastar, pero en voz garantizamos el trato del dueño
+        # sin depender de que la IA lo recuerde en cada generación.
+        if is_owner(uid) and 'amo kiu' not in normalize_text(str(reply or '')):
+            reply=f"Amo Kiu, {str(reply or '').lstrip()}"
     except Exception:
         logger.exception('Error generando respuesta a voz'); send_message(chat_id,'🎙️ Te escuché, pero se me trabó la respuesta. Intenta otra vez.',reply_to_message_id=message.get('message_id')); return True
     raw=_tts_spanish_mp3(reply)

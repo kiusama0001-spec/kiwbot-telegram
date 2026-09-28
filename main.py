@@ -6900,31 +6900,85 @@ def _equipment_item_power(row):
     score=atk*10+deff*10+hp
     return (score,atk+deff,atk,deff,hp,int(row.get("forge_level") or 0),int(row.get("id") or 0))
 
-def equip_best_inventory(user_id):
-    """Equipa atómicamente la mejor pieza compatible de cada slot."""
+def _best_inventory_selection(user_id):
+    """Calcula la mejor pieza compatible por slot sin modificar el inventario."""
     uid=int(user_id); char=get_active_character(uid)
+    if not char: return None,{},[]
+    world=current_rpg_world(); slots=("arma","casco","armadura","guantes","botas","accesorio")
+    with db_lock:
+        c=get_db()
+        rows=c.execute("""SELECT i.id,i.item_key,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,i.equipped,
+            x.name,x.equip_slot,x.allowed_classes,x.min_level,x.atk_bonus,x.def_bonus,x.hp_bonus
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=? AND x.equip_slot IN ('arma','casco','armadura','guantes','botas','accesorio')
+            ORDER BY i.id""",(uid,world)).fetchall(); c.close()
+    best={}
+    for raw in rows:
+        r=dict(raw); ok,_=item_compatibility(r,char)
+        if not ok: continue
+        slot=str(r.get('equip_slot') or '')
+        if slot in slots and (slot not in best or _equipment_item_power(r)>_equipment_item_power(best[slot])):
+            best[slot]=r
+    return char,best,[slot for slot in slots if slot not in best]
+
+
+def best_equipment_preview(user_id):
+    """Vista previa: no equipa nada hasta pulsar el botón de confirmación."""
+    char,best,missing=_best_inventory_selection(user_id)
+    if not char: return "No tienes un personaje activo.",None
+    if not best: return "🎒 No tienes equipo compatible para este personaje.",{"inline_keyboard":[[{"text":"🎒 Ver inventario","callback_data":"rpg_show_inventory:1"}]]}
+    labels={"arma":"⚔️","casco":"🪖","armadura":"🛡️","guantes":"🧤","botas":"👢","accesorio":"💍"}
+    order=("arma","casco","armadura","guantes","botas","accesorio")
+    lines=[f"✨ MEJOR EQUIPO PROPUESTO — {char['name']}","","Todavía no he cambiado nada:"]
+    for slot in order:
+        r=best.get(slot)
+        if r: lines.append(f"{labels[slot]} {r['name']}")
+        else: lines.append(f"{labels[slot]} {slot.title()}: —")
+    rows=[[{"text":"⚔️ Equipar todo","callback_data":"bestgear_apply"}],[{"text":"🎒 Ver inventario","callback_data":"rpg_show_inventory:1"}]]
+    for slot in missing:
+        rows.append([{"text":f"{labels[slot]} Buscar {slot}","callback_data":f"bestgear_missing:{slot}"}])
+    lines += ["","Pulsa ⚔️ Equipar todo para confirmar."]
+    return "\n".join(lines),{"inline_keyboard":rows}
+
+
+def best_equipment_slot_picker(user_id,slot):
+    """Lista piezas compatibles de un slot faltante, con botón directo para equipar."""
+    slots={"arma":"⚔️","casco":"🪖","armadura":"🛡️","guantes":"🧤","botas":"👢","accesorio":"💍"}
+    slot=str(slot or '').lower()
+    if slot not in slots: return "Ese tipo de equipo no existe.",None
+    char=get_active_character(user_id)
+    if not char: return "No tienes un personaje activo.",None
+    world=current_rpg_world()
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT i.id,i.item_key,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,i.equipped,
+            x.name,x.equip_slot,x.allowed_classes,x.min_level,x.atk_bonus,x.def_bonus,x.hp_bonus,x.rarity
+            FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+            WHERE i.user_id=? AND i.world_id=? AND x.equip_slot=? ORDER BY i.acquired_at DESC,i.id DESC""",
+            (int(user_id),world,slot)).fetchall(); c.close()
+    valid=[]
+    for raw in rows:
+        r=dict(raw); ok,_=item_compatibility(r,char)
+        if ok: valid.append(r)
+    valid.sort(key=_equipment_item_power,reverse=True)
+    if not valid:
+        return f"{slots[slot]} No tienes ninguna pieza compatible de {slot} en tu inventario.",{"inline_keyboard":[[{"text":"⬅️ Volver","callback_data":"bestgear_preview"}],[{"text":"🎒 Inventario","callback_data":"rpg_show_inventory:1"}]]}
+    kb=[]
+    for r in valid[:12]:
+        mark=" 🟢" if int(r.get('equipped') or 0) else ""
+        kb.append([{"text":f"{slots[slot]} {r['name']}{mark}","callback_data":f"rpg_equip:{int(r['id'])}"}])
+    kb.append([{"text":"⬅️ Volver","callback_data":"bestgear_preview"}])
+    return f"{slots[slot]} {slot.upper()} COMPATIBLE\n\nElige la pieza que quieras equipar:",{"inline_keyboard":kb}
+
+
+def equip_best_inventory(user_id):
+    """Confirma y equipa atómicamente la mejor pieza compatible de cada slot."""
+    uid=int(user_id); char,best,missing=_best_inventory_selection(uid)
     if not char: return False,"No tienes un personaje activo."
+    if not best: return False,"🎒 No tienes equipo compatible para este personaje."
     world=current_rpg_world(); slots=("arma","casco","armadura","guantes","botas","accesorio")
     with db_lock:
         c=get_db()
         try:
-            rows=c.execute("""SELECT i.id,i.item_key,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,i.equipped,
-                x.name,x.equip_slot,x.allowed_classes,x.min_level,x.atk_bonus,x.def_bonus,x.hp_bonus
-                FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
-                WHERE i.user_id=? AND i.world_id=? AND x.equip_slot IN ('arma','casco','armadura','guantes','botas','accesorio')
-                ORDER BY i.id""",(uid,world)).fetchall()
-            compatible=[]
-            for raw in rows:
-                r=dict(raw); ok,_=item_compatibility(r,char)
-                if ok: compatible.append(r)
-            best={}
-            for r in compatible:
-                slot=str(r['equip_slot'])
-                if slot not in slots: continue
-                if slot not in best or _equipment_item_power(r)>_equipment_item_power(best[slot]): best[slot]=r
-            if not best:
-                c.rollback(); c.close(); return False,"🎒 No tienes equipo compatible para este personaje."
-            # Solo toca los seis slots normales y lo hace en una transacción.
             c.execute("""UPDATE rpg_inventory i SET equipped=0 FROM rpg_items x
                 WHERE i.item_key=x.item_key AND i.character_id=? AND i.equipped=1
                 AND x.equip_slot IN ('arma','casco','armadura','guantes','botas','accesorio')""",(int(char['id']),))
@@ -6933,21 +6987,17 @@ def equip_best_inventory(user_id):
                 r=best.get(slot)
                 if not r: continue
                 c.execute("UPDATE rpg_inventory SET equipped=1,character_id=? WHERE id=? AND user_id=? AND world_id=?",
-                          (int(char['id']),int(r['id']),uid,world))
-                chosen.append(r)
+                          (int(char['id']),int(r['id']),uid,world)); chosen.append(r)
             c.execute("UPDATE characters SET updated_at=? WHERE id=?",(int(time.time()),int(char['id'])))
             c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
-    # Recalcula después de equipar para mostrar el resultado real.
     fresh=get_active_character(uid); eff=effective_character_stats(fresh)
     labels={"arma":"⚔️","casco":"🪖","armadura":"🛡️","guantes":"🧤","botas":"👢","accesorio":"💍"}
-    lines=[f"✨ MEJOR EQUIPO — {fresh['name']}",""]
+    lines=[f"✅ MEJOR EQUIPO EQUIPADO — {fresh['name']}",""]
     for r in chosen: lines.append(f"{labels.get(str(r['equip_slot']),'🎽')} {r['name']}")
-    missing=[x for x in slots if x not in best]
-    if missing: lines += ["", "▫️ Sin pieza compatible: "+", ".join(missing)]
-    lines += ["",f"TOTAL: ⚔️ {eff['atk']} · 🛡️ {eff['defense']} · ❤️ {eff['max_hp']}",
-              "Se eligió la mejor combinación disponible contando stats, forja y encantamientos."]
+    if missing: lines += ["", "▫️ Sigue sin pieza compatible: "+", ".join(missing)]
+    lines += ["",f"TOTAL: ⚔️ {eff['atk']} · 🛡️ {eff['defense']} · ❤️ {eff['max_hp']}"]
     return True,"\n".join(lines)
 
 def equipment_text(user_id):
@@ -13374,6 +13424,23 @@ def handle_rpg_callback(query):
     if data.startswith("forge_locked:"):
         txt,kb=forge_recipe_text(uid,data.split(":",1)[1])
         send_message(chat_id,txt or "Esa receta ya no existe.",reply_markup=kb); return True
+    if data=="bestgear_preview":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 Esta función se usa en privado con KiwBot.",reply_markup=_private_launch_keyboard("bestgear")); return True
+        txt,kb=best_equipment_preview(uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data=="bestgear_apply":
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 El autoequipado solo se confirma en privado.",reply_markup=_private_launch_keyboard("bestgear")); return True
+        ok,msg2=equip_best_inventory(uid)
+        rows=[[{"text":"🔄 Recalcular","callback_data":"bestgear_preview"},{"text":"🎒 Inventario","callback_data":"rpg_show_inventory:1"}]]
+        _,_,missing=_best_inventory_selection(uid)
+        icons={"arma":"⚔️","casco":"🪖","armadura":"🛡️","guantes":"🧤","botas":"👢","accesorio":"💍"}
+        for slot in missing: rows.append([{"text":f"{icons[slot]} Buscar {slot}","callback_data":f"bestgear_missing:{slot}"}])
+        send_message(chat_id,msg2,reply_markup={"inline_keyboard":rows}); return True
+    if data.startswith("bestgear_missing:"):
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🔒 El inventario de equipo se administra en privado.",reply_markup=_private_launch_keyboard("bestgear")); return True
+        txt,kb=best_equipment_slot_picker(uid,data.split(":",1)[1]); send_message(chat_id,txt,reply_markup=kb); return True
     if data.startswith("rpg_item:"):
         show_inventory_item(chat_id,uid,int(data.split(":",1)[1])); return True
     if data.startswith("rpg_equip:"):
@@ -14687,7 +14754,7 @@ def process_command(
             try: merchant_id=int(parts[1].split("_",1)[1])
             except Exception: merchant_id=0
             txt,kb=merchant_private_text_keyboard(merchant_id,user.get("id")); send_message(chat_id,txt,reply_markup=kb); return True
-        if len(parts)>1 and parts[1] in ("shop","pets","weapon_gacha","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story"):
+        if len(parts)>1 and parts[1] in ("shop","pets","weapon_gacha","missions","forge","upgrade_weapons","inventory","skills","commands","titles","story","bestgear"):
             user=message.get("from",{}); ensure_player(user)
             if chat.get("type")!="private": return True
             if parts[1]=="shop":
@@ -14710,6 +14777,9 @@ def process_command(
                 txt,kb=rpg_personal_story_text(user.get("id")); send_message(chat_id,txt,reply_markup=kb)
             elif parts[1]=="inventory":
                 txt,kb=rpg_inventory_page(user.get("id"),1)
+                send_message(chat_id,txt,reply_markup=kb)
+            elif parts[1]=="bestgear":
+                txt,kb=best_equipment_preview(user.get("id"))
                 send_message(chat_id,txt,reply_markup=kb)
             else:
                 send_message(chat_id,mission_board_text(user.get("id")),reply_markup=mission_board_keyboard(user.get("id")))
@@ -15459,8 +15529,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
 
     if command in ("/mejorequipo", "/autoequipar"):
         user_id=message.get("from",{}).get("id")
-        ok,msg2=equip_best_inventory(user_id)
-        send_message(chat_id,msg2)
+        if chat.get("type")!="private":
+            send_message(chat_id,"🔒 El mejor equipo se calcula y equipa en privado con KiwBot.",reply_markup=_private_launch_keyboard("bestgear")); return True
+        txt,kb=best_equipment_preview(user_id)
+        send_message(chat_id,txt,reply_markup=kb)
         return True
 
     if command in ("/equipo", "/equipamiento"):

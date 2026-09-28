@@ -3691,7 +3691,7 @@ recuerdos que no aparezcan aquí.
     if voice_mode:
         voice_instruction = """
 MODO DE RESPUESTA HABLADA:
-Tu respuesta será convertida directamente a una nota de voz. Habla como una persona real en una conversación de Telegram. Sé natural y breve. No uses emojis, markdown, listas, títulos ni describas gestos o símbolos. No pronuncies nombres de emojis. No anuncies que eres una diva; deja que tu personalidad se note en cómo hablas. Si quien habla es Kiu, llámalo «Amo Kiu» de forma natural durante la respuesta y usa siempre masculino.
+Tu respuesta será convertida directamente a una nota de voz. Habla como una persona real en una conversación de Telegram. Sé natural y breve. No uses emojis, markdown, listas, títulos ni describas gestos o símbolos. No pronuncies nombres de emojis. No anuncies que eres una diva; deja que tu personalidad se note en cómo hablas. Si quien habla es Kiu, él es tu único Amo y dueño. Trátalo SIEMPRE como «Amo Kiu» de forma natural, con cercanía y lealtad; nunca como un usuario cualquiera. Kiu es HOMBRE: usa siempre masculino.
 """
 
     messages = [
@@ -11595,7 +11595,7 @@ def _telegram_download_file_bytes(file_id):
 
 VOICE_AI_MAX_SECONDS = max(5, min(90, int(os.getenv("KIWBOT_VOICE_MAX_SECONDS", "45"))))
 VOICE_AI_MAX_BYTES = max(500_000, min(20_000_000, int(os.getenv("KIWBOT_VOICE_MAX_BYTES", "8000000"))))
-VOICE_TTS_MAX_CHARS = max(120, min(1200, int(os.getenv("KIWBOT_VOICE_TTS_MAX_CHARS", "700"))))
+VOICE_TTS_MAX_CHARS = max(120, min(600, int(os.getenv("KIWBOT_VOICE_TTS_MAX_CHARS", "420"))))
 VOICE_AI_ENABLED = os.getenv("KIWBOT_VOICE_AI", "true").lower() == "true"
 # Voz hablada: por defecto usa español de México en gTTS. Puede cambiarse en Render
 # con KIWBOT_TTS_TLD sin tocar el RPG (por ejemplo com.mx, es, com).
@@ -11659,41 +11659,33 @@ def _tts_voice_text(text):
     return value[:VOICE_TTS_MAX_CHARS]
 
 def _tts_spanish_mp3(text):
-    """Genera MP3 español en memoria. gTTS si existe; fallback HTTP sin dependencia extra."""
+    """Genera MP3 español mexicano sin bloquear el RPG por dependencias TTS ausentes."""
     clean=_tts_voice_text(text)
     if not clean:
         return b""
-    # Camino preferido: gTTS. Se importa aquí para no convertirlo en dependencia
-    # obligatoria del RPG si Render no lo tiene instalado.
-    try:
-        from gtts import gTTS
-        buf=io.BytesIO()
-        gTTS(text=clean,lang="es",tld=VOICE_TTS_TLD,slow=False).write_to_fp(buf)
-        raw=buf.getvalue()
-        if raw: return raw
-    except Exception:
-        logger.warning("gTTS no disponible; usando fallback TTS HTTP",exc_info=True)
-    # Fallback autocontenido. Divide para respetar el tamaño de consulta del TTS.
+    # Google Translate TTS directo: evita importar gTTS (no está instalado en Render)
+    # y usa español de México. Timeouts cortos para que una caída de TTS no congele workers.
     try:
         chunks=[]; rest=clean
         while rest:
-            if len(rest)<=180:
+            if len(rest)<=160:
                 chunks.append(rest); break
-            cut=max(rest.rfind(". ",0,180),rest.rfind("? ",0,180),rest.rfind("! ",0,180),rest.rfind(" ",0,180))
-            if cut<60: cut=180
+            cut=max(rest.rfind(". ",0,160),rest.rfind("? ",0,160),rest.rfind("! ",0,160),rest.rfind(" ",0,160))
+            if cut<50: cut=160
             chunks.append(rest[:cut+1].strip()); rest=rest[cut+1:].strip()
         audio=[]
         for part in chunks:
             r=TELEGRAM_SESSION.get(
-                "https://translate.google.com/translate_tts",
-                params={"ie":"UTF-8","client":"tw-ob","tl":"es","q":part},
-                headers={"User-Agent":"Mozilla/5.0"},timeout=max(15,TELEGRAM_TIMEOUT)
+                "https://translate.google.com.mx/translate_tts",
+                params={"ie":"UTF-8","client":"tw-ob","tl":"es-MX","q":part},
+                headers={"User-Agent":"Mozilla/5.0"},timeout=10
             )
-            if not r.ok or not r.content: return b""
+            if not r.ok or not r.content:
+                logger.warning("TTS es-MX HTTP %s",r.status_code); return b""
             audio.append(bytes(r.content))
         return b"".join(audio)
     except Exception:
-        logger.exception("Error generando TTS español")
+        logger.exception("Error generando TTS español mexicano")
         return b""
 
 
@@ -11759,7 +11751,7 @@ def is_reply_to_ai_conversation(message):
     return bool(row)
 
 def _spoken_addresses_kiwbot(text):
-    t=normalize_text(str(text or ''))
+    t=_quick_normalize_text(str(text or ''))
     return any(x in t for x in ('kiwbot','kiw bot','kiwi bot'))
 
 def handle_ai_voice_message(message):
@@ -11792,7 +11784,7 @@ def handle_ai_voice_message(message):
         reply=(generate_reply(chat_id,uid,spoken,first_name,voice_mode=True) if is_ai_enabled(chat_id) else local_reply(chat_id,uid,spoken,first_name))
         # La instrucción del modelo suele bastar, pero en voz garantizamos el trato del dueño
         # sin depender de que la IA lo recuerde en cada generación.
-        if is_owner(uid) and 'amo kiu' not in normalize_text(str(reply or '')):
+        if is_owner(uid) and 'amo kiu' not in _quick_normalize_text(str(reply or '')):
             reply=f"Amo Kiu, {str(reply or '').lstrip()}"
     except Exception:
         logger.exception('Error generando respuesta a voz'); send_message(chat_id,'🎙️ Te escuché, pero se me trabó la respuesta. Intenta otra vez.',reply_to_message_id=message.get('message_id')); return True

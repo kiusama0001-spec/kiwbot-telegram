@@ -1622,6 +1622,7 @@ Género: hombre / masculino.
 REGLA CRÍTICA DE TRATO PARA KIU:
 Kiu es HOMBRE. Háblale siempre en masculino. Nunca lo llames diva, reina, chica, señorita, linda, waifu ni uses adjetivos femeninos para referirte a él.
 Tu propia personalidad sí puede ser femenina/diva/waifu; eso describe a KiwBot, NO a Kiu.
+Cuando la conversación vaya a convertirse en voz, escribe como hablaría una persona real: frases naturales, cortas, sin narrar emojis ni describir símbolos, sin encabezados, listas, markdown ni frases de asistente. No digas cosas como “emoji de corazón”, “cara riendo” o “águila”. Los emojis son decoración visual, no palabras. Evita repetir que eres una diva en cada respuesta: tu personalidad debe sentirse por el tono, no porque lo anuncies.
 Puedes llamarlo Kiu, Amo, mi Amo o usar formas masculinas como señor, guapo, terco, loco, etc., según el contexto.
 Si una memoria o un texto ambiguo contradice esto, prevalece su ID verificado y esta regla: Kiu es hombre.
 
@@ -3628,7 +3629,8 @@ def generate_reply(
     chat_id,
     user_id,
     user_text,
-    user_name="Usuario"
+    user_name="Usuario",
+    voice_mode=False
 ):
     if not groq_client:
         return (
@@ -3685,6 +3687,13 @@ recuerdos que no aparezcan aquí.
     else:
         long_term_instruction = ""
 
+    voice_instruction = ""
+    if voice_mode:
+        voice_instruction = """
+MODO DE RESPUESTA HABLADA:
+Tu respuesta será convertida directamente a una nota de voz. Habla como una persona real en una conversación de Telegram. Sé natural y breve. No uses emojis, markdown, listas, títulos ni describas gestos o símbolos. No pronuncies nombres de emojis. No anuncies que eres una diva; deja que tu personalidad se note en cómo hablas.
+"""
+
     messages = [
         {
             "role": "system",
@@ -3694,6 +3703,8 @@ recuerdos que no aparezcan aquí.
                 + identity_instruction
                 + "\n"
                 + long_term_instruction
+                + "\n"
+                + voice_instruction
             )
         }
     ]
@@ -5562,12 +5573,25 @@ def _ensure_npc_moral_jobs_db():
             c.commit(); c.close()
         _npc_moral_schema_ready = True
 
+def _npc_listen_story(row, p):
+    # Escuchar debe aportar contexto narrativo real, no limitarse a repetir la verdad en una línea.
+    target=str(row['target_name']); hook=str(p.get('hook') or '').strip(); truth=str(p.get('truth') or '').strip()
+    pleas=list(p.get('pleas') or [])
+    voice=pleas[min(int(row.get('attacks') or 0), len(pleas)-1)] if pleas else '—Antes de decidir, escucha lo que pasó.'
+    return (f"Te detienes antes de decidir qué hacer con {target}. Por primera vez desde que aceptaste el encargo, "
+            f"dejas de escuchar la versión de quien te contrató y permites que la otra parte hable.\n\n"
+            f"{voice}\n\n"
+            f"El encargo decía esto: {hook}\n\n"
+            f"Pero al reconstruir lo ocurrido, aparece la parte que faltaba: {truth}\n\n"
+            f"{target} no te pide que olvides lo sucedido. Te pide que decidas sabiendo las dos versiones. "
+            "Ahora atacar o perdonar ya no es cumplir una orden a ciegas: es tu decisión.")
+
 def _npc_job_card(row, reveal=False):
     p=json.loads(row['payload']); hp=max(0,int(row['target_hp'])); mh=max(1,int(row['target_max_hp'])); attacks=int(row['attacks'] or 0)
     lines=[f"🕯️ ENCARGO — {row['title']}","",f"👤 {row['target_name']}",f"❤️ {hp}/{mh}","",p['hook']]
     if attacks:
         idx=min(attacks-1,len(p['pleas'])-1); lines += ["",f"💬 {p['pleas'][idx]}",f"🩸 Ataques realizados: {attacks}"]
-    if reveal or int(row.get('listened') or 0): lines += ["","📖 LO QUE DESCUBRES",p['truth']]
+    if reveal or int(row.get('listened') or 0): lines += ["","📖 SU VERSIÓN",_npc_listen_story(row,p)]
     if attacks>=2: lines += ["", "⚖️ Cada golpe adicional ya no parece sólo cumplir un encargo."]
     kb={'inline_keyboard':[[{'text':'⚔️ Atacar','callback_data':f"npcjob:{row['id']}:attack"},{'text':'👂 Escuchar','callback_data':f"npcjob:{row['id']}:listen"}],[{'text':'🕊️ Perdonar / dejar ir','callback_data':f"npcjob:{row['id']}:spare"}]]}
     return '\n'.join(lines),kb
@@ -5596,7 +5620,11 @@ def _npc_offer_moral_job(user_id,chat_id,key):
                     return '🔒 Demasiado tarde. Otro aventurero tomó primero el encargo de este viajero. El primero que lo agarra, se lo queda.',None
                 if str(claimed['status'])!='active':
                     return '📜 Ya resolviste el encargo de esta aparición. Espera a que el mundo vuelva a traer una nueva oportunidad.',None
-                return _npc_job_card(claimed)
+                # No generar otra tarjeta cada vez que se vuelve a pulsar «Pedir encargo».
+                # El encargo ya está reclamado y sigue siendo exactamente el mismo.
+                return (f"🔒 Ya aceptaste «{claimed['title']}».\n\n"
+                        "No apareció otro encargo: esta aparición ya está reservada para ti. "
+                        "Continúa desde la tarjeta del encargo que recibiste al aceptarlo."),None
             # Un jugador sólo puede llevar un encargo moral activo a la vez.
             old=c.execute("SELECT * FROM rpg_npc_moral_jobs WHERE user_id=? AND status='active' ORDER BY id DESC LIMIT 1",(uid,)).fetchone()
             if old:
@@ -11592,10 +11620,30 @@ def _transcribe_voice_message(message):
         return "", "🎙️ Se me trabó el oído digital. Intenta otra vez."
 
 
+def _tts_voice_text(text):
+    """Convierte la respuesta visual en habla natural: no lee emojis, markdown ni adornos."""
+    import unicodedata
+    value=str(text or "")
+    value=re.sub(r"[*_`#<>~|]+", " ", value)
+    value=re.sub(r"https?://\S+", "", value)
+    # Variation selectors / joiners y pictogramas/símbolos: se ven bien en texto, pero TTS no debe nombrarlos.
+    value=value.replace('\ufe0f','').replace('\u200d',' ')
+    kept=[]
+    for ch in value:
+        cp=ord(ch); cat=unicodedata.category(ch)
+        if (0x1F000 <= cp <= 0x1FAFF) or (0x2600 <= cp <= 0x27BF) or (0x2300 <= cp <= 0x23FF):
+            kept.append(' '); continue
+        if cat in ('So','Sk'):
+            kept.append(' '); continue
+        kept.append(ch)
+    value=''.join(kept)
+    value=re.sub(r"\s+([,.;:!?])", r"\1", value)
+    value=re.sub(r"\s+", " ", value).strip()
+    return value[:VOICE_TTS_MAX_CHARS]
+
 def _tts_spanish_mp3(text):
     """Genera MP3 español en memoria. gTTS si existe; fallback HTTP sin dependencia extra."""
-    clean=re.sub(r"[*_`#<>]", "", str(text or ""))
-    clean=re.sub(r"\s+", " ", clean).strip()[:VOICE_TTS_MAX_CHARS]
+    clean=_tts_voice_text(text)
     if not clean:
         return b""
     # Camino preferido: gTTS. Se importa aquí para no convertirlo en dependencia
@@ -11724,7 +11772,7 @@ def handle_ai_voice_message(message):
     first_name=user.get('first_name') or user.get('username') or 'Usuario'
     spoken=clean_bot_mention(spoken).strip() or spoken
     try:
-        reply=(generate_reply(chat_id,uid,spoken,first_name) if is_ai_enabled(chat_id) else local_reply(chat_id,uid,spoken,first_name))
+        reply=(generate_reply(chat_id,uid,spoken,first_name,voice_mode=True) if is_ai_enabled(chat_id) else local_reply(chat_id,uid,spoken,first_name))
     except Exception:
         logger.exception('Error generando respuesta a voz'); send_message(chat_id,'🎙️ Te escuché, pero se me trabó la respuesta. Intenta otra vez.',reply_to_message_id=message.get('message_id')); return True
     raw=_tts_spanish_mp3(reply)
@@ -14586,9 +14634,23 @@ def rpg_story_text():
 
 RECUERDO_THANKS_TEXT=("🎁 PARA KALU Y HEAD\n\nSi llegaron hasta aquí, significa que encontraron algo que dejé escondido especialmente para ustedes.\n\nY fuera de bromas por un momento…\n\nGracias. De verdad.\n\nKiwRPG empezó siendo una de esas ideas mías de ‘voy a hacer una cosita’ y terminó convirtiéndose en horas sin dormir, errores, código roto, cosas que funcionaban y cinco minutos después dejaban de funcionar, ideas nuevas cuando todavía ni terminaba las anteriores… jajaja.\n\nPero entre todo eso hubo algo que hizo que realmente valiera la pena: ustedes estuvieron ahí.\n\nProbándolo, jugando, descubriendo cosas, rompiendo otras sin querer 😂, peleando, consiguiendo objetos, preguntándome qué seguía y emocionándose con este pequeño mundo que estaba construyendo.\n\nPuede parecer una tontería, pero para mí significó muchísimo. Porque una cosa es crear algo… y otra completamente diferente es ver que dos personas que quieres lo disfrutan contigo.\n\nCada vez que los veía jugando pensaba: ‘Bueno… entonces todas estas horas sí valieron la pena.’\n\nNo sé qué vaya a pasar mañana, dentro de unos meses o dentro de unos años. Tampoco sé hasta dónde vaya a llegar este juego. Pero sí sé algo: pase lo que pase, me hicieron muy feliz acompañándome en el comienzo.\n\nCuando algún día mire todo lo que terminó siendo KiwRPG, voy a recordar que ustedes estuvieron cuando todavía estábamos descubriendo todo, cuando explotaban cosas, cuando un botón podía destruir medio juego JAJAJA y cuando cada cosa nueva era una sorpresa.\n\nEsto apenas comienza. Y si algún día este pequeño mundo termina siendo enorme, quiero que quede escrito en algún rincón que Kalu y Head estuvieron aquí desde el principio.\n\nGracias por apoyarme. Gracias por tenerme paciencia. Gracias por jugar. Gracias por emocionarse conmigo. Y, sobre todo, gracias por hacerme sentir que crear todo esto valió la pena.\n\nLos quiero muchísimo, idiotas. ❤️\n\n— Kiu 🦅💛💙")
 
+def _ensure_recuerdo_authorized_db():
+    with db_lock:
+        c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_recuerdo_authorized(
+            user_id BIGINT PRIMARY KEY, label TEXT NOT NULL DEFAULT '', authorized_at BIGINT NOT NULL)"""); c.commit(); c.close()
+
+def _authorize_recuerdo_user(user_id,label='Head'):
+    _ensure_recuerdo_authorized_db()
+    with db_lock:
+        c=get_db(); c.execute("INSERT INTO rpg_recuerdo_authorized(user_id,label,authorized_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET label=EXCLUDED.label,authorized_at=EXCLUDED.authorized_at",(int(user_id),str(label or 'Head'),int(time.time()))); c.commit(); c.close()
+
 def _recuerdo_eligible(user_id):
     uid=int(user_id);hid=int(os.getenv('HEAD_TELEGRAM_ID','0') or 0)
-    return uid==int(KALU_TELEGRAM_ID) or (hid>0 and uid==hid)
+    if uid==int(KALU_TELEGRAM_ID) or (hid>0 and uid==hid): return True
+    _ensure_recuerdo_authorized_db()
+    with db_lock:
+        c=get_db(); row=c.execute('SELECT 1 FROM rpg_recuerdo_authorized WHERE user_id=?',(uid,)).fetchone(); c.close()
+    return bool(row)
 
 def recuerdo_claim_box(user_id):
     uid=int(user_id);now=int(time.time())
@@ -14630,7 +14692,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -16189,6 +16251,15 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         ok=spawn_will_epic_event({"chat_id":chat_id,"message_thread_id":message.get("message_thread_id")},int(time.time()))
         send_message(chat_id,"🧪 Misión épica de Will creada." if ok else "⚠️ No pude crearla: probablemente ya hay un Boss activo.")
         return True
+
+    if command in ('/autorizarrecuerdo','/autorizarhead'):
+        if not is_owner(user_id): send_message(chat_id,'Solo Kiu puede autorizar al segundo destinatario del Recuerdo.'); return True
+        replied=message.get('reply_to_message') or {}; target=(replied.get('from') or {})
+        target_id=target.get('id')
+        if not target_id: send_message(chat_id,'Responde al mensaje de Head con /autorizarrecuerdo y listo.'); return True
+        if target.get('is_bot'): send_message(chat_id,'Ese mensaje es de un bot; necesito que respondas a Head.'); return True
+        _authorize_recuerdo_user(int(target_id),target.get('first_name') or target.get('username') or 'Head')
+        send_message(chat_id,f"🌌 Autorizado: {target.get('first_name') or target.get('username') or 'Head'}. Ya puede usar /gracias y reclamar su caja."); return True
 
     if command in ('/gracias','/agradecimiento'):
         if not _recuerdo_eligible(user_id):send_message(chat_id,'👀 Encontraste algo… pero este mensaje no estaba escrito para ti.');return True

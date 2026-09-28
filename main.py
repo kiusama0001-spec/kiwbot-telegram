@@ -10287,23 +10287,32 @@ def event_boss_attack(chat_id,user_id):
         dmg=max(1,int(round(dmg*marriage_boss_multiplier(user_id))))
         nh=max(0,int(st2['boss_hp'])-dmg); dead=nh<=0
         first_daily=(p['daily_reward_day']!=day)
+        # Recompensa del golpe: TODOS los golpes válidos dan fichas.
+        # El primero del día conserva además el premio diario de KW + Polvo de Forja.
+        hit_currency=8 if first_daily else random.randint(1,4)
         c.execute("UPDATE rpg_event_state SET boss_hp=?,boss_defeated=? WHERE chat_id=?",(nh,1 if dead else 0,int(chat_id)))
         c.execute("""UPDATE rpg_event_players SET attacks_day=?,attacks_today=?,total_damage=total_damage+?,total_attacks=total_attacks+1,currency=currency+?,daily_reward_day=?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?""",
-                  (day,used+1,dmg,8 if first_daily else random.randint(1,4),day if first_daily else p['daily_reward_day'],now,int(chat_id),cfg['key'],int(user_id)))
+                  (day,used+1,dmg,hit_currency,day if first_daily else p['daily_reward_day'],now,int(chat_id),cfg['key'],int(user_id)))
         c.commit(); c.close()
-    extra=""
+    reward_lines=[f"🎟️ +{hit_currency} fichas del evento"]
     if first_daily:
         change_kiwons(user_id,RPG_EVENT_DAILY_KW,'event_daily',chat_id=chat_id,note=cfg['key'])
-        try: grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"evento:{cfg['key']}:diario")
-        except Exception: pass
-        extra=f"\n🎁 Participación diaria: +{RPG_EVENT_DAILY_KW} KW · +8 fichas · material de forja."
+        dust_ok=False
+        try:
+            grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"evento:{cfg['key']}:diario")
+            dust_ok=True
+        except Exception:
+            logger.exception("No pude entregar Polvo de Forja por participación diaria del World Boss")
+        reward_lines.append(f"💰 +{RPG_EVENT_DAILY_KW} KW")
+        reward_lines.append("🔨 +1 Polvo de Forja" if dust_ok else "🔨 Polvo de Forja: error al entregar; revisa el log")
+    rewardtxt="\n🎁 RECOMPENSA DEL GOLPE\n"+"\n".join(reward_lines)
     rolltxt=f"🎲 {d1} × 🎲 {d2} = x{multiplier}\n⚔️ ATK {atk:,} × {multiplier} = {dmg:,} de daño"
     if dead:
         _event_distribute_boss_rewards(chat_id,cfg)
         if cfg['key']=='opening_2026' and _opening_once(chat_id,'boss_victory'):
             send_message(chat_id,"🌅 LA PRIMERA PUERTA HA SIDO CONQUISTADA\n\nEl núcleo de Aeternus se fractura y la luz atraviesa toda la muralla. Por primera vez, el camino más allá de la puerta queda completamente abierto.\n\n🏆 La comunidad derrotó al Guardián de la Primera Puerta. Su caída queda registrada como la primera gran victoria de Aeternus.\n\n🛍️ El Festival continúa hasta que termine su contador: todavía pueden conseguir fichas y gastar las que hayan reunido.")
-        return True,f"{rolltxt}\n\n💀 ¡{cfg['boss']} HA CAÍDO!\nLa recompensa comunitaria fue desbloqueada para los participantes válidos.{extra}"
-    return True,f"{rolltxt}\n❤️ Le quedan {nh:,} HP.\n⚔️ Ataques restantes hoy: {RPG_EVENT_ATTACKS_PER_DAY-used-1}/5{extra}"
+        return True,f"{rolltxt}{rewardtxt}\n\n💀 ¡{cfg['boss']} HA CAÍDO!\nLa recompensa comunitaria fue desbloqueada para los participantes válidos."
+    return True,f"{rolltxt}{rewardtxt}\n❤️ Le quedan {nh:,} HP.\n⚔️ Ataques restantes hoy: {RPG_EVENT_ATTACKS_PER_DAY-used-1}/5"
 
 def _event_distribute_boss_rewards(chat_id,cfg):
     with db_lock:

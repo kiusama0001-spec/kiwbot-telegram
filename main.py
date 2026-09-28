@@ -214,6 +214,13 @@ executor = ThreadPoolExecutor(
     max_workers=int(os.getenv("KIWBOT_WORKERS", "24"))
 )
 
+# Recompensas finales de mazmorra: pool separado para que repartir premios a
+# varios miembros no bloquee secuencialmente el worker que resolvió el combate.
+# Cada jugador conserva exactamente las mismas funciones de recompensa.
+_DUNGEON_REWARD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(2, min(4, int(os.getenv("KIWBOT_DUNGEON_REWARD_WORKERS", "4"))))
+)
+
 
 # =========================================================
 # POSTGRESQL / SUPABASE
@@ -12377,6 +12384,7 @@ def _spawn_dungeon(chatrow, now=None):
 
 
 def enter_dungeon(chat_id,user_id,dungeon_id):
+    _t0=time.monotonic()
     now=int(time.time()); uid=int(user_id); did=int(dungeon_id)
     char=get_active_character(uid)
     if not char: return False,"Necesitas un personaje activo."
@@ -12395,7 +12403,14 @@ def enter_dungeon(chat_id,user_id,dungeon_id):
         elif int(d.get('turn_user_id') or 0)<=0:
             rows=_dungeon_party_rows(conn,did); conn.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(_dungeon_next_turn(rows,0),now,did))
         conn.commit(); d=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
-    return True,dungeon_card(dict(d))
+    _t_db=time.monotonic()
+    card=dungeon_card(dict(d))
+    _elapsed=time.monotonic()-_t0
+    if _elapsed>=1.0:
+        logger.warning("Dungeon entrada lenta: dungeon=%s user=%s total=%.3fs db=%.3fs card=%.3fs",did,uid,_elapsed,_t_db-_t0,time.monotonic()-_t_db)
+    # Devolvemos también la fila ya fresca para que el callback no haga otra
+    # consulta a _active_dungeon inmediatamente después de entrar.
+    return True,card,dict(d)
 
 
 def _dungeon_claim_turn_for_action(chat_id,dungeon_id,user_id):
@@ -12580,12 +12595,30 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
             conn.rollback(); conn.close(); raise
 
     party=max(1,len(members)); coop=1.0+min(0.40,0.10*(party-1)); kw=int(round(RPG_DUNGEON_FINAL_KW*coop)); xp=int(round(RPG_DUNGEON_FINAL_EXP*coop))
-    reward_lines=[]
-    for mid in members:
+    _reward_t0=time.monotonic()
+
+    def _grant_dungeon_final_reward(mid):
+        # Misma secuencia de recompensas que antes, aislada por jugador.
         ch=get_active_character(mid)
-        if not ch: continue
-        change_kiwons(mid,kw,'rpg_dungeon',chat_id=chat_id,note=f'Mazmorra cooperativa {did} completada'); grant_rpg_exp(int(ch['id']),xp)
-        chest=roll_dungeon_completion_loot(mid,int(ch['id']),did); reward_lines.append(f"• {_dungeon_member_name(mid)}: +{kw} KW · +{xp} EXP"+(f" · 🎁 {chest['name']}" if chest else ''))
+        if not ch: return None
+        change_kiwons(mid,kw,'rpg_dungeon',chat_id=chat_id,note=f'Mazmorra cooperativa {did} completada')
+        grant_rpg_exp(int(ch['id']),xp)
+        chest=roll_dungeon_completion_loot(mid,int(ch['id']),did)
+        return f"• {_dungeon_member_name(mid)}: +{kw} KW · +{xp} EXP"+(f" · 🎁 {chest['name']}" if chest else '')
+
+    # Los premios de jugadores distintos no dependen entre sí. Ejecutarlos en
+    # paralelo evita sumar una latencia PostgreSQL completa por cada miembro.
+    futures=[_DUNGEON_REWARD_EXECUTOR.submit(_grant_dungeon_final_reward,mid) for mid in members]
+    reward_lines=[]
+    for fut in futures:
+        try:
+            line=fut.result()
+            if line: reward_lines.append(line)
+        except Exception:
+            logger.exception("Error entregando recompensa final de mazmorra %s",did)
+    _reward_elapsed=time.monotonic()-_reward_t0
+    if _reward_elapsed>=1.0:
+        logger.warning("Dungeon final recompensas: dungeon=%s members=%s %.3fs",did,len(members),_reward_elapsed)
     return True,f"🏆 ¡MAZMORRA COOPERATIVA COMPLETADA!\n👥 {party} aventureros · bonus de equipo +{int((coop-1)*100)}%\n\n"+'\n'.join(reward_lines)
 
 RPG_TURN_TIMEOUT_SECONDS = 30
@@ -14172,11 +14205,21 @@ def handle_rpg_callback(query):
         if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Esa tienda ya no pertenece al chat RPG activo."); return True
         kind=data.split(":",1)[1]; ok,msg2=event_buy(chat_id,uid,kind); send_message(chat_id,msg2); return True
     if data.startswith("rpg_dungeon_enter:"):
+        _dt0=time.monotonic()
         try: dungeon_id=int(data.split(":",1)[1])
         except Exception: return True
-        ok,msg2=enter_dungeon(chat_id,uid,dungeon_id)
-        d=_active_dungeon(chat_id)
-        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),uid) if ok and d else None)
+        result=enter_dungeon(chat_id,uid,dungeon_id)
+        if len(result)==3:
+            ok,msg2,d=result
+        else:
+            ok,msg2=result; d=_active_dungeon(chat_id)
+        _dt_logic=time.monotonic()
+        kb=dungeon_keyboard(dict(d),uid) if ok and d else None
+        _dt_kb=time.monotonic()
+        send_message(chat_id,msg2,reply_markup=kb)
+        _dt_send=time.monotonic()
+        if _dt_send-_dt0>=1.0:
+            logger.warning("Dungeon click entrada: dungeon=%s user=%s total=%.3fs logic=%.3fs keyboard=%.3fs telegram=%.3fs",dungeon_id,uid,_dt_send-_dt0,_dt_logic-_dt0,_dt_kb-_dt_logic,_dt_send-_dt_kb)
         return True
     if data.startswith("dungeon_refresh:"):
         did=int(data.split(":",1)[1]); d=_active_dungeon(chat_id)
@@ -14188,15 +14231,28 @@ def handle_rpg_callback(query):
         send_message(chat_id,"⏱️ Ya no necesitas saltar turnos: KiwBot expulsa automáticamente al inactivo a los 30 segundos.")
         return True
     if data.startswith("dungeon_def:"):
-        did=int(data.split(":",1)[1]); ok,msg2=dungeon_action(chat_id,uid,did,defend=True); d=_active_dungeon(chat_id)
+        _dt0=time.monotonic(); did=int(data.split(":",1)[1]); ok,msg2=dungeon_action(chat_id,uid,did,defend=True); _dt_action=time.monotonic(); d=_active_dungeon(chat_id)
         next_uid=int(d.get('turn_user_id') or uid) if d else uid
-        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),next_uid) if d else None); return True
+        kb=dungeon_keyboard(dict(d),next_uid) if d else None; _dt_render=time.monotonic()
+        send_message(chat_id,msg2,reply_markup=kb); _dt_send=time.monotonic()
+        if _dt_send-_dt0>=1.25:
+            logger.warning("Dungeon click defensa: dungeon=%s user=%s total=%.3fs action=%.3fs render=%.3fs telegram=%.3fs",did,uid,_dt_send-_dt0,_dt_action-_dt0,_dt_render-_dt_action,_dt_send-_dt_render)
+        return True
     if data.startswith("dungeon_atk:"):
+        _dt0=time.monotonic()
         try: _,did,key=data.split(":",2); did=int(did)
         except Exception: return True
-        ok,msg2=dungeon_action(chat_id,uid,did,ability_key=key); d=_active_dungeon(chat_id)
+        ok,msg2=dungeon_action(chat_id,uid,did,ability_key=key)
+        _dt_action=time.monotonic()
+        d=_active_dungeon(chat_id)
         next_uid=int(d.get('turn_user_id') or uid) if d else uid
-        send_message(chat_id,msg2,reply_markup=dungeon_keyboard(dict(d),next_uid) if d else None); return True
+        kb=dungeon_keyboard(dict(d),next_uid) if d else None
+        _dt_render=time.monotonic()
+        send_message(chat_id,msg2,reply_markup=kb)
+        _dt_send=time.monotonic()
+        if _dt_send-_dt0>=1.25:
+            logger.warning("Dungeon click ataque: dungeon=%s user=%s total=%.3fs action=%.3fs render=%.3fs telegram=%.3fs final=%s",did,uid,_dt_send-_dt0,_dt_action-_dt0,_dt_render-_dt_action,_dt_send-_dt_render,not bool(d))
+        return True
     if data.startswith("rpg_help_revive:"):
         try: target_id=int(data.split(":",1)[1])
         except Exception: return True

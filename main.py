@@ -10000,6 +10000,72 @@ RPG_PETS["kiwito_fundador"]={
     "desc":"+10% EXP / +10% KW / +5% probabilidad de Polvo de Forja en PvE. Exclusiva de la Gran Apertura."
 }
 
+OPENING_BOSS_DELAY = 30 * 60  # Aeternus aparece 30 minutos después de iniciar la Gran Apertura.
+
+def _event_countdown(seconds):
+    seconds=max(0,int(seconds or 0))
+    days,rem=divmod(seconds,86400); hours,rem=divmod(rem,3600); minutes,secs=divmod(rem,60)
+    if days: return f"{days}d {hours:02d}h {minutes:02d}m"
+    if hours: return f"{hours}h {minutes:02d}m {secs:02d}s"
+    return f"{minutes}m {secs:02d}s"
+
+def _opening_boss_unlock_at(st):
+    return int(st.get('started_at') or 0) + OPENING_BOSS_DELAY if st else 0
+
+def _opening_boss_is_unlocked(st, now=None):
+    if not st or st.get('event_key')!='opening_2026' or st.get('status')!='active': return False
+    return int(now or time.time()) >= _opening_boss_unlock_at(st)
+
+def _opening_setting_key(chat_id,suffix):
+    return f"opening_2026:{int(chat_id)}:{suffix}"
+
+def _opening_once(chat_id,suffix):
+    """Marca una escena inaugural una sola vez de forma atómica."""
+    key=_opening_setting_key(chat_id,suffix); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            c.execute("SELECT pg_advisory_xact_lock(?)",(987654322 + (abs(int(chat_id)) % 100000),))
+            r=c.execute("SELECT value FROM rpg_chronicles_settings WHERE setting_key=? FOR UPDATE",(key,)).fetchone()
+            if r and str(r.get('value'))=='1': c.rollback(); c.close(); return False
+            c.execute("INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET value='1',updated_at=EXCLUDED.updated_at",(key,'1',now))
+            c.commit(); c.close(); return True
+        except Exception:
+            c.rollback(); c.close(); raise
+
+def _opening_progress_tick(chat_id,st,now=None):
+    """Revela Aeternus y resuelve el final de la Gran Apertura sin sleeps ni hilos extra."""
+    now=int(now or time.time())
+    if not st or st.get('event_key')!='opening_2026': return st
+    # Final por tiempo: conserva HP/contribuciones para la crónica, pero cierra tienda/ataques/bonos.
+    if st.get('status')=='active' and now>int(st.get('ends_at') or 0):
+        won=bool(int(st.get('boss_defeated') or 0))
+        if _opening_once(chat_id,'finalized'):
+            with db_lock:
+                c=get_db(); c.execute("UPDATE rpg_event_state SET status='inactive' WHERE chat_id=? AND event_key='opening_2026'",(int(chat_id),)); c.commit(); c.close()
+            if won:
+                send_message(chat_id,"🏆 EPÍLOGO — LA PRIMERA PUERTA FUE CONQUISTADA\n\nAeternus cayó ante los aventureros de la primera era. Las puertas permanecen abiertas y los nombres de quienes lucharon quedan ligados al nacimiento del mundo.\n\n🎆 La Gran Apertura ha terminado. La tienda y los bonus inaugurales se cierran, pero todo lo obtenido permanece contigo.")
+            else:
+                hp=max(0,int(st.get('boss_hp') or 0)); mx=max(1,int(st.get('boss_max_hp') or 1))
+                send_message(chat_id,f"🌑 EPÍLOGO — LA PUERTA NO FUE SELLADA\n\nEl Festival de Apertura llegó a su fin con Aeternus todavía en pie: {hp:,}/{mx:,} HP. El Guardián desaparece tras la Primera Puerta, pero el mundo conserva el daño y las contribuciones de quienes lo enfrentaron.\n\nNo se entregan recompensas de victoria. La tienda y los bonus inaugurales quedan cerrados; los objetos ya obtenidos permanecen.")
+            st=_event_get(chat_id)
+        return st
+    # Revelación automática a los 30 minutos.
+    if st.get('status')=='active' and not int(st.get('boss_defeated') or 0) and now>=_opening_boss_unlock_at(st):
+        if _opening_once(chat_id,'boss_revealed'):
+            cfg=_opening_cfg(); ptxt=("👑 ACTO III — AETERNUS DESPIERTA\n\n"
+                "Treinta minutos después de abrirse las puertas, la muralla vuelve a temblar. Los fragmentos de piedra suspendidos en el cielo se unen alrededor de un núcleo con forma de cerradura.\n\n"
+                "Aeternus, Guardián de la Primera Puerta, ha despertado. Desde ahora toda la comunidad comparte el mismo HP. Cada aventurero dispone de 5 ataques diarios.\n\n"
+                f"❤️ HP mundial: {int(st.get('boss_hp') or cfg['boss_hp']):,}/{int(st.get('boss_max_hp') or cfg['boss_hp']):,}\n"
+                "🏆 Los participantes válidos recibirán la recompensa comunitaria si logran derribarlo antes de que termine el festival.")
+            kb={"inline_keyboard":[[{"text":"⚔️ ENFRENTAR A AETERNUS","callback_data":"event_boss_attack"}],[{"text":"🛍️ Tienda de Apertura","callback_data":"event_shop"}]]}
+            try:
+                if not send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),ptxt,reply_markup=kb): send_message(chat_id,ptxt,reply_markup=kb)
+            except Exception:
+                logger.exception("No pude anunciar automáticamente a Aeternus")
+                send_message(chat_id,ptxt,reply_markup=kb)
+    return st
+
 def _event_today_key(): return time.strftime('%Y-%m-%d',time.localtime())
 
 def opening_event_bonus_active():
@@ -10088,8 +10154,13 @@ def _event_auto_sync(chat_id,now=None):
     if not is_active_rpg_chat(chat_id):
         return _event_get(chat_id)
     st=_event_get(chat_id)
-    # Apertura manda hasta el 30/10/2026 inclusive y sólo puede existir si fue iniciada manualmente.
-    if st and st['status']=='active' and st['event_key']=='opening_2026' and now<=int(st['ends_at']): return st
+    # La Gran Apertura tiene progresión propia: revela al Boss y resuelve su final automáticamente.
+    if st and st.get('event_key')=='opening_2026':
+        st=_opening_progress_tick(chat_id,st,now)
+        if st and st.get('status')=='active' and now<=int(st.get('ends_at') or 0): return st
+        # Tras terminar no sustituimos la Apertura por un evento mensual a mitad de mes.
+        if st and st.get('status')!='active' and not ((lt.tm_mday==1) or (m==10 and lt.tm_mday==31)):
+            return st
     # Sanea la activación defectuosa de V9: un evento regular iniciado en un día
     # distinto del 1 (o del 31/10 para Festival de las Almas) no es válido.
     if st and st['status']=='active' and st['event_key']!='opening_2026':
@@ -10130,6 +10201,10 @@ def event_player_row(chat_id,event_key,user_id,lock=False,conn=None):
 def event_boss_card(chat_id,user_id):
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
     if not st or not cfg:return "📅 No hay temporada programada para esta fecha.",None
+    if st.get('status')!='active': return "🌙 Ese evento ya terminó. El World Boss ya no puede ser atacado.",None
+    if cfg['key']=='opening_2026' and not _opening_boss_is_unlocked(st):
+        left=_opening_boss_unlock_at(st)-int(time.time())
+        return (f"🌌 AETERNUS AÚN NO HA DESPERTADO\n\nLa Primera Puerta está reaccionando...\n⏳ Aparición del World Boss en: {_event_countdown(left)}\n\nCuando el contador llegue a cero, el bot anunciará automáticamente su llegada y habilitará el combate."),None
     p=event_player_row(chat_id,cfg['key'],user_id); day=_event_today_key(); used=int(p['attacks_today']) if p and p['attacks_day']==day else 0
     hp=max(0,int(st['boss_hp'])); mx=max(1,int(st['boss_max_hp'])); pct=100*hp/mx
     txt=(f"👑 {cfg['boss']}\n{cfg['icon']} {cfg['title']} — {cfg['year']}\n\n❤️ {hp:,}/{mx:,} HP ({pct:.1f}%)\n⚔️ Tus ataques de hoy: {used}/{RPG_EVENT_ATTACKS_PER_DAY}\n💥 Tu contribución: {int(p['total_damage'] if p else 0):,}\n🪙 Moneda del evento: {int(p['currency'] if p else 0):,}\n\nCada día tienes 5 ataques. El primer ataque del día entrega materiales de participación.")
@@ -10138,7 +10213,9 @@ def event_boss_card(chat_id,user_id):
 
 def event_boss_attack(chat_id,user_id):
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
-    if not st or not cfg:return False,"No hay evento activo."
+    if not st or not cfg or st.get('status')!='active':return False,"No hay evento activo."
+    if cfg['key']=='opening_2026' and not _opening_boss_is_unlocked(st):
+        return False,f"🌌 Aeternus todavía no ha despertado. Aparecerá en {_event_countdown(_opening_boss_unlock_at(st)-int(time.time()))}."
     if int(st['boss_defeated']):return False,"👑 Ese World Boss ya fue derrotado."
     if not char:return False,"Primero crea y activa un personaje."
     day=_event_today_key(); now=int(time.time())
@@ -10165,6 +10242,8 @@ def event_boss_attack(chat_id,user_id):
         extra=f"\n🎁 Participación diaria: +{RPG_EVENT_DAILY_KW} KW · +8 fichas · material de forja."
     if dead:
         _event_distribute_boss_rewards(chat_id,cfg)
+        if cfg['key']=='opening_2026' and _opening_once(chat_id,'boss_victory'):
+            send_message(chat_id,"🌅 LA PRIMERA PUERTA HA SIDO CONQUISTADA\n\nEl núcleo de Aeternus se fractura y la luz atraviesa toda la muralla. Por primera vez, el camino más allá de la puerta queda completamente abierto.\n\n🏆 La comunidad derrotó al Guardián de la Primera Puerta. Su caída queda registrada como la primera gran victoria de Aeternus.\n\n🛍️ El Festival continúa hasta que termine su contador: todavía pueden conseguir fichas y gastar las que hayan reunido.")
         return True,f"⚔️ {dmg:,} de daño.\n\n💀 ¡{cfg['boss']} HA CAÍDO!\nLa recompensa comunitaria fue desbloqueada para los participantes válidos.{extra}"
     return True,f"⚔️ Golpeas a {cfg['boss']} por {dmg:,}.\n❤️ Le quedan {nh:,} HP.\n⚔️ Ataques restantes hoy: {RPG_EVENT_ATTACKS_PER_DAY-used-1}/5{extra}"
 
@@ -10185,11 +10264,13 @@ def _event_distribute_boss_rewards(chat_id,cfg):
 
 def event_shop_text(chat_id,user_id):
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
-    if not cfg:return "No hay evento activo.",None
+    if not cfg or not st or st.get('status')!='active':return "🌙 La tienda del evento está cerrada.",None
     p=event_player_row(chat_id,cfg['key'],user_id); cur=int(p['currency'] or 0)
+    shop_left=max(0,int(st.get('ends_at') or 0)-int(time.time()))
+    shop_timer=f"⏳ Cierra en: {_event_countdown(shop_left)}\n"
     is_open=(cfg['key']=='opening_2026')
     if is_open:
-        txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n\n"
+        txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n{shop_timer}\n"
              "🎆 FESTIVIDAD — mejor que Legendario, por debajo de Mítico\n"
              "⚔️ Hoja del Primer Amanecer — 240 · +10% EXP / +5% KW\n"
              "🗡️ Lanza de las Puertas — 240 · +5% EXP / +10% KW\n"
@@ -10225,7 +10306,7 @@ def event_shop_text(chat_id,user_id):
             [{"text":"💰 10K KW · 100","callback_data":"event_buy:kw10k"},{"text":"💰 30K KW · 270","callback_data":"event_buy:kw30k"}],
             [{"text":f"🐾 {cfg['pet']} · 400","callback_data":"event_buy:pet"}]]}
         return txt,kb
-    txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n\n⚔️ {cfg['weapon']} — 180\n🛡️ {cfg['armor']} — 220\n🧪 Poción de Ascenso (+1 nivel) — 300 · SIN LÍMITE\n🐾 {cfg['pet']} — 400 · límite 1\n\nLos objetos llevan su año y no se reciclan en otra temporada.")
+    txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n{shop_timer}\n⚔️ {cfg['weapon']} — 180\n🛡️ {cfg['armor']} — 220\n🧪 Poción de Ascenso (+1 nivel) — 300 · SIN LÍMITE\n🐾 {cfg['pet']} — 400 · límite 1\n\nLos objetos llevan su año y no se reciclan en otra temporada.")
     kb={"inline_keyboard":[[{"text":"⚔️ Arma · 180","callback_data":"event_buy:weapon"},{"text":"🛡️ Armadura · 220","callback_data":"event_buy:armor"}],[{"text":"🧪 +1 nivel · 300","callback_data":"event_buy:level"},{"text":"🐾 Mascota · 400","callback_data":"event_buy:pet"}]]}
     return txt,kb
 
@@ -10260,7 +10341,7 @@ def event_buy(chat_id,user_id,kind):
     prices={'weapon':180,'armor':220,'level':300,'pet':400,'fest_sword':240,'fest_spear':240,'fest_bow':240,'fest_armor':260,'fest_boots':210,'fest_ring':230,'fest_daggers':245,'fest_staff':250,'fest_greatsword':255,'fest_helm':225,'fest_gloves':215,'fest_charm':235,'exp':120,'dust5':90,'dust15':240,'kw10k':100,'kw30k':270}; price=prices.get(kind)
     if not price:return False,'Recompensa desconocida.'
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
-    if not cfg or not char:return False,'Necesitas un evento y personaje activo.'
+    if not cfg or not st or st.get('status')!='active' or not char:return False,'Necesitas un evento activo y personaje activo.'
     festive_kinds={'fest_sword','fest_spear','fest_bow','fest_daggers','fest_staff','fest_greatsword','fest_armor','fest_helm','fest_gloves','fest_boots','fest_ring','fest_charm','exp','dust5','dust15','kw10k','kw30k'}
     if kind in festive_kinds and cfg['key']!='opening_2026': return False,'Esa recompensa pertenece a la Gran Apertura.'
     # Pociones, EXP, materiales y KW son consumibles sin límite. Equipo y mascota conservan límites.
@@ -14002,6 +14083,9 @@ def grand_opening_start(chat_id,user_id):
             c.execute("INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES('grand_opening_started','1',?) ON CONFLICT(setting_key) DO UPDATE SET value='1',updated_at=EXCLUDED.updated_at",(now,)); c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
+    # Limpia únicamente las marcas de escenas de una Apertura anterior de este chat.
+    with db_lock:
+        _gc=get_db(); _gc.execute("DELETE FROM rpg_chronicles_settings WHERE setting_key LIKE ?",(f"opening_2026:{int(chat_id)}:%",)); _gc.commit(); _gc.close()
     cfg=_opening_cfg(); _event_activate(chat_id,cfg,True)
     # La apertura es una secuencia inaugural, no un simple aviso. No usamos sleep:
     # el webhook queda libre y Telegram recibe las escenas en orden.
@@ -14040,24 +14124,10 @@ def grand_opening_start(chat_id,user_id):
                           "Una voz que nadie reconoce retumba sobre la capital:\n\n"
                           "«Si quieren cruzar la Primera Puerta... demuestren que este mundo merece despertar.»"))
 
-    try:
-        boss_txt,boss_kb=event_boss_card(chat_id,user_id)
-        boss_txt=("👑 ACTO III — EL GUARDIÁN DE LA PRIMERA PUERTA\n\n"+boss_txt+
-                  "\n\n🏆 Si la comunidad lo derrota, los participantes válidos desbloquean la recompensa comunitaria de apertura.")
-        if not send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),boss_txt,reply_markup=boss_kb):
-            send_message(chat_id,boss_txt,reply_markup=boss_kb)
-    except Exception:
-        logger.exception("No pude revelar el World Boss de apertura")
-
-    send_message(chat_id,("🎊 FESTIVAL DE APERTURA 2026\n\n"
-                          "Durante el festival:\n"
-                          "• ⚔️ +15% daño en encuentros PvE.\n"
-                          "• ✨ +30% EXP y 🪙 +20% KW al ganar encuentros.\n"
-                          "• 👑 5 ataques diarios contra el Guardián.\n"
-                          "• 🎟️ Fichas de Apertura y materiales por participar.\n"
-                          "• 🛍️ Tienda exclusiva con equipo y mascota de apertura.\n"
-                          "• 🌎 Mundo Vivo, Crónicas y reputación siguen funcionando durante el festival.\n\n"
-                          "Usa /eventos · /bossevento · /tiendaevento para volver al festival cuando quieras."))
+    send_message(chat_id,("⏳ ACTO III — CUENTA REGRESIVA\n\n"
+                          "La presencia detrás de la Primera Puerta todavía no termina de tomar forma. Aeternus despertará automáticamente dentro de 30 minutos.\n\n"
+                          "👑 Cuando ocurra, KiwBot publicará su imagen y habilitará el combate mundial. Nadie puede atacarlo antes.\n"
+                          "🛍️ Mientras tanto, la tienda inaugural ya está abierta y muestra su propio temporizador de cierre."))
 
     return True,("🦅 AETERNUS ESTÁ ABIERTO\n\nLa Gran Apertura quedó iniciada una sola vez y el Festival de Apertura está activo. Ya no es un anuncio: la primera decisión, el Guardián y las recompensas inaugurales están en marcha.\n\nQue empiece la primera leyenda.")
 

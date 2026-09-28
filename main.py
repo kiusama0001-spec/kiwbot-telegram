@@ -6229,9 +6229,12 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                 exp_pct=_pet_bonus(user_id,"exp"); kw_pct=_pet_bonus(user_id,"kiwons")
                 if exp_pct: reward_exp=max(1,int(round(reward_exp*(1.0+exp_pct/100.0))))
                 if kw_pct: reward_kw=max(1,int(round(reward_kw*(1.0+kw_pct/100.0))))
+                fest_bonus=opening_festive_equipment_bonus(user_id)
+                if fest_bonus['exp']: reward_exp=max(1,int(round(reward_exp*(1.0+fest_bonus['exp']/100.0))))
+                if fest_bonus['kw']: reward_kw=max(1,int(round(reward_kw*(1.0+fest_bonus['kw']/100.0))))
                 if opening_event_bonus_active():
-                    reward_exp=max(1,int(round(reward_exp*1.30)))
-                    reward_kw=max(1,int(round(reward_kw*1.20)))
+                    reward_exp=max(1,int(round(reward_exp*1.50)))
+                    reward_kw=max(1,int(round(reward_kw*1.35)))
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 change_kiwons(user_id,reward_kw,"rpg_encounter",chat_id=chat_id,note=f"Victoria contra {battle['enemy_name']}")
@@ -7871,7 +7874,7 @@ def _ensure_economy_viva_db():
 
 
 def _gear_value(row):
-    rarity_mult={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12,'mitico':22,'reliquia':28}
+    rarity_mult={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12,'festividad':17,'mitico':22,'reliquia':28}
     r=str(row.get('rarity') or 'comun'); forge=int(row.get('forge_level') or 0)
     stats=int(row.get('atk_bonus') or 0)*90+int(row.get('def_bonus') or 0)*75+int(row.get('hp_bonus') or 0)*12
     ench=int(row.get('enchant_atk') or 0)*90+int(row.get('enchant_def') or 0)*75+int(row.get('enchant_hp') or 0)*12
@@ -7885,12 +7888,12 @@ def salvage_text_keyboard(user_id):
             x.name,x.rarity,x.item_type,x.equip_slot,x.atk_bonus,x.def_bonus,x.hp_bonus
             FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
             WHERE i.user_id=? AND i.world_id=? AND COALESCE(x.equip_slot,'')<>''
-              AND i.equipped=0 AND i.locked=0 AND x.rarity NOT IN ('mitico','reliquia')
+              AND i.equipped=0 AND i.locked=0 AND x.rarity NOT IN ('mitico','reliquia','festividad')
             ORDER BY i.acquired_at DESC,i.id DESC LIMIT 30""",(uid,world)).fetchall()
         sel={int(r['inventory_id']) for r in c.execute("SELECT inventory_id FROM rpg_salvage_selection WHERE user_id=?",(uid,)).fetchall()}
         c.close()
     kb=[]; total_dust=0
-    rarity_dust={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12}
+    rarity_dust={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12,'festividad':18}
     for rr in rows:
         r=dict(rr); iid=int(r['id']); dust=rarity_dust.get(str(r.get('rarity')),1)+max(0,int(r.get('forge_level') or 0))
         if iid in sel: total_dust+=dust
@@ -7899,7 +7902,7 @@ def salvage_text_keyboard(user_id):
     if sel: kb.append([{'text':f'♻️ DESMANTELAR {len(sel)} · +{total_dust} Polvo','callback_data':'salvage_confirm'}])
     kb.append([{'text':'🧹 Limpiar selección','callback_data':'salvage_clear'},{'text':'🎒 Inventario','callback_data':'rpg_show_inventory:1'}])
     txt=("♻️ DESMANTELAR EQUIPO\n\nSelecciona VARIAS piezas y destrúyelas juntas. Recibirás Polvo de Forja según rareza y nivel de Forja.\n"
-         "🔒 Equipados, bloqueados, Míticos y Reliquias están protegidos.\n\n"
+         "🔒 Equipados, bloqueados, Míticos, Festividad y Reliquias están protegidos.\n\n"
          f"Seleccionados: {len(sel)} · Polvo previsto: {total_dust}")
     return txt,{'inline_keyboard':kb}
 
@@ -7909,7 +7912,7 @@ def salvage_toggle(user_id,inventory_id):
     with db_lock:
         c=get_db(); r=c.execute("""SELECT i.id FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
           WHERE i.id=? AND i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0
-            AND COALESCE(x.equip_slot,'')<>'' AND x.rarity NOT IN ('mitico','reliquia')""",(iid,uid,world)).fetchone()
+            AND COALESCE(x.equip_slot,'')<>'' AND x.rarity NOT IN ('mitico','reliquia','festividad')""",(iid,uid,world)).fetchone()
         if not r: c.close(); return False
         old=c.execute("SELECT 1 FROM rpg_salvage_selection WHERE user_id=? AND inventory_id=?",(uid,iid)).fetchone()
         if old: c.execute("DELETE FROM rpg_salvage_selection WHERE user_id=? AND inventory_id=?",(uid,iid))
@@ -7919,14 +7922,14 @@ def salvage_toggle(user_id,inventory_id):
 
 def salvage_confirm(user_id):
     _ensure_economy_viva_db(); uid=int(user_id); world=current_rpg_world(); now=int(time.time()); char=get_active_character(uid)
-    rarity_dust={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12}
+    rarity_dust={'comun':1,'poco_comun':2,'raro':4,'ultra_raro':7,'legendario':12,'festividad':18}
     with db_lock:
         c=get_db()
         try:
             rows=c.execute("""SELECT i.id,i.forge_level,x.name,x.rarity FROM rpg_salvage_selection s
               JOIN rpg_inventory i ON i.id=s.inventory_id JOIN rpg_items x ON x.item_key=i.item_key
               WHERE s.user_id=? AND i.user_id=? AND i.world_id=? AND i.equipped=0 AND i.locked=0
-                AND COALESCE(x.equip_slot,'')<>'' AND x.rarity NOT IN ('mitico','reliquia') FOR UPDATE""",(uid,uid,world)).fetchall()
+                AND COALESCE(x.equip_slot,'')<>'' AND x.rarity NOT IN ('mitico','reliquia','festividad') FOR UPDATE""",(uid,uid,world)).fetchall()
             if not rows: c.execute("DELETE FROM rpg_salvage_selection WHERE user_id=?",(uid,)); c.commit(); c.close(); return False,'♻️ No hay piezas válidas seleccionadas.'
             dust=sum(rarity_dust.get(str(r['rarity']),1)+max(0,int(r.get('forge_level') or 0)) for r in rows)
             ids=[int(r['id']) for r in rows]
@@ -9655,6 +9658,9 @@ def _boss_reward_all(b):
         exp_pct=_pet_bonus(uid,'exp'); kw_pct=_pet_bonus(uid,'kiwons')
         if exp_pct: exp=max(1,int(round(exp*(1.0+exp_pct/100.0))))
         if kw_pct: kw=max(1,int(round(kw*(1.0+kw_pct/100.0))))
+        fest_bonus=opening_festive_equipment_bonus(uid)
+        if fest_bonus['exp']: exp=max(1,int(round(exp*(1.0+fest_bonus['exp']/100.0))))
+        if fest_bonus['kw']: kw=max(1,int(round(kw*(1.0+fest_bonus['kw']/100.0))))
         with db_lock:
             conn=get_db(); exists=conn.execute("SELECT 1 FROM rpg_boss_rewards WHERE boss_id=? AND user_id=?",(int(b['id']),uid)).fetchone()
             if exists: conn.close(); continue
@@ -9983,6 +9989,39 @@ def opening_event_bonus_active():
         return bool(r)
     except Exception: return False
 
+# Bonus permanentes de las piezas de Festividad de la Gran Apertura.
+# Sólo cuentan mientras la pieza correspondiente esté EQUIPADA.
+OPENING_FESTIVE_EQUIP_BONUSES = {
+    'opening_2026_fest_sword':  {'exp':10, 'kw':5},
+    'opening_2026_fest_spear':  {'exp':5,  'kw':10},
+    'opening_2026_fest_bow':    {'exp':8,  'kw':8},
+    'opening_2026_fest_daggers':{'exp':7,  'kw':9},
+    'opening_2026_fest_staff':  {'exp':12, 'kw':3},
+    'opening_2026_fest_greatsword':{'exp':3,'kw':12},
+    'opening_2026_fest_armor':  {'exp':5,  'kw':5},
+    'opening_2026_fest_helm':   {'exp':6,  'kw':4},
+    'opening_2026_fest_gloves': {'exp':4,  'kw':6},
+    'opening_2026_fest_boots':  {'exp':5,  'kw':5},
+    'opening_2026_fest_ring':   {'exp':7,  'kw':7},
+    'opening_2026_fest_charm':  {'exp':8,  'kw':6},
+}
+
+def opening_festive_equipment_bonus(user_id):
+    """Devuelve % EXP/KW por equipo inaugural actualmente equipado."""
+    try:
+        world=current_rpg_world()
+        with db_lock:
+            c=get_db(); rows=c.execute("""SELECT i.item_key FROM rpg_inventory i
+                WHERE i.user_id=? AND i.world_id=? AND i.equipped=1""",(int(user_id),int(world))).fetchall(); c.close()
+        exp=kw=0
+        for r in rows:
+            b=OPENING_FESTIVE_EQUIP_BONUSES.get(str(r['item_key']))
+            if b: exp+=int(b.get('exp',0)); kw+=int(b.get('kw',0))
+        return {'exp':min(40,exp),'kw':min(40,kw)}
+    except Exception:
+        logger.exception("No pude calcular bonus de equipo Festividad")
+        return {'exp':0,'kw':0}
+
 def _event_get(chat_id):
     with db_lock:
         c=get_db(); r=c.execute("SELECT * FROM rpg_event_state WHERE chat_id=?",(int(chat_id),)).fetchone(); c.close()
@@ -10127,34 +10166,109 @@ def event_shop_text(chat_id,user_id):
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
     if not cfg:return "No hay evento activo.",None
     p=event_player_row(chat_id,cfg['key'],user_id); cur=int(p['currency'] or 0)
-    txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n\n⚔️ {cfg['weapon']} — 180\n🛡️ {cfg['armor']} — 220\n🧪 Poción de Ascenso (+1 nivel) — 300 · límite 1\n🐾 {cfg['pet']} — 400 · límite 1\n\nLos objetos llevan su año y no se reciclan en otra temporada.")
+    is_open=(cfg['key']=='opening_2026')
+    if is_open:
+        txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n\n"
+             "🎆 FESTIVIDAD — mejor que Legendario, por debajo de Mítico\n"
+             "⚔️ Hoja del Primer Amanecer — 240 · +10% EXP / +5% KW\n"
+             "🗡️ Lanza de las Puertas — 240 · +5% EXP / +10% KW\n"
+             "🏹 Arco de los Fuegos — 240 · +8% EXP / +8% KW\n"
+             "🗡️ Dagas del Primer Umbral — 245 · +7% EXP / +9% KW\n"
+             "🔮 Bastón del Alba Arcana — 250 · +12% EXP / +3% KW\n"
+             "⚔️ Mandoble de la Primera Guardia — 255 · +3% EXP / +12% KW\n\n"
+             "🛡️ Emblema del Fundador — 260 · +5% EXP / +5% KW\n"
+             "👑 Yelmo del Día Cero — 225 · +6% EXP / +4% KW\n"
+             "🧤 Guantes del Portal — 215 · +4% EXP / +6% KW\n"
+             "🥾 Botas del Primer Viaje — 210 · +5% EXP / +5% KW\n"
+             "💍 Sello de la Gran Apertura — 230 · +7% EXP / +7% KW\n"
+             "📿 Talismán de Aeternus — 235 · +8% EXP / +6% KW\n\n"
+             "🧪 Poción de Ascenso (+1 nivel) — 300 · SIN LÍMITE\n"
+             "✨ Elixir EXP (+50% barra actual) — 120 · SIN LÍMITE\n"
+             "🔨 5 Polvos de Forja — 90 · SIN LÍMITE\n"
+             "🔨 15 Polvos de Forja — 240 · SIN LÍMITE\n"
+             "💰 Cofre +10,000 KW — 100 · SIN LÍMITE\n"
+             "💰 Cofre +30,000 KW — 270 · SIN LÍMITE\n"
+             f"🐾 {cfg['pet']} — 400 · límite 1\n\n"
+             "✨ Los bonus de las piezas se aplican sólo mientras estén EQUIPADAS y se acumulan hasta 40% EXP / 40% KW.\n"
+             "🔥 Durante la Apertura además continúa el bonus global del festival en PvE.\n"
+             "Las piezas Festividad permanecen después del evento.")
+        kb={"inline_keyboard":[
+            [{"text":"⚔️ Hoja · 240","callback_data":"event_buy:fest_sword"},{"text":"🗡️ Lanza · 240","callback_data":"event_buy:fest_spear"}],
+            [{"text":"🏹 Arco · 240","callback_data":"event_buy:fest_bow"},{"text":"🗡️ Dagas · 245","callback_data":"event_buy:fest_daggers"}],
+            [{"text":"🔮 Bastón · 250","callback_data":"event_buy:fest_staff"},{"text":"⚔️ Mandoble · 255","callback_data":"event_buy:fest_greatsword"}],
+            [{"text":"🛡️ Emblema · 260","callback_data":"event_buy:fest_armor"},{"text":"👑 Yelmo · 225","callback_data":"event_buy:fest_helm"}],
+            [{"text":"🧤 Guantes · 215","callback_data":"event_buy:fest_gloves"},{"text":"🥾 Botas · 210","callback_data":"event_buy:fest_boots"}],
+            [{"text":"💍 Sello · 230","callback_data":"event_buy:fest_ring"},{"text":"📿 Talismán · 235","callback_data":"event_buy:fest_charm"}],
+            [{"text":"🧪 +1 nivel · 300","callback_data":"event_buy:level"},{"text":"✨ EXP · 120","callback_data":"event_buy:exp"}],
+            [{"text":"🔨 5 Polvos · 90","callback_data":"event_buy:dust5"},{"text":"🔨 15 Polvos · 240","callback_data":"event_buy:dust15"}],
+            [{"text":"💰 10K KW · 100","callback_data":"event_buy:kw10k"},{"text":"💰 30K KW · 270","callback_data":"event_buy:kw30k"}],
+            [{"text":f"🐾 {cfg['pet']} · 400","callback_data":"event_buy:pet"}]]}
+        return txt,kb
+    txt=(f"🛍️ TIENDA — {cfg['title']} {cfg['year']}\n\n💰 Tus fichas: {cur}\n\n⚔️ {cfg['weapon']} — 180\n🛡️ {cfg['armor']} — 220\n🧪 Poción de Ascenso (+1 nivel) — 300 · SIN LÍMITE\n🐾 {cfg['pet']} — 400 · límite 1\n\nLos objetos llevan su año y no se reciclan en otra temporada.")
     kb={"inline_keyboard":[[{"text":"⚔️ Arma · 180","callback_data":"event_buy:weapon"},{"text":"🛡️ Armadura · 220","callback_data":"event_buy:armor"}],[{"text":"🧪 +1 nivel · 300","callback_data":"event_buy:level"},{"text":"🐾 Mascota · 400","callback_data":"event_buy:pet"}]]}
     return txt,kb
 
 def _event_reward_item(cfg,kind):
-    key=f"{cfg['key']}_{kind}"; now=int(time.time())
-    if kind=='weapon': vals=(key,cfg['weapon'],'ultra_raro','arma',f"Edición exclusiva {cfg['year']} de {cfg['title']}.",5,1,5,'arma','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',10)
-    else: vals=(key,cfg['armor'],'raro','armadura',f"Edición exclusiva {cfg['year']} de {cfg['title']}.",1,4,20,'armadura','Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',10)
+    now=int(time.time())
+    universal='Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner'
+    festive={
+        'fest_sword':('Hoja del Primer Amanecer — 2026','arma',50,8,80,'Festividad. Equipada: +10% EXP y +5% KW.'),
+        'fest_spear':('Lanza de las Puertas Abiertas — 2026','arma',47,11,95,'Festividad. Equipada: +5% EXP y +10% KW.'),
+        'fest_bow':('Arco de los Fuegos de Aeternus — 2026','arma',45,9,110,'Festividad. Equipada: +8% EXP y +8% KW.'),
+        'fest_daggers':('Dagas del Primer Umbral — 2026','arma',52,6,70,'Festividad. Equipadas: +7% EXP y +9% KW.'),
+        'fest_staff':('Bastón del Alba Arcana — 2026','arma',48,10,105,'Festividad. Equipado: +12% EXP y +3% KW.'),
+        'fest_greatsword':('Mandoble de la Primera Guardia — 2026','arma',55,7,90,'Festividad. Equipado: +3% EXP y +12% KW.'),
+        'fest_armor':('Emblema del Fundador — 2026','armadura',15,32,170,'Festividad. Equipado: +5% EXP y +5% KW.'),
+        'fest_helm':('Yelmo del Día Cero — 2026','casco',14,27,135,'Festividad. Equipado: +6% EXP y +4% KW.'),
+        'fest_gloves':('Guantes del Portal — 2026','guantes',23,18,105,'Festividad. Equipados: +4% EXP y +6% KW.'),
+        'fest_boots':('Botas del Primer Viaje — 2026','botas',18,21,125,'Festividad. Equipadas: +5% EXP y +5% KW.'),
+        'fest_ring':('Sello de la Gran Apertura — 2026','accesorio',25,18,115,'Festividad. Equipado: +7% EXP y +7% KW.'),
+        'fest_charm':('Talismán de Aeternus — 2026','accesorio',22,20,130,'Festividad. Equipado: +8% EXP y +6% KW.')}
+    if kind in festive:
+        name,slot,atk,de,hp,desc=festive[kind]; key=f"opening_2026_{kind}"
+        vals=(key,name,'festividad',slot,desc,atk,de,hp,now,slot,universal,10)
+    else:
+        key=f"{cfg['key']}_{kind}"
+        if kind=='weapon': vals=(key,cfg['weapon'],'ultra_raro','arma',f"Edición exclusiva {cfg['year']} de {cfg['title']}.",5,1,5,now,'arma',universal,10)
+        else: vals=(key,cfg['armor'],'raro','armadura',f"Edición exclusiva {cfg['year']} de {cfg['title']}.",1,4,20,now,'armadura',universal,10)
     with db_lock:
-        c=get_db(); c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level) VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,?) ON CONFLICT(item_key) DO NOTHING""",(*vals[:8],now,*vals[8:])); c.commit(); c.close()
+        c=get_db(); c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level) VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,?) ON CONFLICT(item_key) DO NOTHING""",(*vals[:8],*vals[8:])); c.commit(); c.close()
     return key
 
 def event_buy(chat_id,user_id,kind):
-    prices={'weapon':180,'armor':220,'level':300,'pet':400}; price=prices.get(kind)
+    prices={'weapon':180,'armor':220,'level':300,'pet':400,'fest_sword':240,'fest_spear':240,'fest_bow':240,'fest_armor':260,'fest_boots':210,'fest_ring':230,'fest_daggers':245,'fest_staff':250,'fest_greatsword':255,'fest_helm':225,'fest_gloves':215,'fest_charm':235,'exp':120,'dust5':90,'dust15':240,'kw10k':100,'kw30k':270}; price=prices.get(kind)
     if not price:return False,'Recompensa desconocida.'
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
     if not cfg or not char:return False,'Necesitas un evento y personaje activo.'
-    limit=1 if kind in ('level','pet') else 99
+    festive_kinds={'fest_sword','fest_spear','fest_bow','fest_daggers','fest_staff','fest_greatsword','fest_armor','fest_helm','fest_gloves','fest_boots','fest_ring','fest_charm','exp','dust5','dust15','kw10k','kw30k'}
+    if kind in festive_kinds and cfg['key']!='opening_2026': return False,'Esa recompensa pertenece a la Gran Apertura.'
+    # Pociones, EXP, materiales y KW son consumibles sin límite. Equipo y mascota conservan límites.
+    limit=1 if kind=='pet' else (99 if kind in ('weapon','armor','fest_sword','fest_spear','fest_bow','fest_daggers','fest_staff','fest_greatsword','fest_armor','fest_helm','fest_gloves','fest_boots','fest_ring','fest_charm') else None)
     with db_lock:
         c=get_db(); p=event_player_row(chat_id,cfg['key'],user_id,True,c); q=c.execute("SELECT quantity FROM rpg_event_purchases WHERE chat_id=? AND event_key=? AND user_id=? AND reward_key=?",(int(chat_id),cfg['key'],int(user_id),kind)).fetchone(); bought=int(q['quantity'] if q else 0)
-        if bought>=limit: c.rollback(); c.close(); return False,'Ya compraste el máximo de esa recompensa esta temporada.'
+        if limit is not None and bought>=limit: c.rollback(); c.close(); return False,'Ya compraste el máximo de esa recompensa esta temporada.'
         if int(p['currency'])<price: c.rollback(); c.close(); return False,f'Te faltan {price-int(p["currency"])} fichas.'
         c.execute("UPDATE rpg_event_players SET currency=currency-?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?",(price,int(time.time()),int(chat_id),cfg['key'],int(user_id)))
         c.execute("""INSERT INTO rpg_event_purchases(chat_id,event_key,user_id,reward_key,quantity,updated_at) VALUES(?,?,?,?,1,?) ON CONFLICT(chat_id,event_key,user_id,reward_key) DO UPDATE SET quantity=rpg_event_purchases.quantity+1,updated_at=excluded.updated_at""",(int(chat_id),cfg['key'],int(user_id),kind,int(time.time()))); c.commit(); c.close()
-    if kind in ('weapon','armor'):
-        ik=_event_reward_item(cfg,kind); grant_rpg_item(user_id,int(char['id']),ik,f"tienda_evento:{cfg['key']}"); return True,f"🎁 Obtuviste {cfg[kind]}"
+    if kind in ('weapon','armor','fest_sword','fest_spear','fest_bow','fest_daggers','fest_staff','fest_greatsword','fest_armor','fest_helm','fest_gloves','fest_boots','fest_ring','fest_charm'):
+        ik=_event_reward_item(cfg,kind); grant_rpg_item(user_id,int(char['id']),ik,f"tienda_evento:{cfg['key']}")
+        with db_lock:
+            c=get_db(); nm=c.execute("SELECT name FROM rpg_items WHERE item_key=?",(ik,)).fetchone(); c.close()
+        return True,f"🎁 Obtuviste {nm['name'] if nm else ik}"
     if kind=='level':
-        need=max(1,exp_needed(int(char['level']))); stats,gained=grant_rpg_exp(int(char['id']),need); return True,f"🧪 Bebes la Poción de Ascenso. ¡Subiste {max(1,gained)} nivel!"
+        need=max(1,exp_needed(int(char['level']))); stats,gained=grant_rpg_exp(int(char['id']),need); return True,f"🧪 Bebes la Poción de Ascenso. ¡Subiste {max(1,gained)} nivel! Puedes comprar otra mientras tengas fichas."
+    if kind=='exp':
+        amount=max(1,int(round(exp_needed(int(char['level']))*0.50))); stats,gained=grant_rpg_exp(int(char['id']),amount); return True,f"✨ Elixir consumido: +{amount:,} EXP"+(f" · +{gained} nivel(es)" if gained else "")
+    if kind=='dust5':
+        for _ in range(5): grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"tienda_evento:{cfg['key']}:pack")
+        return True,"🔨 Recibiste 5 Polvos de Forja."
+    if kind=='dust15':
+        for _ in range(15): grant_rpg_item(user_id,int(char['id']),'polvo_forja',f"tienda_evento:{cfg['key']}:pack15")
+        return True,"🔨 Recibiste 15 Polvos de Forja."
+    if kind=='kw10k':
+        change_kiwons(user_id,10000,'event_shop_kw',chat_id=chat_id,note=cfg['key']); return True,"💰 Cofre abierto: +10,000 KW."
+    if kind=='kw30k':
+        change_kiwons(user_id,30000,'event_shop_kw',chat_id=chat_id,note=cfg['key']); return True,"💰 Cofre abierto: +30,000 KW."
     petkey=f"eventpet_{cfg['year']}_{cfg['month']:02d}"; RPG_PETS[petkey]={"name":cfg['pet'],"icon":cfg['icon'],"rarity":"Evento","weight":0,"bonus":"exp","pct":5,"desc":"+5% EXP. Mascota exclusiva de temporada."}
     with db_lock:
         c=get_db(); anyp=c.execute("SELECT 1 FROM rpg_pets_owned WHERE user_id=? LIMIT 1",(int(user_id),)).fetchone(); c.execute("INSERT INTO rpg_pets_owned(user_id,pet_key,copies,equipped,obtained_at) VALUES(?,?,1,?,?) ON CONFLICT(user_id,pet_key) DO UPDATE SET copies=rpg_pets_owned.copies+1",(int(user_id),petkey,0 if anyp else 1,int(time.time()))); c.commit(); c.close()
@@ -12370,6 +12484,7 @@ TAVERN_GAME_TTL = 600
 TAVERN_BETS = (100, 500, 1000, 5000, 10000, 20000, 50000, 100000, 250000, 500000)
 TAVERN_WEAPON_PRICE = 1_000_000
 RPG_RARITY_ICON.setdefault("mitico", "🌟")
+RPG_RARITY_ICON.setdefault("festividad", "🎆")
 
 TAVERN_DRINKS = {
     "dwarf": {"name":"🍺 Cerveza Enana","price":5000,"effect":"kw","mag":10,"games":5,"desc":"+10% KW ganados durante 5 partidas."},
@@ -13059,6 +13174,28 @@ def handle_rpg_callback(query):
         rows=get_characters(uid); target=next((r for r in rows if int(r['id'])==cid),None)
         if not target: send_message(chat_id,"No encontré ese personaje en tu cuenta."); return True
         ok,name=set_active_character(uid,str(target['name'])); send_message(chat_id,f"⭐ Personaje activo: {name}" if ok else "No pude cambiar el personaje."); return True
+    if data.startswith("opening_choice:"):
+        choice=data.split(":",1)[1]
+        choices={
+            "defend":("🛡️ DEFENDISTE LA PRIMERA PUERTA","Te uniste a quienes sostuvieron la entrada mientras Aeternus abría sus puertas.",3,{"protector":2,"honorable":1},750),
+            "help":("❤️ AYUDASTE A LOS CIVILES","Mientras otros miraban hacia el exterior, tú elegiste proteger a quienes quedaron atrapados dentro.",4,{"merciful":2,"protector":1},750),
+            "explore":("🔎 INVESTIGASTE LA SEÑAL","Seguiste la anomalía de las murallas antes de que nadie supiera qué significaba. Aeternus recordará tu curiosidad.",1,{"opportunist":1},750),
+        }
+        if choice not in choices:
+            return True
+        title,desc,rep,traits,reward=choices[choice]
+        try:
+            fresh=record_world_decision(uid,"opening_choice_2026",desc,rep_delta=rep,traits=traits,chat_id=chat_id)
+            if fresh:
+                change_kiwons(uid,reward,"opening_choice",chat_id=chat_id,note=choice)
+                send_message(chat_id,f"{title}\n\n{desc}\n\n🌎 Esta decisión quedó registrada en la historia de tu personaje.\n⭐ Reputación: +{rep}\n🪙 Recompensa inaugural: +{reward:,} KW")
+            else:
+                send_message(chat_id,"🌎 Ya tomaste tu primera decisión durante la Gran Apertura. Aeternus no olvida cuál elegiste.")
+        except Exception:
+            logger.exception("Error registrando decisión de Gran Apertura")
+            send_message(chat_id,"No pude registrar tu decisión de apertura. Inténtalo de nuevo en un momento.")
+        return True
+
     if data.startswith("welcome:"):
         act=data.split(":",1)[1]
         if act=="history": send_message(chat_id,rpg_story_text(),reply_markup=rpg_welcome_keyboard(uid)); return True
@@ -13794,7 +13931,7 @@ def rpg_welcome_keyboard(user_id):
           [{"text":"❓ Cómo jugar","callback_data":"welcome:how"}],
           [{"text":"⚔️ CREAR PERSONAJE","callback_data":"welcome:create"}],
           [{"text":"🔄 Cambiar personaje","callback_data":"welcome:switch"}]]
-    if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🌎 Reiniciar mundo","callback_data":"rpg_reset_begin"}])
+    if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
 ALL_REGISTERED_COMMANDS_TEXT = '/activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
@@ -13829,7 +13966,8 @@ def grand_opening_start(chat_id,user_id):
         except Exception:
             c.rollback(); c.close(); raise
     cfg=_opening_cfg(); _event_activate(chat_id,cfg,True)
-    # Da unos minutos de escena a la apertura antes de que el mundo vuelva a lanzar avisos normales.
+    # La apertura es una secuencia inaugural, no un simple aviso. No usamos sleep:
+    # el webhook queda libre y Telegram recibe las escenas en orden.
     with db_lock:
         _oc=get_db(); _oc.execute("UPDATE rpg_auto_chats SET next_spawn_at=?,next_minigame_at=?,updated_at=? WHERE chat_id=?",(now+300,now+300,now,int(chat_id))); _oc.commit(); _oc.close()
     # Premio fundador idempotente. Kalu es conocido; Head puede fijarse con HEAD_TELEGRAM_ID en Render.
@@ -13839,7 +13977,52 @@ def grand_opening_start(chat_id,user_id):
         hid=int(os.getenv("HEAD_TELEGRAM_ID","0") or 0)
         if hid: grant_first_tester(hid)
     except Exception: logger.exception("No pude conceder Los Primeros a Head")
-    return True,("🎆 GRAN APERTURA — AETERNUS DESPIERTA\n\nDurante años las puertas permanecieron cerradas mientras los caminos se llenaban de historias que nadie podía comprobar. Esta noche dejaron de ser historias.\n\nLas murallas de Aeternus se han abierto. Criaturas vuelven a recorrer el mundo, antiguas mazmorras responden otra vez y viajeros de lugares desconocidos comienzan a llegar. Nadie sabe todavía qué provocó el despertar.\n\n⚔️ Desde este momento comienza oficialmente KiwRPG.\n🎉 Festival de Apertura 2026 activo.\n✨ Bonificaciones inaugurales y desafíos especiales.\n🏅 Los primeros aventureros dejarán su marca en la historia.\n🌎 Crónicas y Mundo Vivo ya observan lo que ocurra.\n\nNo todos los secretos aparecerán como una misión. No todas las puertas dirán que pueden abrirse. Y quizá algunas cosas lleven mucho tiempo esperando exactamente a que alguien las encuentre.\n\n🦅 Bienvenidos a Aeternus. Ahora sí: escriban su historia.")
+
+    scene1=("🎆 GRAN APERTURA — LAS PUERTAS DE AETERNUS\n\n"
+            "Las campanas de la capital suenan por primera vez en generaciones. Una tras otra, las cerraduras antiguas de la muralla comienzan a girar.\n\n"
+            "Frente a todos, las enormes puertas de Aeternus se separan. Del otro lado no hay un camino vacío: hay luces entre los árboles, huellas imposibles, ruinas encendidas y algo gigantesco moviéndose detrás de la niebla.\n\n"
+            "🌎 El Mundo 1 acaba de comenzar. Desde este instante, Aeternus recordará lo que hagan sus aventureros.")
+    try:
+        if not send_rpg_image(chat_id,rpg_event_asset_key(cfg['key']),scene1): send_message(chat_id,scene1)
+    except Exception:
+        logger.exception("No pude enviar arte de Gran Apertura")
+        send_message(chat_id,scene1)
+
+    send_message(chat_id,("⚔️ ACTO I — EL PRIMER PASO\n\n"
+                          "La multitud todavía celebra cuando llegan tres avisos al mismo tiempo: criaturas se acercan a la puerta, varios civiles quedaron atrapados entre los puestos y una señal desconocida apareció sobre las murallas.\n\n"
+                          "Esta será la primera decisión que Aeternus recuerde de ti. Solo puedes elegir una."),
+                 reply_markup={"inline_keyboard":[
+                     [{"text":"🛡️ Defender la puerta","callback_data":"opening_choice:defend"}],
+                     [{"text":"❤️ Ayudar a los civiles","callback_data":"opening_choice:help"}],
+                     [{"text":"🔎 Investigar la señal","callback_data":"opening_choice:explore"}]
+                 ]})
+
+    send_message(chat_id,("🌌 ACTO II — ALGO RESPONDE\n\n"
+                          "El suelo tiembla. Las antorchas de la muralla se apagan de golpe y una línea de luz azul atraviesa la puerta recién abierta.\n\n"
+                          "Las piedras del arco comienzan a desprenderse... pero no caen. Flotan. Se unen alrededor de un núcleo con forma de cerradura.\n\n"
+                          "Una voz que nadie reconoce retumba sobre la capital:\n\n"
+                          "«Si quieren cruzar la Primera Puerta... demuestren que este mundo merece despertar.»"))
+
+    try:
+        boss_txt,boss_kb=event_boss_card(chat_id,user_id)
+        boss_txt=("👑 ACTO III — EL GUARDIÁN DE LA PRIMERA PUERTA\n\n"+boss_txt+
+                  "\n\n🏆 Si la comunidad lo derrota, los participantes válidos desbloquean la recompensa comunitaria de apertura.")
+        if not send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),boss_txt,reply_markup=boss_kb):
+            send_message(chat_id,boss_txt,reply_markup=boss_kb)
+    except Exception:
+        logger.exception("No pude revelar el World Boss de apertura")
+
+    send_message(chat_id,("🎊 FESTIVAL DE APERTURA 2026\n\n"
+                          "Durante el festival:\n"
+                          "• ⚔️ +15% daño en encuentros PvE.\n"
+                          "• ✨ +30% EXP y 🪙 +20% KW al ganar encuentros.\n"
+                          "• 👑 5 ataques diarios contra el Guardián.\n"
+                          "• 🎟️ Fichas de Apertura y materiales por participar.\n"
+                          "• 🛍️ Tienda exclusiva con equipo y mascota de apertura.\n"
+                          "• 🌎 Mundo Vivo, Crónicas y reputación siguen funcionando durante el festival.\n\n"
+                          "Usa /eventos · /bossevento · /tiendaevento para volver al festival cuando quieras."))
+
+    return True,("🦅 AETERNUS ESTÁ ABIERTO\n\nLa Gran Apertura quedó iniciada una sola vez y el Festival de Apertura está activo. Ya no es un anuncio: la primera decisión, el Guardián y las recompensas inaugurales están en marcha.\n\nQue empiece la primera leyenda.")
 
 # =========================================================
 # MUNDO QUE RECUERDA · REPUTACIÓN · MEMORIA · PAREJA COMPARTIDA
@@ -15662,10 +15845,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             send_message(chat_id,"📍 Este no es el chat RPG activo. Usa /rpgaqui en el grupo donde quieres que vivan eventos, mazmorras, Malkor y misiones."); return True
         arg=(parts[1].strip().lower() if len(parts)>1 else '')
         if arg!='apertura': send_message(chat_id,"Por ahora el evento manual especial es /iniciarevento apertura"); return True
-        cfg=_opening_cfg(); _event_activate(chat_id,cfg,True)
-        txt="🎊 LAS PUERTAS DE KIWRPG SE HAN ABIERTO\n\nComienza el Festival de Apertura 2026.\n✨ Bonificaciones inaugurales · ⚔️ desafíos especiales · 🎟️ recompensas de fundador.\n👑 Aeternus espera a la comunidad.\n\nEl festival cerrará automáticamente el 30 de octubre a las 23:59."
-        sent=send_rpg_image(chat_id,rpg_event_asset_key(cfg['key']),txt)
-        if not sent: send_message(chat_id,txt)
+        ok,txt=grand_opening_start(chat_id,user_id)
+        send_message(chat_id,txt)
         return True
     if command=="/testbossevento":
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede probar el World Boss."); return True

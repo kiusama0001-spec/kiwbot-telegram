@@ -14029,6 +14029,40 @@ def handle_rpg_callback(query):
         except Exception:
             pass
 
+    if data=='crime:rumor':
+        send_private_message(uid,"🍺 RUMOR DE LA TABERNA\n\n“"+random.choice(TAVERN_RUMORS)+"”",reply_markup=_crime_rumors_keyboard()); return True
+    if data=='crime:info':
+        send_private_message(uid,"🕯️ INFORMACIÓN DE LA TABERNA\n\nLos rumores cambian cada vez que preguntas. Algunos son tonterías, otros hablan del Mundo Vivo y otros quizá escondan algo.\n\nAquí nadie garantiza que lo que escuches sea verdad. 😂",reply_markup=_crime_rumors_keyboard()); return True
+    if data=='crime:hood':
+        _ensure_crime_db()
+        with db_lock:
+            c=get_db(); sess=c.execute("SELECT * FROM rpg_crime_sessions WHERE user_id=?",(int(uid),)).fetchone(); c.close()
+        if not sess: send_private_message(uid,"El encapuchado no sabe de qué reino vienes. Usa /rumores desde el grupo."); return True
+        kb=_crime_target_keyboard(int(sess['chat_id']),uid,'crime:target')
+        send_private_message(uid,f"🗡️ EL ENCAPUCHADO\n\nPuedo hacer desaparecer a alguien... pero no trabajo gratis.\n\n💰 Precio: {CRIME_COST:,} KW\n☠️ Éxito: 70%\n⏳ Si funciona: 10 minutos muerto.\n\nEl dinero se cobra incluso si fallo.\n\n¿Quién es el objetivo?",reply_markup=kb); return True
+    if data.startswith('crime:target:'):
+        try: tid=int(data.rsplit(':',1)[1])
+        except Exception: return True
+        rep=int(get_reputation(tid).get('score') or 0)
+        send_private_message(uid,f"🕯️ OBJETIVO: {_player_name_by_id(tid)}\n⚖️ Reputación: {rep:+d}\n💰 Coste: {CRIME_COST:,} KW\n🎲 Probabilidad de éxito: 70%\n\n¿Confirmas el contrato?",reply_markup={'inline_keyboard':[[{'text':'🩸 CONFIRMAR CONTRATO','callback_data':f'crime:confirm:{tid}'}],[{'text':'❌ Retirarme','callback_data':'crime:rumor'}]]}); return True
+    if data.startswith('crime:confirm:'):
+        try: tid=int(data.rsplit(':',1)[1])
+        except Exception: return True
+        ok,txt,cid=_crime_start_contract(uid,tid); send_private_message(uid,txt); return True
+    if data.startswith('crime:accuse:'):
+        try: cid=int(data.rsplit(':',1)[1])
+        except Exception: return True
+        case=_crime_case(cid)
+        if not case or str(case['status'])!='open': send_private_message(uid,'Ese caso ya terminó.'); return True
+        if int(case['success'])==1 and int(case['victim_id'])==int(uid) and int(time.time())<int(case['dead_until']): send_private_message(uid,'☠️ Tú eres el muerto. No participas en la investigación. 😂'); return True
+        kb=_crime_target_keyboard(int(case['chat_id']),0,f'crime:pick:{cid}')
+        send_private_message(uid,"🕵️ ¿A QUIÉN ACUSAS?\n\nMira las pistas y la reputación. Elige con cuidado: solo tienes UNA acusación.\n\nSi acusas a un inocente, pierdes reputación y el grupo verá tu error. 😂",reply_markup=kb); return True
+    if data.startswith('crime:pick:'):
+        try:
+            _,_,cid,tid=data.split(':',3); cid=int(cid); tid=int(tid)
+        except Exception: return True
+        ok,txt=_crime_accuse(cid,uid,tid); send_private_message(uid,txt); return True
+
     if data=='recuerdo_claim':
         ok,txt=recuerdo_claim_box(uid);kb={'inline_keyboard':[[{'text':'🌌 ABRIR LA CAJA','callback_data':'recuerdo_open'}]]} if ok else None;send_message(chat_id,txt,reply_markup=kb);return True
     if data=='recuerdo_open':
@@ -14917,6 +14951,240 @@ def recuerdo_open_box(user_id):
             return True,f"🌌 LA CAJA SE ABRIÓ\n\n{item['name']}\n🌌 RECUERDO — rareza única de los primeros días de KiwRPG\n\n⚔️ +{int(item['atk_bonus'])} ATK · 🛡️ +{int(item['def_bonus'])} DEF · ❤️ +{int(item['hp_bonus'])} HP\n\n✨ Habilidad exclusiva: {ab['emoji']} {ab['name']} · DMG ×{float(ab['power']):.2f}\n🏆 Sellada únicamente en /duelopvp competitivo; funciona en las demás aventuras cuando la pieza está equipada.\n\nPropietario original: {_player_name_by_id(uid)}\nOrigen: Los primeros días de KiwRPG · 2026\n\n‘Algunas recompensas se consiguen venciendo enemigos. Otras, simplemente por haber estado ahí.’\n\n— Kiu"
         except Exception:c.rollback();c.close();raise
 
+
+# =========================================================
+# RUMORES DE TABERNA + CONTRATOS SECRETOS
+# =========================================================
+CRIME_COST=10000
+CRIME_SUCCESS_CHANCE=0.70
+CRIME_DEATH_SECONDS=600
+CRIME_CASE_SECONDS=900
+CRIME_CLUE_SECONDS=180
+CRIME_REWARD_KW=50000
+CRIME_REWARD_EXP=1500
+CRIME_REWARD_REP=3
+CRIME_CULPRIT_REP=-5
+CRIME_FALSE_REP=-2
+
+TAVERN_RUMORS=[
+"Dicen que Brok duerme con un martillo debajo de la almohada. Nadie quiere comprobarlo.",
+"Un mercader juró haber visto una puerta donde ayer solo había una pared.",
+"Hay quien dice que los slimes recuerdan la cara del último que los golpeó.",
+"Anoche alguien dejó tres Kiwons sobre una tumba. Esta mañana había cuatro.",
+"Los guardias aseguran que Malkor nunca entra por la puerta principal.",
+"Un borracho dice que escuchó a Aeternus respirar. Nadie volvió a invitarle otra copa.",
+"Se rumorea que algunas armas eligen a su dueño mucho antes de ser forjadas.",
+"Una viajera vio a Eira hablando sola. Eira insiste en que no estaba sola.",
+"En el mercado venden mapas de lugares que todavía no existen.",
+"Alguien está pagando demasiado por Polvo de Forja. Eso nunca termina bien.",
+"Dicen que una campana suena bajo tierra cada vez que cae un aventurero.",
+"Un cocinero afirma que la suerte mejora si insultas al dado antes de lanzarlo.",
+"Hay una silla vacía en la taberna que nadie se atreve a ocupar después de medianoche.",
+"Un viejo asegura que conoció al primer héroe. También asegura tener 240 años.",
+"Anoche desapareció una espada del almacén. La puerta seguía cerrada por dentro.",
+"Algunos creen que los Boss no mueren: simplemente aprenden a esperar.",
+"Se oyó un rugido más allá de las murallas. Los guardias dijeron que era viento. Claro.",
+"Una moneda marcada con una X ha cambiado de dueño siete veces esta semana.",
+"Dicen que el herrero guarda una receta que no aparece en ningún catálogo.",
+"Una sombra cruzó la plaza sin que hubiera nadie proyectándola.",
+"Los cuervos llevan días reuniéndose sobre la misma casa.",
+"Un aventurero encontró su propio nombre escrito en una misión que aún no había aceptado.",
+"La tabernera jura que una botella vacía volvió a llenarse sola. No piensa venderla.",
+"Alguien preguntó cuánto cuesta hacer desaparecer a una persona. Nadie recuerda su cara.",
+"Hay marcas nuevas en el callejón del norte. Parecen contar días.",
+"Un gato robó una bolsa de Kiwons y la dejó frente a la casa de un desconocido.",
+"Dicen que el bosque se queda completamente en silencio cuando algo importante va a pasar.",
+"Un mensajero entregó una carta sin remitente y luego negó haber estado allí.",
+"Se habla de una llave que abre cualquier cofre una sola vez.",
+"Un guardia encontró huellas que comenzaban en mitad de la calle y terminaban en una pared.",
+"Hay quien asegura que perder reputación hace que ciertas puertas se abran.",
+"Un niño dibujó exactamente al monstruo que apareció esa misma noche.",
+"Una capa negra lleva tres días colgada en la taberna y nadie reconoce al dueño.",
+"Alguien está comprando pociones como si esperara una guerra.",
+"Dicen que una reliquia desaparecida sigue cambiando de inventario sin que nadie la vea.",
+"Un jugador juró que su dado mostró siete. Le recomendaron dormir.",
+"Los mineros dejaron de bajar al tercer túnel. No quieren explicar por qué.",
+"Una voz en el pozo promete respuestas a cambio de una moneda.",
+"Se rumorea que algunos títulos no se consiguen ganando, sino sobreviviendo.",
+"Un caballo regresó solo a la ciudad con la silla cubierta de polvo.",
+"La última persona que preguntó por el encapuchado decidió dejar de preguntar.",
+"Alguien vio luces en la forja mucho después de que cerrara.",
+"Un mapa viejo tiene una mancha de tinta que cambia de sitio cada noche.",
+"Dicen que hay un cofre que solo aparece para quien ya no lo necesita.",
+"Un ladrón devolvió todo lo robado y añadió cien Kiwons. Nadie sabe qué vio.",
+"La estatua de la plaza amaneció mirando hacia otro lado.",
+"Un aventurero recibió una recompensa por una misión que no recuerda haber completado.",
+"Se escucharon dados rodando en una habitación vacía.",
+"Hay una apuesta abierta sobre quién será el próximo en meterse en problemas.",
+"Un cuervo dejó caer un anillo frente a la taberna y luego esperó como si quisiera propina.",
+"Dicen que ciertos NPC saben más de los jugadores de lo que deberían.",
+"Una carreta llegó vacía, pero el conductor cobró por cuatro pasajeros.",
+"Alguien está dejando flores junto a enemigos derrotados.",
+"Un espejo de la posada refleja una ventana que la habitación no tiene.",
+"Los guardias encontraron una lista de nombres. El último estaba tachado esta mañana.",
+"Una mujer pagó una bebida con una moneda de un reino que nadie conoce.",
+"Se rumorea que un arma mítica fue usada como pisapapeles durante meses.",
+"Un mercader ofrece descuentos a quienes no preguntan de dónde viene la mercancía.",
+"Anoche alguien gritó '¡crítico!' en la calle. Después todo quedó demasiado tranquilo.",
+"Una nota clavada en el tablón solo dice: 'todavía no'.",
+"Hay un túnel bajo la taberna. La tabernera dice que es una despensa. Nadie le cree.",
+"Un desconocido lleva una semana pagando bebidas sin tocar una sola.",
+"Dicen que el próximo gran tesoro ya está en manos de alguien que no sabe lo que tiene.",
+"Un perro callejero gruñe cada vez que cierto aventurero pasa cerca.",
+"Una vela del templo no se ha apagado en nueve días.",
+"Alguien dejó una espada rota y una bolsa llena de Kiwons en el puente.",
+"Los pescadores sacaron del río una llave demasiado grande para cualquier cerradura.",
+"Un anciano asegura que la reputación pesa más que una armadura. Los villanos se rieron menos.",
+"Se rumorea que hay contratos que nunca se escriben y aun así se cumplen.",
+"Una habitación de la posada lleva meses reservada a nombre de alguien que nunca llega.",
+"Los caballos se niegan a pasar por el camino viejo después del anochecer.",
+"Un herrero recibió un pedido firmado por una persona muerta hace años.",
+"Alguien vio al encapuchado sonreír. Probablemente fue lo último que vio bien.",
+"Una bolsa con 10,000 Kiwons apareció sobre una mesa y desapareció antes de que nadie preguntara.",
+"Dicen que en Aeternus hasta los rumores tienen dueño.",
+]
+
+def _ensure_crime_db():
+    with db_lock:
+        c=get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_sessions(user_id BIGINT PRIMARY KEY,chat_id BIGINT NOT NULL,created_at BIGINT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_cases(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,contractor_id BIGINT NOT NULL,victim_id BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'open',success BIGINT NOT NULL DEFAULT 0,cost BIGINT NOT NULL DEFAULT 10000,created_at BIGINT NOT NULL,ends_at BIGINT NOT NULL,dead_until BIGINT NOT NULL DEFAULT 0,next_clue BIGINT NOT NULL DEFAULT 0,clue_no BIGINT NOT NULL DEFAULT 1,resolved_by BIGINT NOT NULL DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_accusations(case_id BIGINT NOT NULL,user_id BIGINT NOT NULL,accused_id BIGINT NOT NULL,correct BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL,PRIMARY KEY(case_id,user_id))""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_crime_open ON rpg_crime_cases(chat_id,status,ends_at)")
+        c.commit(); c.close()
+
+def _crime_rep_add(uid,delta):
+    _ensure_world_memory_db(); now=int(time.time())
+    with db_lock:
+        c=get_db(); c.execute("INSERT INTO rpg_reputation(user_id,score,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET score=rpg_reputation.score+EXCLUDED.score,updated_at=EXCLUDED.updated_at",(int(uid),int(delta),now)); c.commit(); c.close()
+
+def _crime_candidates(chat_id,exclude=0):
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT cu.user_id,p.display_name FROM chat_users cu JOIN players p ON p.user_id=cu.user_id WHERE cu.chat_id=? AND cu.user_id<>? AND EXISTS(SELECT 1 FROM characters ch WHERE ch.user_id=cu.user_id AND ch.is_active=1) ORDER BY p.display_name LIMIT 40""",(int(chat_id),int(exclude))).fetchall(); c.close()
+    return rows
+
+def _crime_target_keyboard(chat_id,exclude,prefix):
+    rows=[]
+    for r in _crime_candidates(chat_id,exclude):
+        rep=int(get_reputation(int(r['user_id'])).get('score') or 0)
+        rows.append([{'text':f"👤 {str(r['display_name'])[:24]} · Rep {rep:+d}",'callback_data':f'{prefix}:{int(r["user_id"])}'}])
+    return {'inline_keyboard':rows[:40]} if rows else None
+
+def _crime_clues(culprit_id):
+    ch=get_active_character(culprit_id) or {}; rep=get_reputation(culprit_id); clan=rpg_user_clan(culprit_id)
+    name=_player_name_by_id(culprit_id); lvl=int(ch.get('level') or 1); cls=str(ch.get('class_name') or 'desconocida')
+    lo=max(1,(lvl//10)*10); hi=lo+9
+    pool=[f"El responsable usa la clase {cls}.",f"Su nivel está entre {lo} y {hi}.",f"Su reputación está catalogada como {reputation_tier(int(rep.get('score') or 0))}.",("El responsable pertenece a un clan." if clan else "El responsable no pertenece a ningún clan."),f"El nombre por el que se le conoce comienza con «{name[:1].upper()}»." ]
+    random.Random(int(culprit_id)*1000003+20260928).shuffle(pool); return pool
+
+def _crime_case(case_id):
+    _ensure_crime_db()
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT * FROM rpg_crime_cases WHERE id=?",(int(case_id),)).fetchone(); c.close()
+    return r
+
+def _crime_open_case(chat_id):
+    _ensure_crime_db()
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT * FROM rpg_crime_cases WHERE chat_id=? AND status='open' ORDER BY id DESC LIMIT 1",(int(chat_id),)).fetchone(); c.close()
+    return r
+
+def _crime_schedule(case_id,delay=CRIME_CLUE_SECONDS):
+    def run():
+        try: _crime_tick(case_id)
+        except Exception: logger.exception('Error actualizando investigación criminal')
+    t=threading.Timer(max(1,int(delay)),run); t.daemon=True; t.start()
+
+def _crime_tick(case_id):
+    case=_crime_case(case_id)
+    if not case or str(case['status'])!='open': return
+    now=int(time.time())
+    if now>=int(case['ends_at']):
+        with db_lock:
+            c=get_db(); c.execute("UPDATE rpg_crime_cases SET status='escaped' WHERE id=? AND status='open'",(int(case_id),)); changed=c.rowcount; c.commit(); c.close()
+        if changed: send_message(int(case['chat_id']),"🌑 EL CULPABLE ESCAPÓ\n\nLa investigación terminó. Nadie consiguió descubrir quién ordenó el ataque.\n\nSu identidad permanecerá enterrada con el caso.")
+        return
+    clue_no=int(case['clue_no'] or 1)
+    if clue_no<4 and now>=int(case['next_clue'] or 0):
+        clues=_crime_clues(int(case['contractor_id'])); clue=clues[min(clue_no,len(clues)-1)]
+        with db_lock:
+            c=get_db(); c.execute("UPDATE rpg_crime_cases SET clue_no=clue_no+1,next_clue=? WHERE id=? AND status='open'",(now+CRIME_CLUE_SECONDS,int(case_id))); c.commit(); c.close()
+        send_message(int(case['chat_id']),f"🔎 PISTA #{clue_no+1}\n\n{clue}\n\nEl culpable sigue entre ustedes. 👀",reply_markup={'inline_keyboard':[[{'text':'🕵️ YA SÉ QUIÉN ES','callback_data':f'crime:accuse:{int(case_id)}'}]]})
+    _crime_schedule(case_id,min(CRIME_CLUE_SECONDS,max(1,int(case['ends_at'])-now)))
+
+def _crime_dead_in_chat(chat_id,user_id):
+    _ensure_crime_db(); now=int(time.time())
+    with db_lock:
+        c=get_db(); case=c.execute("SELECT 1 FROM rpg_crime_cases WHERE chat_id=? AND victim_id=? AND success=1 AND dead_until>? ORDER BY id DESC LIMIT 1",(int(chat_id),int(user_id),now)).fetchone(); c.close()
+    return bool(case)
+
+def _crime_start_contract(contractor_id,victim_id):
+    _ensure_crime_db(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            sess=c.execute("SELECT * FROM rpg_crime_sessions WHERE user_id=? FOR UPDATE",(int(contractor_id),)).fetchone()
+            if not sess: c.rollback(); c.close(); return False,'El rastro de la taberna se enfrió. Vuelve a usar /rumores en el grupo.',0
+            chat_id=int(sess['chat_id'])
+            if int(contractor_id)==int(victim_id): c.rollback(); c.close(); return False,'Ni el encapuchado acepta contratos contra ti mismo. 😂',0
+            active=c.execute("SELECT 1 FROM rpg_crime_cases WHERE chat_id=? AND status='open' AND ends_at>?",(chat_id,now)).fetchone()
+            if active: c.rollback(); c.close(); return False,'Ya hay un crimen bajo investigación en ese reino. Espera a que cierre.',0
+            recent=c.execute("SELECT created_at FROM rpg_crime_cases WHERE contractor_id=? ORDER BY id DESC LIMIT 1",(int(contractor_id),)).fetchone()
+            if recent and now-int(recent['created_at'])<86400: c.rollback(); c.close(); return False,'🕯️ El encapuchado no vuelve a trabajar para ti hasta que pasen 24 horas.',0
+            bal=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(int(contractor_id),)).fetchone()
+            if not bal or int(bal['kiwons'])<CRIME_COST: c.rollback(); c.close(); return False,f'Necesitas {CRIME_COST:,} KW. El encapuchado no fía.',0
+            valid=c.execute("SELECT 1 FROM chat_users WHERE chat_id=? AND user_id=?",(chat_id,int(victim_id))).fetchone()
+            if not valid: c.rollback(); c.close(); return False,'Ese objetivo ya no está disponible.',0
+            success=1 if random.random()<CRIME_SUCCESS_CHANCE else 0; dead=now+CRIME_DEATH_SECONDS if success else 0
+            c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(CRIME_COST,now,int(contractor_id)))
+            row=c.execute("INSERT INTO rpg_crime_cases(chat_id,contractor_id,victim_id,status,success,cost,created_at,ends_at,dead_until,next_clue,clue_no) VALUES(?,?,?,'open',?,?,?,?,?,?,1) RETURNING id",(chat_id,int(contractor_id),int(victim_id),success,CRIME_COST,now,now+CRIME_CASE_SECONDS,dead,now+CRIME_CLUE_SECONDS)).fetchone()
+            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,other_user_id,chat_id,note,created_at) VALUES(?,?, 'crime_contract',?,?,?,?)",(int(contractor_id),-CRIME_COST,int(victim_id),chat_id,'Contrato secreto',now))
+            c.commit(); c.close(); cid=int(row['id'])
+        except Exception: c.rollback(); c.close(); raise
+    clues=_crime_clues(contractor_id); victim=_player_name_by_id(victim_id); vrep=int(get_reputation(victim_id).get('score') or 0)
+    if success:
+        head=f"☠️ UN CRIMEN HA SACUDIDO EL REINO\n\n{victim} ha sido asesinado.\n☠️ Fuera de combate y SIN VOZ: 10 minutos.\n⚖️ Reputación de la víctima: {vrep:+d}\n\nAlguien pagó {CRIME_COST:,} KW por su cabeza."
+    else:
+        head=f"🗡️ INTENTO DE ASESINATO\n\nAlguien intentó asesinar a {victim}... y FRACASÓ. 😂\n⚖️ Reputación de la víctima: {vrep:+d}\n\nEl sicario escapó, pero dejó rastros de quien pagó {CRIME_COST:,} KW."
+    msg=head+f"\n\n🔎 PISTA #1: {clues[0]}\n\nLa siguiente pista aparecerá en 3 minutos.\n🕵️ TODOS pueden investigar y discutir... excepto el muerto.\nCada jugador tiene UNA acusación. Una acusación falsa cuesta {abs(CRIME_FALSE_REP)} de reputación.\n\n🏆 Resolver el caso: {CRIME_REWARD_KW:,} KW + {CRIME_REWARD_EXP:,} EXP + {CRIME_REWARD_REP} reputación."
+    send_message(chat_id,msg,reply_markup={'inline_keyboard':[[{'text':'🕵️ YA SÉ QUIÉN ES','callback_data':f'crime:accuse:{cid}'}]]})
+    _crime_schedule(cid)
+    return True,('☠️ El contrato fue ejecutado.' if success else '💨 El sicario falló. Los 10,000 KW no se devuelven.'),cid
+
+def _crime_accuse(case_id,accuser_id,accused_id):
+    case=_crime_case(case_id); now=int(time.time())
+    if not case or str(case['status'])!='open' or now>=int(case['ends_at']): return False,'Ese caso ya está cerrado.'
+    if int(accuser_id)==int(case['victim_id']) and int(case['success'])==1 and now<int(case['dead_until']): return False,'☠️ Estás muerto. Los muertos no investigan, no acusan y, por ahora, tampoco hablan. 😂'
+    if int(accuser_id)==int(case['contractor_id']) and int(accused_id)==int(accuser_id): return False,'Buen intento. No puedes acusarte a ti mismo para cobrar tu propio crimen. 😂'
+    with db_lock:
+        c=get_db()
+        try:
+            old=c.execute("SELECT 1 FROM rpg_crime_accusations WHERE case_id=? AND user_id=?",(int(case_id),int(accuser_id))).fetchone()
+            if old: c.rollback(); c.close(); return False,'Ya gastaste tu única acusación en este caso.'
+            correct=int(accused_id)==int(case['contractor_id'])
+            c.execute("INSERT INTO rpg_crime_accusations(case_id,user_id,accused_id,correct,created_at) VALUES(?,?,?,?,?)",(int(case_id),int(accuser_id),int(accused_id),1 if correct else 0,now))
+            if correct: c.execute("UPDATE rpg_crime_cases SET status='solved',resolved_by=? WHERE id=? AND status='open'",(int(accuser_id),int(case_id)))
+            c.commit(); c.close()
+        except Exception: c.rollback(); c.close(); raise
+    chat_id=int(case['chat_id']); who=_player_name_by_id(accuser_id); accused=_player_name_by_id(accused_id)
+    if not correct:
+        _crime_rep_add(accuser_id,CRIME_FALSE_REP)
+        send_message(chat_id,f"❌ ACUSACIÓN FALSA\n\n{who} señaló a {accused} como responsable...\n\n{accused} ERA INOCENTE.\n⚖️ {who} pierde {abs(CRIME_FALSE_REP)} de reputación.\n\nEl verdadero culpable continúa entre ustedes. 👀")
+        return True,'❌ Fallaste. Esa era tu única acusación.'
+    change_kiwons(accuser_id,CRIME_REWARD_KW,'crime_solver',other_user_id=int(case['contractor_id']),chat_id=chat_id,note=f'Caso criminal #{case_id}')
+    ch=get_active_character(accuser_id)
+    if ch: grant_rpg_exp(int(ch['id']),CRIME_REWARD_EXP)
+    _crime_rep_add(accuser_id,CRIME_REWARD_REP); _crime_rep_add(int(case['contractor_id']),CRIME_CULPRIT_REP)
+    culprit=_player_name_by_id(int(case['contractor_id']))
+    send_message(chat_id,f"🚨 ¡CASO RESUELTO!\n\n{who} siguió las pistas y señaló a {culprit}.\n\n🗡️ {culprit} ORDENÓ EL ATAQUE.\n\n🏆 {who}: +{CRIME_REWARD_KW:,} KW · +{CRIME_REWARD_EXP:,} EXP · +{CRIME_REWARD_REP} reputación\n💀 {culprit}: {CRIME_CULPRIT_REP} reputación\n\nEl reino ya conoce al culpable. Caso cerrado.")
+    return True,'🚨 Acertaste. El reino ya conoce la verdad.'
+
+def _crime_rumors_home(uid):
+    return "🍺 RUMORES DE LA TABERNA\n\nAquí se escucha de todo: verdades, mentiras y cosas que sería mejor no repetir.\n\nPuedes escuchar un rumor cualquiera... o buscar negocios que no se hacen a plena luz."
+
+def _crime_rumors_keyboard():
+    return {'inline_keyboard':[[{'text':'🍺 Escuchar un rumor','callback_data':'crime:rumor'}],[{'text':'🕯️ Buscar información','callback_data':'crime:info'}],[{'text':'🗡️ Hablar con el encapuchado','callback_data':'crime:hood'}]]}
+
 def rpg_welcome_keyboard(user_id):
     rows=[[{"text":"📖 Historia","callback_data":"welcome:history"},{"text":"📜 Comandos","callback_data":"welcome:commands"}],
           [{"text":"❓ Cómo jugar","callback_data":"welcome:how"}],
@@ -14926,14 +15194,14 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Entrada discreta a los rumores de la taberna. En grupo se borra y continúa por privado.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
@@ -16042,6 +16310,24 @@ def process_command(
         if _busy_state:
             send_message(chat_id,_combat_lock_message(_busy_state))
             return True
+
+    if command=="/rumores":
+        # Fachada secreta: en grupo se borra sin responder públicamente y todo continúa por DM.
+        if chat.get("type")=="private":
+            send_private_message(user_id,"🍺 Para entrar a los rumores de TU reino, usa /rumores desde el grupo. El mensaje se borrará solo.")
+            return True
+        try:
+            deleted=delete_message(chat_id,message.get("message_id"))
+        except Exception:
+            deleted=None
+        # Si Telegram informa fallo explícito, no exponemos al jugador iniciando el flujo.
+        if isinstance(deleted,dict) and deleted.get('ok') is False:
+            return True
+        _ensure_crime_db(); now=int(time.time())
+        with db_lock:
+            c=get_db(); c.execute("INSERT INTO rpg_crime_sessions(user_id,chat_id,created_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,created_at=EXCLUDED.created_at",(user_id,int(chat_id),now)); c.commit(); c.close()
+        send_private_message(user_id,_crime_rumors_home(user_id),reply_markup=_crime_rumors_keyboard())
+        return True
 
     if command in ("/mundo", "/mundovivo"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
@@ -18388,6 +18674,15 @@ def process_update(
             or message.get("caption")
             or ""
         ).strip()
+
+        # En un asesinato exitoso, la víctima queda realmente "sin voz" en ese grupo
+        # durante 10 minutos: sus mensajes se eliminan y no puede participar en la investigación.
+        try:
+            if chat.get("type")!="private" and _crime_dead_in_chat(chat_id,user_id):
+                delete_message(chat_id,message.get("message_id"))
+                return
+        except Exception:
+            logger.exception("No pude aplicar el silencio temporal del muerto")
 
         if handle_reset_password_message(message, text):
             return

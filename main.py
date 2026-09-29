@@ -9830,6 +9830,8 @@ def spawn_boss(chat_id,key=None):
     return True,b
 
 def boss_join(chat_id,user_id,boss_id):
+    deadmsg=_rpg_global_defeat_message(user_id)
+    if deadmsg: return False,deadmsg+"\nNo puedes entrar a un Boss estando muerto. 😂"
     b=_boss_active(chat_id)
     if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya no está disponible."
     if _boss_participant(boss_id,user_id): return True,"Ya estás participando."
@@ -10102,6 +10104,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         lock.release()
 
 def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
+    deadmsg=_rpg_global_defeat_message(user_id)
+    if deadmsg: return False,deadmsg+"\nNo puedes atacar al Boss estando muerto. 😂"
     b=_boss_active(chat_id)
     if not b or int(b['id'])!=int(boss_id): return False,"Ese Boss ya terminó o expiró."
     p=_boss_participant(boss_id,user_id)
@@ -10574,6 +10578,8 @@ def event_boss_card(chat_id,user_id):
 
 def event_boss_combat_panel(chat_id,user_id):
     """Panel de entrada al World Boss del evento; no altera HP hasta pulsar GOLPEAR."""
+    deadmsg=_rpg_global_defeat_message(user_id)
+    if deadmsg: return deadmsg+"\nNo puedes entrar al World Boss estando muerto. 😂",None
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
     if not st or not cfg or st.get('status')!='active':
         return "📅 No hay un World Boss de evento activo.",None
@@ -10604,6 +10610,8 @@ def event_boss_combat_panel(chat_id,user_id):
     return txt,kb
 
 def event_boss_attack(chat_id,user_id):
+    deadmsg=_rpg_global_defeat_message(user_id)
+    if deadmsg: return False,deadmsg+"\nNo puedes golpear al World Boss estando muerto. 😂"
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
     if not st or not cfg or st.get('status')!='active':return False,"No hay evento activo."
     if cfg['key']=='opening_2026' and not _opening_boss_is_unlocked(st):
@@ -14063,6 +14071,25 @@ def handle_rpg_callback(query):
         except Exception: return True
         ok,txt=_crime_accuse(cid,uid,tid); send_private_message(uid,txt); return True
 
+    if data.startswith('horse:'):
+        try:
+            _,action,rid=data.split(':',2); rid=int(rid)
+        except Exception: return True
+        race=_horse_race_row(rid)
+        if not race: send_message(chat_id,"Esa carrera ya no existe."); return True
+        if int(race['chat_id'])!=int(chat_id): return True
+        if action=='join': ok,txt=_horse_join(rid,uid)
+        elif action=='start': ok,txt=_horse_start(rid,uid)
+        elif action=='roll': ok,txt=_horse_roll(rid,uid)
+        elif action=='leave': ok,txt=_horse_leave(rid,uid)
+        elif action=='cancel': ok,txt=_horse_cancel(rid,uid)
+        else: return True
+        race2=_horse_race_row(rid)
+        panel=_horse_race_text(rid)
+        if txt: panel += "\n\n"+txt
+        send_message(int(race2['chat_id']) if race2 else int(chat_id),panel,reply_markup=_horse_race_keyboard(race2) if race2 else None)
+        return True
+
     if data=='recuerdo_claim':
         ok,txt=recuerdo_claim_box(uid);kb={'inline_keyboard':[[{'text':'🌌 ABRIR LA CAJA','callback_data':'recuerdo_open'}]]} if ok else None;send_message(chat_id,txt,reply_markup=kb);return True
     if data=='recuerdo_open':
@@ -14965,6 +14992,13 @@ CRIME_REWARD_EXP=1500
 CRIME_REWARD_REP=3
 CRIME_CULPRIT_REP=-5
 CRIME_FALSE_REP=-2
+CRIME_CULPRIT_DEATH_SECONDS=300
+
+HORSE_RACE_MIN_PLAYERS=2
+HORSE_RACE_MAX_PLAYERS=4
+HORSE_RACE_GOAL=20
+HORSE_RACE_MIN_WAGER=100
+HORSE_RACE_MAX_WAGER=1000000
 
 TAVERN_RUMORS=[
 "Dicen que Brok duerme con un martillo debajo de la almohada. Nadie quiere comprobarlo.",
@@ -15051,6 +15085,20 @@ def _ensure_crime_db():
         c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_cases(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,contractor_id BIGINT NOT NULL,victim_id BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'open',success BIGINT NOT NULL DEFAULT 0,cost BIGINT NOT NULL DEFAULT 10000,created_at BIGINT NOT NULL,ends_at BIGINT NOT NULL,dead_until BIGINT NOT NULL DEFAULT 0,next_clue BIGINT NOT NULL DEFAULT 0,clue_no BIGINT NOT NULL DEFAULT 1,resolved_by BIGINT NOT NULL DEFAULT 0)""")
         c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_accusations(case_id BIGINT NOT NULL,user_id BIGINT NOT NULL,accused_id BIGINT NOT NULL,correct BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL,PRIMARY KEY(case_id,user_id))""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_crime_open ON rpg_crime_cases(chat_id,status,ends_at)")
+        c.execute("ALTER TABLE rpg_crime_cases ADD COLUMN IF NOT EXISTS culprit_dead_until BIGINT NOT NULL DEFAULT 0")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_horse_races(
+            id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, creator_id BIGINT NOT NULL,
+            wager BIGINT NOT NULL, goal BIGINT NOT NULL DEFAULT 30, status TEXT NOT NULL DEFAULT 'open',
+            turn_user_id BIGINT NOT NULL DEFAULT 0, rolling_user_id BIGINT NOT NULL DEFAULT 0,
+            winner_id BIGINT NOT NULL DEFAULT 0, message_id BIGINT NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_horse_race_players(
+            race_id BIGINT NOT NULL, user_id BIGINT NOT NULL, position BIGINT NOT NULL DEFAULT 0,
+            join_order BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active', paid BIGINT NOT NULL DEFAULT 0,
+            joined_at BIGINT NOT NULL, PRIMARY KEY(race_id,user_id)
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_horse_race_chat_status ON rpg_horse_races(chat_id,status,created_at DESC)")
         c.commit(); c.close()
 
 def _crime_rep_add(uid,delta):
@@ -15118,6 +15166,35 @@ def _crime_dead_in_chat(chat_id,user_id):
         c=get_db(); case=c.execute("SELECT 1 FROM rpg_crime_cases WHERE chat_id=? AND victim_id=? AND success=1 AND dead_until>? ORDER BY id DESC LIMIT 1",(int(chat_id),int(user_id),now)).fetchone(); c.close()
     return bool(case)
 
+def _rpg_global_defeat_left(user_id):
+    ch=get_active_character(user_id)
+    if not ch: return 0
+    return max(0,int(ch.get('defeated_until') or 0)-int(time.time()))
+
+def _rpg_global_defeat_message(user_id):
+    left=_rpg_global_defeat_left(user_id)
+    if left<=0: return ''
+    return f"☠️ Tu personaje está derrotado.\n⏳ Resurrección en {left//60}m {left%60:02d}s."
+
+def _crime_set_character_defeat(user_id,until_ts):
+    with db_lock:
+        c=get_db(); c.execute("UPDATE characters SET defeated_until=?,updated_at=? WHERE user_id=? AND is_active=1",(max(0,int(until_ts)),int(time.time()),int(user_id))); c.commit(); c.close()
+
+def _crime_finish_admin(chat_id,actor_id):
+    _ensure_crime_db(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            case=c.execute("SELECT * FROM rpg_crime_cases WHERE chat_id=? AND status='open' ORDER BY id DESC LIMIT 1 FOR UPDATE",(int(chat_id),)).fetchone()
+            if not case: c.rollback(); c.close(); return False,"No hay ningún asesinato/investigación activa en este chat."
+            changed=c.execute("UPDATE rpg_crime_cases SET status='cancelled',dead_until=0,next_clue=0 WHERE id=? AND status='open'",(int(case['id']),)).rowcount
+            if not changed: c.rollback(); c.close(); return False,"Ese caso ya terminó."
+            c.execute("UPDATE characters SET defeated_until=0,updated_at=? WHERE user_id=? AND is_active=1",(now,int(case['victim_id'])))
+            c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+    return True,f"🕯️ Caso #{int(case['id'])} terminado por administración.\n♻️ {_player_name_by_id(int(case['victim_id']))} ha sido revivido.\nLa identidad del responsable permanece oculta."
+
 def _crime_start_contract(contractor_id,victim_id):
     _ensure_crime_db(); now=int(time.time())
     with db_lock:
@@ -15141,6 +15218,7 @@ def _crime_start_contract(contractor_id,victim_id):
             c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,other_user_id,chat_id,note,created_at) VALUES(?,?, 'crime_contract',?,?,?,?)",(int(contractor_id),-CRIME_COST,int(victim_id),chat_id,'Contrato secreto',now))
             c.commit(); c.close(); cid=int(row['id'])
         except Exception: c.rollback(); c.close(); raise
+    if success: _crime_set_character_defeat(victim_id,dead)
     clues=_crime_clues(contractor_id); victim=_player_name_by_id(victim_id); vrep=int(get_reputation(victim_id).get('score') or 0)
     if success:
         head=f"☠️ UN CRIMEN HA SACUDIDO EL REINO\n\n{victim} ha sido asesinado.\n☠️ Fuera de combate y SIN VOZ: 10 minutos.\n⚖️ Reputación de la víctima: {vrep:+d}\n\nAlguien pagó {CRIME_COST:,} KW por su cabeza."
@@ -15163,7 +15241,12 @@ def _crime_accuse(case_id,accuser_id,accused_id):
             if old: c.rollback(); c.close(); return False,'Ya gastaste tu única acusación en este caso.'
             correct=int(accused_id)==int(case['contractor_id'])
             c.execute("INSERT INTO rpg_crime_accusations(case_id,user_id,accused_id,correct,created_at) VALUES(?,?,?,?,?)",(int(case_id),int(accuser_id),int(accused_id),1 if correct else 0,now))
-            if correct: c.execute("UPDATE rpg_crime_cases SET status='solved',resolved_by=? WHERE id=? AND status='open'",(int(accuser_id),int(case_id)))
+            if correct:
+                culprit_until=now+CRIME_CULPRIT_DEATH_SECONDS
+                changed=c.execute("UPDATE rpg_crime_cases SET status='solved',resolved_by=?,dead_until=0,culprit_dead_until=?,next_clue=0 WHERE id=? AND status='open'",(int(accuser_id),culprit_until,int(case_id))).rowcount
+                if not changed: c.rollback(); c.close(); return False,'Ese caso acaba de ser resuelto por otra persona.'
+                c.execute("UPDATE characters SET defeated_until=0,updated_at=? WHERE user_id=? AND is_active=1",(now,int(case['victim_id'])))
+                c.execute("UPDATE characters SET defeated_until=?,updated_at=? WHERE user_id=? AND is_active=1",(culprit_until,now,int(case['contractor_id'])))
             c.commit(); c.close()
         except Exception: c.rollback(); c.close(); raise
     chat_id=int(case['chat_id']); who=_player_name_by_id(accuser_id); accused=_player_name_by_id(accused_id)
@@ -15176,8 +15259,179 @@ def _crime_accuse(case_id,accuser_id,accused_id):
     if ch: grant_rpg_exp(int(ch['id']),CRIME_REWARD_EXP)
     _crime_rep_add(accuser_id,CRIME_REWARD_REP); _crime_rep_add(int(case['contractor_id']),CRIME_CULPRIT_REP)
     culprit=_player_name_by_id(int(case['contractor_id']))
-    send_message(chat_id,f"🚨 ¡CASO RESUELTO!\n\n{who} siguió las pistas y señaló a {culprit}.\n\n🗡️ {culprit} ORDENÓ EL ATAQUE.\n\n🏆 {who}: +{CRIME_REWARD_KW:,} KW · +{CRIME_REWARD_EXP:,} EXP · +{CRIME_REWARD_REP} reputación\n💀 {culprit}: {CRIME_CULPRIT_REP} reputación\n\nEl reino ya conoce al culpable. Caso cerrado.")
+    victim=_player_name_by_id(int(case['victim_id']))
+    send_message(chat_id,f"🚨 ¡CASO RESUELTO!\n\n{who} siguió las pistas y señaló a {culprit}.\n\n🗡️ {culprit} ORDENÓ EL ATAQUE.\n\n♻️ {victim} revive inmediatamente.\n☠️ {culprit} cae derrotado durante 5 minutos.\n⏳ Resurrección del culpable: 5m 00s.\n\n🏆 {who}: +{CRIME_REWARD_KW:,} KW · +{CRIME_REWARD_EXP:,} EXP · +{CRIME_REWARD_REP} reputación\n💀 {culprit}: {CRIME_CULPRIT_REP} reputación\n\nEl reino ya conoce al culpable. Caso cerrado.")
     return True,'🚨 Acertaste. El reino ya conoce la verdad.'
+
+def _ensure_horse_race_db():
+    _ensure_crime_db()
+
+def _horse_race_row(race_id):
+    _ensure_horse_race_db()
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT * FROM rpg_horse_races WHERE id=?",(int(race_id),)).fetchone(); c.close()
+    return r
+
+def _horse_race_players(race_id):
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT * FROM rpg_horse_race_players WHERE race_id=? ORDER BY join_order,user_id",(int(race_id),)).fetchall(); c.close()
+    return rows
+
+def _horse_race_keyboard(race):
+    rid=int(race['id']); status=str(race['status'])
+    if status=='open':
+        return {'inline_keyboard':[[{'text':'🐎 UNIRME','callback_data':f'horse:join:{rid}'},{'text':'🏁 INICIAR','callback_data':f'horse:start:{rid}'}],[{'text':'🚪 SALIR','callback_data':f'horse:leave:{rid}'},{'text':'❌ CANCELAR','callback_data':f'horse:cancel:{rid}'}]]}
+    if status=='active':
+        return {'inline_keyboard':[[{'text':'🎲 TIRAR DADO','callback_data':f'horse:roll:{rid}'}],[{'text':'🏳️ ABANDONAR','callback_data':f'horse:leave:{rid}'}]]}
+    return None
+
+def _horse_race_text(race_id):
+    race=_horse_race_row(race_id)
+    if not race: return '🐎 Carrera inexistente.'
+    players=_horse_race_players(race_id); goal=int(race['goal']); status=str(race['status'])
+    lines=[f"🐎 CARRERA #{int(race['id'])}","",f"💰 Apuesta: {int(race['wager']):,} KW por jugador",f"🏁 Meta: {goal} casillas",f"👥 Corredores: {sum(1 for p in players if p['status']=='active')}/{HORSE_RACE_MAX_PLAYERS}",""]
+    for i,p in enumerate(players,1):
+        pos=min(goal,int(p['position'])); bar='█'*min(10,int(pos*10/max(1,goal)))+'░'*(10-min(10,int(pos*10/max(1,goal))))
+        state=' 🏳️' if p['status']!='active' else ''
+        turn=' ⬅️ TURNO' if status=='active' and int(race.get('turn_user_id') or 0)==int(p['user_id']) else ''
+        lines.append(f"{i}. {_player_name_by_id(int(p['user_id']))}{state} · {pos}/{goal} {bar}{turn}")
+    if status=='open': lines += ["","El creador puede iniciar cuando haya al menos 2 corredores."]
+    elif status=='active': lines += ["",f"🎲 Turno: {_player_name_by_id(int(race.get('turn_user_id') or 0))}"]
+    elif status=='finished': lines += ["",f"🏆 Ganador: {_player_name_by_id(int(race.get('winner_id') or 0))}"]
+    return '\n'.join(lines)
+
+def _horse_create(chat_id,user_id,wager):
+    _ensure_horse_race_db(); wager=int(wager); now=int(time.time())
+    if wager<HORSE_RACE_MIN_WAGER or wager>HORSE_RACE_MAX_WAGER: return False,f"La apuesta debe estar entre {HORSE_RACE_MIN_WAGER:,} y {HORSE_RACE_MAX_WAGER:,} KW.",0
+    if _rpg_global_defeat_left(user_id)>0: return False,_rpg_global_defeat_message(user_id),0
+    with db_lock:
+        c=get_db()
+        try:
+            active=c.execute("SELECT id FROM rpg_horse_races WHERE chat_id=? AND status IN ('open','active') ORDER BY id DESC LIMIT 1 FOR UPDATE",(int(chat_id),)).fetchone()
+            if active: c.rollback(); c.close(); return False,"Ya hay una carrera abierta o en curso en este chat.",0
+            bal=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(int(user_id),)).fetchone()
+            if not bal or int(bal['kiwons'])<wager: c.rollback(); c.close(); return False,"No tienes suficientes KW para pagar la apuesta.",0
+            c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(wager,now,int(user_id)))
+            race=c.execute("INSERT INTO rpg_horse_races(chat_id,creator_id,wager,goal,status,created_at,updated_at) VALUES(?,?,?,?,'open',?,?) RETURNING id",(int(chat_id),int(user_id),wager,HORSE_RACE_GOAL,now,now)).fetchone(); rid=int(race['id'])
+            c.execute("INSERT INTO rpg_horse_race_players(race_id,user_id,position,join_order,status,paid,joined_at) VALUES(?,?,0,1,'active',?,?)",(rid,int(user_id),wager,now))
+            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,chat_id,note,created_at) VALUES(?,?,'horse_race_entry',?,?,?)",(int(user_id),-wager,int(chat_id),f'Carrera #{rid}',now))
+            c.commit(); c.close(); return True,"",rid
+        except Exception: c.rollback(); c.close(); raise
+
+def _horse_join(race_id,user_id):
+    now=int(time.time())
+    if _rpg_global_defeat_left(user_id)>0: return False,_rpg_global_defeat_message(user_id)
+    with db_lock:
+        c=get_db()
+        try:
+            race=c.execute("SELECT * FROM rpg_horse_races WHERE id=? FOR UPDATE",(int(race_id),)).fetchone()
+            if not race or race['status']!='open': c.rollback(); c.close(); return False,"La inscripción ya cerró."
+            old=c.execute("SELECT * FROM rpg_horse_race_players WHERE race_id=? AND user_id=? FOR UPDATE",(int(race_id),int(user_id))).fetchone()
+            if old and old['status']=='active': c.rollback(); c.close(); return False,"Ya estás dentro de esta carrera."
+            count=c.execute("SELECT COUNT(*) AS n FROM rpg_horse_race_players WHERE race_id=? AND status='active'",(int(race_id),)).fetchone()
+            if int(count['n'])>=HORSE_RACE_MAX_PLAYERS: c.rollback(); c.close(); return False,"La carrera ya tiene 4 corredores."
+            wager=int(race['wager']); bal=c.execute("SELECT kiwons FROM players WHERE user_id=? FOR UPDATE",(int(user_id),)).fetchone()
+            if not bal or int(bal['kiwons'])<wager: c.rollback(); c.close(); return False,f"Necesitas {wager:,} KW para entrar."
+            order=int(count['n'])+1
+            c.execute("UPDATE players SET kiwons=kiwons-?,updated_at=? WHERE user_id=?",(wager,now,int(user_id)))
+            if old: c.execute("UPDATE rpg_horse_race_players SET position=0,join_order=?,status='active',paid=?,joined_at=? WHERE race_id=? AND user_id=?",(order,wager,now,int(race_id),int(user_id)))
+            else: c.execute("INSERT INTO rpg_horse_race_players(race_id,user_id,position,join_order,status,paid,joined_at) VALUES(?,?,0,?,'active',?,?)",(int(race_id),int(user_id),order,wager,now))
+            c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,chat_id,note,created_at) VALUES(?,?,'horse_race_entry',?,?,?)",(int(user_id),-wager,int(race['chat_id']),f'Carrera #{int(race_id)}',now))
+            c.commit(); c.close(); return True,"🐎 Entraste a la carrera."
+        except Exception: c.rollback(); c.close(); raise
+
+def _horse_start(race_id,user_id):
+    now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            race=c.execute("SELECT * FROM rpg_horse_races WHERE id=? FOR UPDATE",(int(race_id),)).fetchone()
+            if not race or race['status']!='open': c.rollback(); c.close(); return False,"La carrera ya no puede iniciarse."
+            if int(race['creator_id'])!=int(user_id): c.rollback(); c.close(); return False,"Solo quien creó la carrera puede iniciarla."
+            rows=c.execute("SELECT * FROM rpg_horse_race_players WHERE race_id=? AND status='active' ORDER BY join_order,user_id",(int(race_id),)).fetchall()
+            if len(rows)<HORSE_RACE_MIN_PLAYERS: c.rollback(); c.close(); return False,"Necesitas al menos 2 corredores."
+            first=int(rows[0]['user_id']); c.execute("UPDATE rpg_horse_races SET status='active',turn_user_id=?,rolling_user_id=0,updated_at=? WHERE id=?",(first,now,int(race_id)))
+            c.commit(); c.close(); return True,"🏁 ¡La carrera comenzó!"
+        except Exception: c.rollback(); c.close(); raise
+
+def _horse_next_active(c,race_id,current_uid):
+    rows=c.execute("SELECT user_id FROM rpg_horse_race_players WHERE race_id=? AND status='active' ORDER BY join_order,user_id",(int(race_id),)).fetchall()
+    ids=[int(x['user_id']) for x in rows]
+    if not ids: return 0
+    if int(current_uid) not in ids: return ids[0]
+    return ids[(ids.index(int(current_uid))+1)%len(ids)]
+
+def _horse_roll(race_id,user_id):
+    now=int(time.time())
+    if _rpg_global_defeat_left(user_id)>0: return False,_rpg_global_defeat_message(user_id)
+    with db_lock:
+        c=get_db()
+        try:
+            race=c.execute("SELECT * FROM rpg_horse_races WHERE id=? FOR UPDATE",(int(race_id),)).fetchone()
+            if not race or race['status']!='active': c.rollback(); c.close(); return False,"La carrera no está activa."
+            if int(race.get('turn_user_id') or 0)!=int(user_id): c.rollback(); c.close(); return False,f"Ahora corre {_player_name_by_id(int(race.get('turn_user_id') or 0))}."
+            if int(race.get('rolling_user_id') or 0): c.rollback(); c.close(); return False,"⏳ Ese lanzamiento ya se está resolviendo."
+            c.execute("UPDATE rpg_horse_races SET rolling_user_id=?,updated_at=? WHERE id=? AND status='active' AND rolling_user_id=0",(int(user_id),now,int(race_id)))
+            c.commit(); chat_id=int(race['chat_id']); c.close()
+        except Exception: c.rollback(); c.close(); raise
+    dr=send_dice(chat_id,'🎲')
+    try: roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value'))
+    except Exception: roll=0
+    if roll<1 or roll>6:
+        with db_lock:
+            c=get_db(); c.execute("UPDATE rpg_horse_races SET rolling_user_id=0,updated_at=? WHERE id=? AND rolling_user_id=?",(int(time.time()),int(race_id),int(user_id))); c.commit(); c.close()
+        return False,"No pude obtener el dado real de Telegram. Intenta de nuevo."
+    with db_lock:
+        c=get_db()
+        try:
+            race=c.execute("SELECT * FROM rpg_horse_races WHERE id=? FOR UPDATE",(int(race_id),)).fetchone()
+            if not race or race['status']!='active' or int(race.get('rolling_user_id') or 0)!=int(user_id): c.rollback(); c.close(); return False,"Ese turno ya fue resuelto."
+            p=c.execute("SELECT * FROM rpg_horse_race_players WHERE race_id=? AND user_id=? FOR UPDATE",(int(race_id),int(user_id))).fetchone()
+            if not p or p['status']!='active': c.rollback(); c.close(); return False,"Ya no participas en la carrera."
+            pos=int(p['position'])+roll; c.execute("UPDATE rpg_horse_race_players SET position=? WHERE race_id=? AND user_id=?",(pos,int(race_id),int(user_id)))
+            if pos>=int(race['goal']):
+                paid=c.execute("SELECT COALESCE(SUM(paid),0) AS pot FROM rpg_horse_race_players WHERE race_id=?",(int(race_id),)).fetchone(); pot=int(paid['pot'])
+                changed=c.execute("UPDATE rpg_horse_races SET status='finished',winner_id=?,turn_user_id=0,rolling_user_id=0,updated_at=? WHERE id=? AND status='active'",(int(user_id),int(time.time()),int(race_id))).rowcount
+                if not changed: c.rollback(); c.close(); return False,"La carrera ya terminó."
+                c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(pot,int(time.time()),int(user_id)))
+                c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,chat_id,note,created_at) VALUES(?,?,'horse_race_prize',?,?,?)",(int(user_id),pot,int(race['chat_id']),f'Premio carrera #{int(race_id)}',int(time.time())))
+                c.commit(); c.close(); return True,f"🏆 {_player_name_by_id(user_id)} sacó {roll} y cruzó la meta. ¡Gana {pot:,} KW!"
+            nxt=_horse_next_active(c,race_id,user_id); c.execute("UPDATE rpg_horse_races SET turn_user_id=?,rolling_user_id=0,updated_at=? WHERE id=?",(nxt,int(time.time()),int(race_id))); c.commit(); c.close()
+            return True,f"🐎 {_player_name_by_id(user_id)} avanzó {roll} casillas."
+        except Exception: c.rollback(); c.close(); raise
+
+def _horse_leave(race_id,user_id):
+    now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            race=c.execute("SELECT * FROM rpg_horse_races WHERE id=? FOR UPDATE",(int(race_id),)).fetchone(); p=c.execute("SELECT * FROM rpg_horse_race_players WHERE race_id=? AND user_id=? FOR UPDATE",(int(race_id),int(user_id))).fetchone()
+            if not race or not p or p['status']!='active': c.rollback(); c.close(); return False,"No estás participando en esa carrera."
+            if race['status']=='open':
+                refund=int(p['paid']); c.execute("UPDATE rpg_horse_race_players SET status='left',paid=0 WHERE race_id=? AND user_id=?",(int(race_id),int(user_id))); c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(refund,now,int(user_id))); c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,chat_id,note,created_at) VALUES(?,?,'horse_race_refund',?,?,?)",(int(user_id),refund,int(race['chat_id']),f'Reembolso carrera #{int(race_id)}',now))
+                if int(race['creator_id'])==int(user_id):
+                    others=c.execute("SELECT user_id,paid FROM rpg_horse_race_players WHERE race_id=? AND status='active' FOR UPDATE",(int(race_id),)).fetchall()
+                    for o in others:
+                        if int(o['paid'])>0: c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(int(o['paid']),now,int(o['user_id']))); c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,chat_id,note,created_at) VALUES(?,?,'horse_race_refund',?,?,?)",(int(o['user_id']),int(o['paid']),int(race['chat_id']),f'Cancelación carrera #{int(race_id)}',now))
+                    c.execute("UPDATE rpg_horse_race_players SET status='left',paid=0 WHERE race_id=?",(int(race_id),)); c.execute("UPDATE rpg_horse_races SET status='cancelled',turn_user_id=0,rolling_user_id=0,updated_at=? WHERE id=?",(now,int(race_id)))
+                c.commit(); c.close(); return True,"🚪 Saliste. Tu apuesta fue devuelta."
+            if race['status']!='active': c.rollback(); c.close(); return False,"Esa carrera ya terminó."
+            c.execute("UPDATE rpg_horse_race_players SET status='left' WHERE race_id=? AND user_id=?",(int(race_id),int(user_id)))
+            active=c.execute("SELECT user_id FROM rpg_horse_race_players WHERE race_id=? AND status='active' ORDER BY join_order,user_id",(int(race_id),)).fetchall()
+            if len(active)==1:
+                winner=int(active[0]['user_id']); paid=c.execute("SELECT COALESCE(SUM(paid),0) AS pot FROM rpg_horse_race_players WHERE race_id=?",(int(race_id),)).fetchone(); pot=int(paid['pot']); c.execute("UPDATE rpg_horse_races SET status='finished',winner_id=?,turn_user_id=0,rolling_user_id=0,updated_at=? WHERE id=?",(winner,now,int(race_id))); c.execute("UPDATE players SET kiwons=kiwons+?,updated_at=? WHERE user_id=?",(pot,now,winner)); c.execute("INSERT INTO kiwon_transactions(user_id,amount,kind,chat_id,note,created_at) VALUES(?,?,'horse_race_prize',?,?,?)",(winner,pot,int(race['chat_id']),f'Premio por abandono carrera #{int(race_id)}',now)); msg=f"🏳️ {_player_name_by_id(user_id)} abandonó. {_player_name_by_id(winner)} gana el pozo de {pot:,} KW."
+            else:
+                nxt=int(race.get('turn_user_id') or 0)
+                if nxt==int(user_id): nxt=_horse_next_active(c,race_id,user_id)
+                c.execute("UPDATE rpg_horse_races SET turn_user_id=?,rolling_user_id=CASE WHEN rolling_user_id=? THEN 0 ELSE rolling_user_id END,updated_at=? WHERE id=?",(nxt,int(user_id),now,int(race_id))); msg=f"🏳️ {_player_name_by_id(user_id)} abandonó y pierde su apuesta."
+            c.commit(); c.close(); return True,msg
+        except Exception: c.rollback(); c.close(); raise
+
+def _horse_cancel(race_id,user_id):
+    race=_horse_race_row(race_id)
+    if not race or race['status']!='open': return False,"Solo puede cancelarse antes de iniciar."
+    if int(race['creator_id'])!=int(user_id): return False,"Solo el creador puede cancelar la carrera."
+    return _horse_leave(race_id,user_id)
 
 def _crime_rumors_home(uid):
     return "🍺 RUMORES DE LA TABERNA\n\nAquí se escucha de todo: verdades, mentiras y cosas que sería mejor no repetir.\n\nPuedes escuchar un rumor cualquiera... o buscar negocios que no se hacen a plena luz."
@@ -15194,14 +15448,14 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Entrada discreta a los rumores de la taberna. En grupo se borra y continúa por privado.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Entrada discreta a los rumores de la taberna. En grupo se borra y continúa por privado.\n/carrera cantidad — Carrera pública de 2 a 4 jugadores con dados reales y apuesta KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
@@ -15592,7 +15846,7 @@ def _combat_lock_message(state):
 # informativos y las salidas (/huir, /rendirse, /salirtodo) siguen disponibles.
 COMBAT_LOCKED_COMMANDS = {
     '/encuentro','/combatir','/mazmorra','/taberna','/tavern','/gacha','/cofre',
-    '/duelo','/duelopvp','/peleadados','/duelodados','/robo','/robar',
+    '/duelo','/duelopvp','/peleadados','/duelodados','/carrera','/robo','/robar',
     '/misiones','/tablon','/misionesrpg','/misionrapida','/testmision','/minijuego',
     '/omega','/kennyomega','/invocaromega','/spawnomega','/boss','/bossevento',
     '/invocarboss','/spawnboss','/intercambiar','/trade','/casar','/proponer',
@@ -16311,6 +16565,21 @@ def process_command(
             send_message(chat_id,_combat_lock_message(_busy_state))
             return True
 
+    if command=="/terminarasesinato":
+        if not is_owner(user_id):
+            send_message(chat_id,"Solo Kiu puede terminar manualmente una investigación criminal.")
+            return True
+        ok,txt=_crime_finish_admin(chat_id,user_id); send_message(chat_id,txt); return True
+
+    if command=="/carrera":
+        if chat.get("type")=="private": send_message(chat_id,"🐎 Las carreras se crean en el grupo."); return True
+        ensure_player(message.get("from",{}))
+        arg=_command_argument_text(text).replace(',','').strip()
+        if not arg.isdigit(): send_message(chat_id,f"🐎 Usa /carrera cantidad\nEjemplo: /carrera 5000\nApuesta mínima: {HORSE_RACE_MIN_WAGER:,} KW."); return True
+        ok,txt,rid=_horse_create(chat_id,user_id,int(arg))
+        if not ok: send_message(chat_id,txt); return True
+        race=_horse_race_row(rid); send_message(chat_id,_horse_race_text(rid),reply_markup=_horse_race_keyboard(race)); return True
+
     if command=="/rumores":
         # Fachada secreta: en grupo se borra sin responder públicamente y todo continúa por DM.
         if chat.get("type")=="private":
@@ -16320,8 +16589,8 @@ def process_command(
             deleted=delete_message(chat_id,message.get("message_id"))
         except Exception:
             deleted=None
-        # Si Telegram informa fallo explícito, no exponemos al jugador iniciando el flujo.
-        if isinstance(deleted,dict) and deleted.get('ok') is False:
+        # Seguridad de fachada: solo iniciamos el flujo si Telegram confirmó el borrado.
+        if not isinstance(deleted,dict) or deleted.get('ok') is not True:
             return True
         _ensure_crime_db(); now=int(time.time())
         with db_lock:

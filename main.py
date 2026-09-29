@@ -12590,8 +12590,11 @@ def set_rpg_notification_chat(chat_id, chat_type, message_thread_id=None):
         # /rpgaqui es la única operación que puede mover el destino entre temas
         # del mismo supergrupo. Esto evita que /testmazmorra, /malkor, etc.
         # secuestren accidentalmente el topic activo.
-        conn.execute("UPDATE rpg_auto_chats SET enabled=CASE WHEN chat_id=? THEN 1 ELSE 0 END",(int(chat_id),))
-        conn.execute("UPDATE rpg_auto_chats SET message_thread_id=?,updated_at=? WHERE chat_id=?",
+        # Cada grupo es un reino independiente. Activar /rpgaqui aquí NO debe
+        # apagar el Mundo Vivo de otros grupos. Como rpg_auto_chats tiene una fila
+        # por chat_id, dentro de este mismo supergrupo seguimos teniendo un único
+        # topic oficial mediante message_thread_id.
+        conn.execute("UPDATE rpg_auto_chats SET enabled=1,message_thread_id=?,updated_at=? WHERE chat_id=?",
                      (int(message_thread_id) if message_thread_id is not None else None,int(time.time()),int(chat_id)))
         conn.commit(); conn.close()
 
@@ -15999,8 +16002,8 @@ def reset_grand_opening_for_new_realm(chat_id,user_id):
 
             # Una sola transacción: no existe una ventana donde las fichas puedan duplicarse.
             c.execute("SELECT pg_advisory_xact_lock(?)",(987654323,))
-            players=c.execute("SELECT user_id,currency FROM rpg_event_players WHERE event_key=? FOR UPDATE",(event_key,)).fetchall()
-            purchases=c.execute("SELECT user_id,reward_key,quantity FROM rpg_event_purchases WHERE event_key=? FOR UPDATE",(event_key,)).fetchall()
+            players=c.execute("SELECT user_id,currency FROM rpg_event_players WHERE chat_id=? AND event_key=? FOR UPDATE",(target,event_key)).fetchall()
+            purchases=c.execute("SELECT user_id,reward_key,quantity FROM rpg_event_purchases WHERE chat_id=? AND event_key=? FOR UPDATE",(target,event_key)).fetchall()
 
             balances={}
             for r in players:
@@ -16011,9 +16014,9 @@ def reset_grand_opening_for_new_realm(chat_id,user_id):
                 bought[key]=bought.get(key,0)+int(r.get('quantity') or 0)
 
             # Cerramos cualquier copia anterior del evento antes de crear la nueva ronda.
-            c.execute("UPDATE rpg_event_state SET status='inactive' WHERE event_key=?",(event_key,))
-            c.execute("DELETE FROM rpg_event_players WHERE event_key=?",(event_key,))
-            c.execute("DELETE FROM rpg_event_purchases WHERE event_key=?",(event_key,))
+            c.execute("UPDATE rpg_event_state SET status='inactive' WHERE chat_id=? AND event_key=?",(target,event_key))
+            c.execute("DELETE FROM rpg_event_players WHERE chat_id=? AND event_key=?",(target,event_key))
+            c.execute("DELETE FROM rpg_event_purchases WHERE chat_id=? AND event_key=?",(target,event_key))
 
             # La cartera se mueve al nuevo reino; combate y premio del nuevo Boss empiezan limpios.
             for uid,amount in balances.items():
@@ -16025,10 +16028,11 @@ def reset_grand_opening_for_new_realm(chat_id,user_id):
                 c.execute("""INSERT INTO rpg_event_purchases(chat_id,event_key,user_id,reward_key,quantity,updated_at)
                     VALUES(?,?,?,?,?,?)""",(target,event_key,uid,reward_key,qty,now))
 
-            c.execute("DELETE FROM rpg_chronicles_settings WHERE setting_key LIKE 'opening_2026:%'")
+            c.execute("DELETE FROM rpg_chronicles_settings WHERE setting_key LIKE ?",(f"opening_2026:{target}:%",))
+            opening_flag=f"grand_opening_started:{target}"
             c.execute("""INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at)
-                VALUES('grand_opening_started','0',?)
-                ON CONFLICT(setting_key) DO UPDATE SET value='0',updated_at=EXCLUDED.updated_at""",(now,))
+                VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET value='0',updated_at=EXCLUDED.updated_at""",
+                (opening_flag,'0',now))
             c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
@@ -16051,11 +16055,12 @@ def grand_opening_start(chat_id,user_id):
         c=get_db()
         try:
             c.execute("SELECT pg_advisory_xact_lock(?)",(987654321,))
-            r=c.execute("SELECT value FROM rpg_chronicles_settings WHERE setting_key='grand_opening_started' FOR UPDATE").fetchone()
-            if r and str(r.get('value'))=='1': c.rollback(); c.close(); return False,"🎆 La Gran Apertura ya fue iniciada. No puede duplicarse."
+            opening_flag=f"grand_opening_started:{int(chat_id)}"
+            r=c.execute("SELECT value FROM rpg_chronicles_settings WHERE setting_key=? FOR UPDATE",(opening_flag,)).fetchone()
+            if r and str(r.get('value'))=='1': c.rollback(); c.close(); return False,"🎆 La Gran Apertura ya fue iniciada en este reino. No puede duplicarse."
             route=c.execute("SELECT enabled FROM rpg_auto_chats WHERE chat_id=?",(int(chat_id),)).fetchone()
             if not route or int(route.get('enabled') or 0)!=1: c.rollback(); c.close(); return False,"📍 Usa /rpgaqui primero en el chat/topic oficial del RPG."
-            c.execute("INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES('grand_opening_started','1',?) ON CONFLICT(setting_key) DO UPDATE SET value='1',updated_at=EXCLUDED.updated_at",(now,)); c.commit(); c.close()
+            c.execute("INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET value='1',updated_at=EXCLUDED.updated_at",(opening_flag,'1',now)); c.commit(); c.close()
         except Exception:
             c.rollback(); c.close(); raise
     # Limpia únicamente las marcas de escenas de una Apertura anterior de este chat.

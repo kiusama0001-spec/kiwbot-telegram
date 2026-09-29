@@ -6233,7 +6233,7 @@ def rpg_abilities_for(class_name):
     return RPG_ABILITIES.get(str(class_name or ""), RPG_ABILITIES["Guerrero"])
 
 
-def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, hidden_cd=0):
+def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, hidden_cd=0, context_id=0):
     a = rpg_abilities_for(class_name)
     levels=technique_levels_for_user(user_id) if user_id else {}
     def label(ab, cd=0):
@@ -6250,8 +6250,8 @@ def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, h
          {"text":"🏃 Huir","callback_data":"rpg_flee"}]
     ]}
     kb=_append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
-    kb=_append_gacha_weapon_skill_button(kb,user_id,"rpg_attack",special_cd=special_cd)
-    return _append_recuerdo_skill_button(kb,user_id,"rpg_attack",special_cd=special_cd)
+    kb=_append_gacha_weapon_skill_button(kb,user_id,"rpg_attack",context_id=context_id,cd_scope="pve")
+    return _append_recuerdo_skill_button(kb,user_id,"rpg_attack",context_id=context_id,cd_scope="pve")
 
 def _rpg_get_ability(class_name, key):
     for a in rpg_abilities_for(class_name):
@@ -6480,7 +6480,11 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             cd=int(battle["hidden_blade_cd"]); conn.rollback(); conn.close()
             send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
             return True
-        if ability_key!="hidden_blade" and ability.get("special") and int(battle.get("special_cd") or 0)>0:
+        if str(ability_key).startswith(('gacha_skill_','recuerdo_skill_')):
+            ecd=_equipped_move_cd("pve",chat_id,user_id,ability_key)
+            if ecd>0:
+                conn.rollback(); conn.close(); send_message(chat_id,f"⏳ {ability['name']} estará disponible en {ecd} turnos."); return True
+        if ability_key!="hidden_blade" and not str(ability_key).startswith(('gacha_skill_','recuerdo_skill_')) and ability.get("special") and int(battle.get("special_cd") or 0)>0:
             cd=int(battle["special_cd"]); conn.rollback(); conn.close()
             send_message(chat_id,f"⏳ {ability['name']} estará disponible en {cd} turno{'s' if cd!=1 else ''}.")
             return True
@@ -6532,7 +6536,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
             new_hidden_cd=max(0,int(battle.get("hidden_blade_cd") or 0)-1)
             if ability_key=="hidden_blade":
                 new_hidden_cd=int(ability.get("cooldown",3))
-            elif ability.get("special"):
+            elif ability.get("special") and not str(ability_key).startswith(('gacha_skill_','recuerdo_skill_')):
                 new_special_cd=int(ability.get("cooldown",2))
             if ability.get("ultimate"):
                 new_cd=int(ability.get("cooldown",4))
@@ -6666,6 +6670,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                                 WHERE chat_id=? AND user_id=?""",
                              (enemy_hp,new_cd,new_special_cd,new_hidden_cd,ability_key,int(time.time()),int(chat_id),int(user_id)))
             conn.commit(); conn.close()
+            _tick_equipped_move_cds("pve",chat_id,user_id,ability_key,int(ability.get("cooldown") or EQUIPPED_MOVE_COOLDOWN))
 
             fail="❌ ¡FALLÓ!\n" if roll==1 else ("💥 ¡CRÍTICO!\n" if roll==6 else "")
             heal_text=f"\n🌟 Recuperas {heal} HP." if heal else ""
@@ -6686,7 +6691,7 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
                     f"⚔️ {damage} de daño.{heal_text}\n❤️ {battle['enemy_name']}: {enemy_hp}/{battle['enemy_max_hp']}\n\n"
                     f"El enemigo responde: 🎲 {enemy_roll} → {enemy_damage} de daño.\n"
                     f"❤️ {char['name']}: {char_hp}/{eff['max_hp']}\n\nElige tu siguiente movimiento.",
-                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id,new_hidden_cd))
+                    reply_markup=rpg_battle_keyboard(char["class_name"],new_cd,new_special_cd,user_id,new_hidden_cd,chat_id))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -6715,13 +6720,14 @@ def rpg_defend_action(chat_id,user_id):
                 lost,_=_rpg_apply_defeat(conn,cdict)
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
+                _tick_equipped_move_cds("pve",chat_id,user_id,ability_key,int(ability.get("cooldown") or EQUIPPED_MOVE_COOLDOWN))
                 send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 3 minutos.")
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(hp,int(time.time()),int(char["id"])))
                 conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,hidden_blade_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,hidden_cd,int(time.time()),int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
                 send_message(chat_id,f"🛡️ DEFENSA\n\nEl enemigo tira 🎲 {enemy_roll}.\nRecibes {damage} de daño (50% reducido).\n❤️ {char['name']}: {hp}/{eff['max_hp']}",
-                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id,hidden_cd))
+                             reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id,hidden_cd,chat_id))
             return True
         except Exception:
             conn.rollback(); conn.close(); raise
@@ -7359,6 +7365,24 @@ def equip_best_inventory(user_id):
                 if not r: continue
                 c.execute("UPDATE rpg_inventory SET equipped=1,character_id=? WHERE id=? AND user_id=? AND world_id=?",
                           (int(char['id']),int(r['id']),uid,world)); chosen.append(r)
+            # The Cleaner de Kiu puede llevar dos armas reales. El autoequipado privado
+            # conserva esa regla y equipa también la segunda mejor arma compatible.
+            if is_owner(uid) and char['class_name']=='The Cleaner':
+                weapon_rows=c.execute("""SELECT i.id,i.item_key,i.forge_level,i.enchant_atk,i.enchant_def,i.enchant_hp,i.equipped,
+                    x.name,x.equip_slot,x.allowed_classes,x.min_level,x.atk_bonus,x.def_bonus,x.hp_bonus,x.rarity
+                    FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+                    WHERE i.user_id=? AND i.world_id=? AND x.equip_slot='arma' ORDER BY i.acquired_at DESC,i.id DESC""",
+                    (uid,world)).fetchall()
+                valid_weapons=[]
+                for _raw in weapon_rows:
+                    _r=dict(_raw); _ok,_=item_compatibility(_r,char)
+                    if _ok: valid_weapons.append(_r)
+                valid_weapons.sort(key=_equipment_item_power,reverse=True)
+                already={int(x['id']) for x in chosen if str(x.get('equip_slot'))=='arma'}
+                second=next((_r for _r in valid_weapons if int(_r['id']) not in already),None)
+                if second:
+                    c.execute("UPDATE rpg_inventory SET equipped=1,character_id=? WHERE id=? AND user_id=? AND world_id=?",
+                              (int(char['id']),int(second['id']),uid,world)); chosen.append(second)
             c.execute("UPDATE characters SET updated_at=? WHERE id=?",(int(time.time()),int(char['id'])))
             c.commit(); c.close()
         except Exception:
@@ -8181,6 +8205,46 @@ def open_weapon_gacha(user_id):
 
 EQUIPPED_MOVE_COOLDOWN=3
 
+_equipped_cd_schema_ready=False
+_equipped_cd_schema_lock=threading.Lock()
+def _ensure_equipped_move_cd_table():
+    global _equipped_cd_schema_ready
+    if _equipped_cd_schema_ready: return
+    with _equipped_cd_schema_lock:
+        if _equipped_cd_schema_ready: return
+        with db_lock:
+            c=get_db()
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_equipped_move_cooldowns (
+                scope TEXT NOT NULL, context_id BIGINT NOT NULL, user_id BIGINT NOT NULL,
+                ability_key TEXT NOT NULL, remaining BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(scope,context_id,user_id,ability_key))""")
+            c.commit(); c.close()
+        _equipped_cd_schema_ready=True
+
+def _equipped_move_cd(scope,context_id,user_id,ability_key):
+    _ensure_equipped_move_cd_table()
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT remaining FROM rpg_equipped_move_cooldowns WHERE scope=? AND context_id=? AND user_id=? AND ability_key=?",
+            (str(scope),int(context_id),int(user_id),str(ability_key))).fetchone(); c.close()
+    return max(0,int(r['remaining'] or 0)) if r else 0
+
+def _tick_equipped_move_cds(scope,context_id,user_id,used_key=None,cooldown=EQUIPPED_MOVE_COOLDOWN):
+    """Avanza un turno: baja SOLO cooldowns de equipo activos y activa el usado."""
+    _ensure_equipped_move_cd_table(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        try:
+            c.execute("UPDATE rpg_equipped_move_cooldowns SET remaining=GREATEST(0,remaining-1),updated_at=? WHERE scope=? AND context_id=? AND user_id=? AND remaining>0",
+                      (now,str(scope),int(context_id),int(user_id)))
+            if used_key and str(used_key).startswith(('gacha_skill_','recuerdo_skill_')):
+                c.execute("""INSERT INTO rpg_equipped_move_cooldowns(scope,context_id,user_id,ability_key,remaining,updated_at) VALUES(?,?,?,?,?,?)
+                             ON CONFLICT(scope,context_id,user_id,ability_key) DO UPDATE SET remaining=excluded.remaining,updated_at=excluded.updated_at""",
+                          (str(scope),int(context_id),int(user_id),str(used_key),int(cooldown),now))
+            c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+
 RECUERDO_ABILITIES={'recuerdo_arma_primer_latido':{'key':'recuerdo_skill_latido','emoji':'🌠','name':'Primer Latido','power':1.72,'pen':.38,'high_roll_bonus':.20},'recuerdo_armadura_guardia_cero':{'key':'recuerdo_skill_juramento','emoji':'🛡️','name':'Juramento Cero','power':1.54,'pen':.25,'heal_pct':.10},'recuerdo_casco_testigo':{'key':'recuerdo_skill_memoria','emoji':'👑','name':'Memoria Viva','power':1.64,'pen':.32},'recuerdo_guantes_complices':{'key':'recuerdo_skill_caos','emoji':'💫','name':'Caos Compartido','power':1.69,'pen':.30,'high_roll_bonus':.25,'special':True,'cooldown':3},'recuerdo_botas_comienzo':{'key':'recuerdo_skill_paso','emoji':'🌌','name':'Paso Imposible','power':1.62,'pen':.35,'execute':True},'recuerdo_sello_eterno':{'key':'recuerdo_skill_codigo','emoji':'❤️','name':'Nunca Fue Solo Código','power':1.66,'pen':.30,'heal_pct':.07}}
 
 def _equipped_recuerdo_abilities(user_id,character_id=None):
@@ -8206,7 +8270,7 @@ def _equipped_recuerdo_ability(user_id,character_id=None,ability_key=None):
     aa=_equipped_recuerdo_abilities(user_id,character_id)
     return next((a for a in aa if str(a['key'])==str(ability_key)),None) if ability_key is not None else (aa[0] if aa else None)
 
-def _append_recuerdo_skill_button(kb,user_id,prefix,context_id=None,special_cd=0):
+def _append_recuerdo_skill_button(kb,user_id,prefix,context_id=None,special_cd=0,cd_scope=None):
     # Los RECUERDO marcados como special comparten el mismo cooldown especial
     # que la técnica de clase. El servidor ya lo validaba; reflejarlo aquí evita
     # mostrar un movimiento como disponible cuando todavía está enfriándose.
@@ -8214,8 +8278,8 @@ def _append_recuerdo_skill_button(kb,user_id,prefix,context_id=None,special_cd=0
     if not aa:return kb
     rows=list((kb or {}).get('inline_keyboard') or []);pos=max(0,len(rows)-1)
     for ab in aa:
-        cd=int(special_cd or 0) if ab.get('special') else 0
-        cb=f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}"
+        cd=_equipped_move_cd(cd_scope,context_id,user_id,ab['key']) if cd_scope and context_id is not None else int(special_cd or 0)
+        cb=f"{prefix}:{ab['key']}" if prefix=="rpg_attack" else (f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}")
         text=(f"⏳ {ab['name']} ({cd}) · RECUERDO" if cd>0
               else f"{ab['emoji']} {ab['name']} · DMG ×{ab['power']:.2f} · RECUERDO")
         rows.insert(pos,[{'text':text,'callback_data':cb}]);pos+=1
@@ -8256,7 +8320,12 @@ def _equipped_gacha_weapon_abilities(user_id, character_id=None):
             WHERE i.user_id=? AND i.character_id=? AND i.equipped=1
               AND x.rarity='mitico' AND x.item_key LIKE 'gacha_weapon_%%_mitico_%%'
             ORDER BY i.id DESC""",(int(user_id),int(character_id))).fetchall(); c.close()
-    return [_gacha_ability_from_equipped_row(r) for r in rows]
+    out=[]; seen=set()
+    for r in rows:
+        ab=_gacha_ability_from_equipped_row(r); k=str(ab.get('key') or '')
+        if not k or k in seen: continue
+        seen.add(k); out.append(ab)
+    return out
 
 def _equipped_gacha_weapon_ability(user_id, character_id=None, ability_key=None):
     abilities=_equipped_gacha_weapon_abilities(user_id,character_id)
@@ -8264,14 +8333,14 @@ def _equipped_gacha_weapon_ability(user_id, character_id=None, ability_key=None)
         return next((a for a in abilities if str(a.get('key'))==str(ability_key)),None)
     return abilities[0] if abilities else None
 
-def _append_gacha_weapon_skill_button(kb,user_id,prefix,context_id=None,special_cd=0):
+def _append_gacha_weapon_skill_button(kb,user_id,prefix,context_id=None,special_cd=0,cd_scope=None):
     abilities=_equipped_gacha_weapon_abilities(user_id)
     if not abilities: return kb
     rows=list((kb or {}).get('inline_keyboard') or [])
     pos=max(0,len(rows)-1)
     for ab in abilities:
-        cd=int(special_cd or 0)
-        cb=(f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}")
+        cd=_equipped_move_cd(cd_scope,context_id,user_id,ab['key']) if cd_scope and context_id is not None else int(special_cd or 0)
+        cb=(f"{prefix}:{ab['key']}" if prefix=="rpg_attack" else (f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}"))
         text=(f"⏳ {ab['name']} ({cd}) · GACHA" if cd>0
               else f"{ab['emoji']} {ab['name']} · DMG ×{ab['power']:.2f} · GACHA")
         rows.insert(pos,[{'text':text,'callback_data':cb}]); pos+=1
@@ -16700,9 +16769,38 @@ def _rpg_enemy_info(enemy_key):
             return enemy
     return None
 
+_RPG_AI_QUOTA_FAST_LOCK = threading.Lock()
+_RPG_AI_QUOTA_EXHAUSTED_DAY = None
+_RPG_AI_QUOTA_WARNED_DAY = None
+
+def _rpg_ai_quota_fast_blocked():
+    """Evita golpear PostgreSQL/Cloudflare repetidamente cuando el cupo diario ya se agotó."""
+    global _RPG_AI_QUOTA_EXHAUSTED_DAY
+    day=time.strftime("%Y-%m-%d", time.gmtime())
+    with _RPG_AI_QUOTA_FAST_LOCK:
+        if _RPG_AI_QUOTA_EXHAUSTED_DAY and _RPG_AI_QUOTA_EXHAUSTED_DAY != day:
+            _RPG_AI_QUOTA_EXHAUSTED_DAY=None
+        return _RPG_AI_QUOTA_EXHAUSTED_DAY == day
+
+def _rpg_ai_mark_quota_exhausted(day):
+    global _RPG_AI_QUOTA_EXHAUSTED_DAY
+    with _RPG_AI_QUOTA_FAST_LOCK:
+        _RPG_AI_QUOTA_EXHAUSTED_DAY=str(day)
+
+def _rpg_ai_log_quota_once(asset_key):
+    global _RPG_AI_QUOTA_WARNED_DAY
+    day=time.strftime("%Y-%m-%d", time.gmtime())
+    with _RPG_AI_QUOTA_FAST_LOCK:
+        first=(_RPG_AI_QUOTA_WARNED_DAY != day)
+        _RPG_AI_QUOTA_WARNED_DAY=day
+    if first:
+        logger.warning("Cupo diario de arte IA agotado; se pausó la autogeneración hasta el siguiente día UTC. Último asset=%s",asset_key)
+
 def _rpg_ai_usage_reserve():
     """Reserva 1 generación del cupo diario. Devuelve (ok, usados, limite, day)."""
     day=time.strftime("%Y-%m-%d", time.gmtime())
+    if _rpg_ai_quota_fast_blocked():
+        return False,RPG_AI_IMAGE_DAILY_LIMIT,RPG_AI_IMAGE_DAILY_LIMIT,day
     now=int(time.time())
     with db_lock:
         c=get_db()
@@ -16710,7 +16808,7 @@ def _rpg_ai_usage_reserve():
             row=c.execute("SELECT generated_count FROM rpg_ai_image_usage WHERE usage_day=? FOR UPDATE",(day,)).fetchone()
             used=int((row or {}).get("generated_count") or 0)
             if used >= RPG_AI_IMAGE_DAILY_LIMIT:
-                c.rollback(); c.close(); return False,used,RPG_AI_IMAGE_DAILY_LIMIT,day
+                c.rollback(); c.close(); _rpg_ai_mark_quota_exhausted(day); return False,used,RPG_AI_IMAGE_DAILY_LIMIT,day
             if row:
                 c.execute("UPDATE rpg_ai_image_usage SET generated_count=?,updated_at=? WHERE usage_day=?",(used+1,now,day))
             else:
@@ -16931,12 +17029,16 @@ def _background_generate_enemy_art(asset_key):
                 except Exception: logger.warning("No pude borrar staging de arte IA %s",canonical)
             logger.info("Arte IA preparado en background | asset=%s | bytes=%s",canonical,len(raw))
     except Exception as e:
-        logger.exception("Falló generación background %s: %s",asset_key,e)
+        if "Límite diario de arte IA alcanzado" in str(e):
+            _rpg_ai_mark_quota_exhausted(time.strftime("%Y-%m-%d", time.gmtime())); _rpg_ai_log_quota_once(asset_key)
+        else:
+            logger.exception("Falló generación background %s: %s",asset_key,e)
     finally:
         with _RPG_AI_IMAGE_LOCKS_GUARD: _RPG_AI_IMAGE_PENDING.discard(canonical or asset_key)
 
 def _queue_enemy_art_generation(asset_key):
     """Idempotente: una sola tarea por monstruo, y solo si aún no hay arte."""
+    if _rpg_ai_quota_fast_blocked(): return False
     asset_key=str(asset_key or "").strip().lower()
     if not asset_key.startswith("enemy:"): return False
     enemy_key=asset_key.split(":",1)[1].split(":",1)[0]; canonical=f"enemy:{enemy_key}"
@@ -16963,11 +17065,15 @@ def _background_generate_universal_art(asset_key):
                 try: delete_message(OWNER_TELEGRAM_ID,mid)
                 except Exception: logger.warning("No pude borrar staging de arte IA %s",canonical)
     except Exception as e:
-        logger.exception("Falló generación background universal %s: %s",canonical,e)
+        if "Límite diario de arte IA alcanzado" in str(e):
+            _rpg_ai_mark_quota_exhausted(time.strftime("%Y-%m-%d", time.gmtime())); _rpg_ai_log_quota_once(canonical)
+        else:
+            logger.exception("Falló generación background universal %s: %s",canonical,e)
     finally:
         with _RPG_AI_IMAGE_LOCKS_GUARD: _RPG_AI_IMAGE_PENDING.discard(canonical)
 
 def _queue_universal_art_generation(asset_key):
+    if _rpg_ai_quota_fast_blocked(): return False
     canonical=str(asset_key or "").strip().lower()
     if not _rpg_ai_asset_info(canonical) or _rpg_asset_get(f"img:{canonical}"): return False
     with _RPG_AI_IMAGE_LOCKS_GUARD:

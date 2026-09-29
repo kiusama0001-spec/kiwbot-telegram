@@ -5444,8 +5444,18 @@ WORLD_NPC_VISUALS={
  'malkor':('lean middle-aged traveling merchant with sharp amber eyes, dark auburn hair, charcoal-and-burgundy coat and relic-filled satchel','cramped night bazaar stall packed with charms and relic crates'),
 }
 
+_npc_memory_db_schema_ready = False
+_npc_memory_db_schema_lock = threading.Lock()
+
 def _ensure_npc_memory_db():
-    c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_memory(user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,affinity BIGINT DEFAULT 0,interactions BIGINT DEFAULT 0,last_action TEXT DEFAULT '',last_seen_at BIGINT DEFAULT 0,memory_text TEXT DEFAULT '',PRIMARY KEY(user_id,npc_key))"""); c.commit(); c.close()
+    global _npc_memory_db_schema_ready
+    if _npc_memory_db_schema_ready:
+        return
+    with _npc_memory_db_schema_lock:
+        if _npc_memory_db_schema_ready:
+            return
+        c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_memory(user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,affinity BIGINT DEFAULT 0,interactions BIGINT DEFAULT 0,last_action TEXT DEFAULT '',last_seen_at BIGINT DEFAULT 0,memory_text TEXT DEFAULT '',PRIMARY KEY(user_id,npc_key))"""); c.commit(); c.close()
+        _npc_memory_db_schema_ready = True
 
 def _npc_remember(user_id,key,action,note=''):
     _ensure_npc_memory_db(); now=int(time.time()); c=get_db()
@@ -8240,22 +8250,32 @@ RPG_BANK_INTEREST_PCT=12
 RPG_PAWN_INTEREST_PCT=8
 
 
+_economy_viva_db_schema_ready = False
+_economy_viva_db_schema_lock = threading.Lock()
+
 def _ensure_economy_viva_db():
-    with db_lock:
-        c=get_db()
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_salvage_selection(
-            user_id BIGINT NOT NULL, inventory_id BIGINT NOT NULL, created_at BIGINT NOT NULL,
-            PRIMARY KEY(user_id,inventory_id))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_bank_loans(
-            id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,principal BIGINT NOT NULL,
-            commission BIGINT NOT NULL,interest BIGINT NOT NULL,total_due BIGINT NOT NULL,
-            paid BIGINT DEFAULT 0,status TEXT DEFAULT 'active',created_at BIGINT NOT NULL,due_at BIGINT NOT NULL,
-            defaulted_at BIGINT DEFAULT 0)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_pawns(
-            id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,inventory_id BIGINT NOT NULL,
-            item_name TEXT NOT NULL,loan_amount BIGINT NOT NULL,redeem_amount BIGINT NOT NULL,
-            status TEXT DEFAULT 'active',created_at BIGINT NOT NULL,due_at BIGINT NOT NULL)""")
-        c.commit(); c.close()
+    global _economy_viva_db_schema_ready
+    if _economy_viva_db_schema_ready:
+        return
+    with _economy_viva_db_schema_lock:
+        if _economy_viva_db_schema_ready:
+            return
+        with db_lock:
+            c=get_db()
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_salvage_selection(
+                user_id BIGINT NOT NULL, inventory_id BIGINT NOT NULL, created_at BIGINT NOT NULL,
+                PRIMARY KEY(user_id,inventory_id))""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_bank_loans(
+                id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,principal BIGINT NOT NULL,
+                commission BIGINT NOT NULL,interest BIGINT NOT NULL,total_due BIGINT NOT NULL,
+                paid BIGINT DEFAULT 0,status TEXT DEFAULT 'active',created_at BIGINT NOT NULL,due_at BIGINT NOT NULL,
+                defaulted_at BIGINT DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_pawns(
+                id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,inventory_id BIGINT NOT NULL,
+                item_name TEXT NOT NULL,loan_amount BIGINT NOT NULL,redeem_amount BIGINT NOT NULL,
+                status TEXT DEFAULT 'active',created_at BIGINT NOT NULL,due_at BIGINT NOT NULL)""")
+            c.commit(); c.close()
+        _economy_viva_db_schema_ready = True
 
 
 def _gear_value(row):
@@ -12175,32 +12195,42 @@ def _rpg_route_key(value):
     k=str(value or '').strip().lower().replace('_','').replace('-','')
     return RPG_CHAT_ROUTE_ALIASES.get(k,k)
 
+_rpg_chat_routes_schema_ready = False
+_rpg_chat_routes_schema_lock = threading.Lock()
+
 def _ensure_rpg_chat_routes():
-    # V2: las rutas pertenecen a un reino/grupo. Dos grupos pueden tener sus
-    # propios chats/topics de carreras, Boss, encuentros, etc. sin mezclarse.
-    with db_lock:
-        c=get_db()
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_chat_routes_v2(
-            realm_id BIGINT NOT NULL, category TEXT NOT NULL, chat_id BIGINT NOT NULL,
-            message_thread_id BIGINT, updated_by BIGINT NOT NULL DEFAULT 0,
-            updated_at BIGINT NOT NULL DEFAULT 0,
-            PRIMARY KEY(realm_id,category)
-        )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_user_realms(
-            user_id BIGINT NOT NULL, realm_id BIGINT NOT NULL, touched_at BIGINT NOT NULL DEFAULT 0,
-            PRIMARY KEY(user_id,realm_id)
-        )""")
-        # Migración no destructiva del sistema global anterior: cada destino
-        # existente pasa a pertenecer al mismo grupo en el que fue configurado.
-        try:
-            old=c.execute("SELECT category,chat_id,message_thread_id,updated_by,updated_at FROM rpg_chat_routes").fetchall()
-            for r in old:
-                c.execute("""INSERT INTO rpg_chat_routes_v2(realm_id,category,chat_id,message_thread_id,updated_by,updated_at)
-                    VALUES(?,?,?,?,?,?) ON CONFLICT(realm_id,category) DO NOTHING""",
-                    (int(r['chat_id']),str(r['category']),int(r['chat_id']),r.get('message_thread_id'),int(r.get('updated_by') or 0),int(r.get('updated_at') or 0)))
-        except Exception:
-            pass
-        c.commit(); c.close()
+    global _rpg_chat_routes_schema_ready
+    if _rpg_chat_routes_schema_ready:
+        return
+    with _rpg_chat_routes_schema_lock:
+        if _rpg_chat_routes_schema_ready:
+            return
+        # V2: las rutas pertenecen a un reino/grupo. Dos grupos pueden tener sus
+        # propios chats/topics de carreras, Boss, encuentros, etc. sin mezclarse.
+        with db_lock:
+            c=get_db()
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_chat_routes_v2(
+                realm_id BIGINT NOT NULL, category TEXT NOT NULL, chat_id BIGINT NOT NULL,
+                message_thread_id BIGINT, updated_by BIGINT NOT NULL DEFAULT 0,
+                updated_at BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(realm_id,category)
+            )""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_user_realms(
+                user_id BIGINT NOT NULL, realm_id BIGINT NOT NULL, touched_at BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY(user_id,realm_id)
+            )""")
+            # Migración no destructiva del sistema global anterior: cada destino
+            # existente pasa a pertenecer al mismo grupo en el que fue configurado.
+            try:
+                old=c.execute("SELECT category,chat_id,message_thread_id,updated_by,updated_at FROM rpg_chat_routes").fetchall()
+                for r in old:
+                    c.execute("""INSERT INTO rpg_chat_routes_v2(realm_id,category,chat_id,message_thread_id,updated_by,updated_at)
+                        VALUES(?,?,?,?,?,?) ON CONFLICT(realm_id,category) DO NOTHING""",
+                        (int(r['chat_id']),str(r['category']),int(r['chat_id']),r.get('message_thread_id'),int(r.get('updated_by') or 0),int(r.get('updated_at') or 0)))
+            except Exception:
+                pass
+            c.commit(); c.close()
+        _rpg_chat_routes_schema_ready = True
 
 def _touch_rpg_realm(user_id,realm_id):
     if not user_id or not realm_id: return
@@ -15163,10 +15193,20 @@ def rpg_story_text():
 
 RECUERDO_THANKS_TEXT=("🎁 PARA KALU Y HEAD\n\nSi llegaron hasta aquí, significa que encontraron algo que dejé escondido especialmente para ustedes.\n\nY fuera de bromas por un momento…\n\nGracias. De verdad.\n\nKiwRPG empezó siendo una de esas ideas mías de ‘voy a hacer una cosita’ y terminó convirtiéndose en horas sin dormir, errores, código roto, cosas que funcionaban y cinco minutos después dejaban de funcionar, ideas nuevas cuando todavía ni terminaba las anteriores… jajaja.\n\nPero entre todo eso hubo algo que hizo que realmente valiera la pena: ustedes estuvieron ahí.\n\nProbándolo, jugando, descubriendo cosas, rompiendo otras sin querer 😂, peleando, consiguiendo objetos, preguntándome qué seguía y emocionándose con este pequeño mundo que estaba construyendo.\n\nPuede parecer una tontería, pero para mí significó muchísimo. Porque una cosa es crear algo… y otra completamente diferente es ver que dos personas que quieres lo disfrutan contigo.\n\nCada vez que los veía jugando pensaba: ‘Bueno… entonces todas estas horas sí valieron la pena.’\n\nNo sé qué vaya a pasar mañana, dentro de unos meses o dentro de unos años. Tampoco sé hasta dónde vaya a llegar este juego. Pero sí sé algo: pase lo que pase, me hicieron muy feliz acompañándome en el comienzo.\n\nCuando algún día mire todo lo que terminó siendo KiwRPG, voy a recordar que ustedes estuvieron cuando todavía estábamos descubriendo todo, cuando explotaban cosas, cuando un botón podía destruir medio juego JAJAJA y cuando cada cosa nueva era una sorpresa.\n\nEsto apenas comienza. Y si algún día este pequeño mundo termina siendo enorme, quiero que quede escrito en algún rincón que Kalu y Head estuvieron aquí desde el principio.\n\nGracias por apoyarme. Gracias por tenerme paciencia. Gracias por jugar. Gracias por emocionarse conmigo. Y, sobre todo, gracias por hacerme sentir que crear todo esto valió la pena.\n\nLos quiero muchísimo, idiotas. ❤️\n\n— Kiu 🦅💛💙")
 
+_recuerdo_authorized_db_schema_ready = False
+_recuerdo_authorized_db_schema_lock = threading.Lock()
+
 def _ensure_recuerdo_authorized_db():
-    with db_lock:
-        c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_recuerdo_authorized(
-            user_id BIGINT PRIMARY KEY, label TEXT NOT NULL DEFAULT '', authorized_at BIGINT NOT NULL)"""); c.commit(); c.close()
+    global _recuerdo_authorized_db_schema_ready
+    if _recuerdo_authorized_db_schema_ready:
+        return
+    with _recuerdo_authorized_db_schema_lock:
+        if _recuerdo_authorized_db_schema_ready:
+            return
+        with db_lock:
+            c=get_db(); c.execute("""CREATE TABLE IF NOT EXISTS rpg_recuerdo_authorized(
+                user_id BIGINT PRIMARY KEY, label TEXT NOT NULL DEFAULT '', authorized_at BIGINT NOT NULL)"""); c.commit(); c.close()
+        _recuerdo_authorized_db_schema_ready = True
 
 def _authorize_recuerdo_user(user_id,label='Head'):
     _ensure_recuerdo_authorized_db()
@@ -15310,28 +15350,43 @@ TAVERN_RUMORS=[
 "Dicen que en Aeternus hasta los rumores tienen dueño.",
 ]
 
+_crime_db_schema_ready = False
+_crime_db_schema_lock = threading.Lock()
+
 def _ensure_crime_db():
-    with db_lock:
-        c=get_db()
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_sessions(user_id BIGINT PRIMARY KEY,chat_id BIGINT NOT NULL,created_at BIGINT NOT NULL)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_cases(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,contractor_id BIGINT NOT NULL,victim_id BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'open',success BIGINT NOT NULL DEFAULT 0,cost BIGINT NOT NULL DEFAULT 10000,created_at BIGINT NOT NULL,ends_at BIGINT NOT NULL,dead_until BIGINT NOT NULL DEFAULT 0,next_clue BIGINT NOT NULL DEFAULT 0,clue_no BIGINT NOT NULL DEFAULT 1,resolved_by BIGINT NOT NULL DEFAULT 0)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_accusations(case_id BIGINT NOT NULL,user_id BIGINT NOT NULL,accused_id BIGINT NOT NULL,correct BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL,PRIMARY KEY(case_id,user_id))""")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_crime_open ON rpg_crime_cases(chat_id,status,ends_at)")
-        c.execute("ALTER TABLE rpg_crime_cases ADD COLUMN IF NOT EXISTS culprit_dead_until BIGINT NOT NULL DEFAULT 0")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_horse_races(
-            id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, creator_id BIGINT NOT NULL,
-            wager BIGINT NOT NULL, goal BIGINT NOT NULL DEFAULT 30, status TEXT NOT NULL DEFAULT 'open',
-            turn_user_id BIGINT NOT NULL DEFAULT 0, rolling_user_id BIGINT NOT NULL DEFAULT 0,
-            winner_id BIGINT NOT NULL DEFAULT 0, message_id BIGINT NOT NULL DEFAULT 0,
-            created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
-        )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_horse_race_players(
-            race_id BIGINT NOT NULL, user_id BIGINT NOT NULL, position BIGINT NOT NULL DEFAULT 0,
-            join_order BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active', paid BIGINT NOT NULL DEFAULT 0,
-            joined_at BIGINT NOT NULL, PRIMARY KEY(race_id,user_id)
-        )""")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_horse_race_chat_status ON rpg_horse_races(chat_id,status,created_at DESC)")
-        c.commit(); c.close()
+    global _crime_db_schema_ready
+    if _crime_db_schema_ready:
+        return
+    with _crime_db_schema_lock:
+        if _crime_db_schema_ready:
+            return
+        with db_lock:
+            c=get_db()
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_sessions(user_id BIGINT PRIMARY KEY,chat_id BIGINT NOT NULL,created_at BIGINT NOT NULL)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_cases(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,contractor_id BIGINT NOT NULL,victim_id BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'open',success BIGINT NOT NULL DEFAULT 0,cost BIGINT NOT NULL DEFAULT 10000,created_at BIGINT NOT NULL,ends_at BIGINT NOT NULL,dead_until BIGINT NOT NULL DEFAULT 0,next_clue BIGINT NOT NULL DEFAULT 0,clue_no BIGINT NOT NULL DEFAULT 1,resolved_by BIGINT NOT NULL DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_crime_accusations(case_id BIGINT NOT NULL,user_id BIGINT NOT NULL,accused_id BIGINT NOT NULL,correct BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL,PRIMARY KEY(case_id,user_id))""")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_crime_open ON rpg_crime_cases(chat_id,status,ends_at)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_crime_victim_state ON rpg_crime_cases(victim_id,status,dead_until DESC)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_crime_clues_due ON rpg_crime_cases(status,next_clue) WHERE status='open'")
+            c.execute("ALTER TABLE rpg_crime_cases ADD COLUMN IF NOT EXISTS culprit_dead_until BIGINT NOT NULL DEFAULT 0")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_crime_contractor_state ON rpg_crime_cases(contractor_id,status,culprit_dead_until DESC)")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_horse_races(
+                id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, creator_id BIGINT NOT NULL,
+                wager BIGINT NOT NULL, goal BIGINT NOT NULL DEFAULT 20, status TEXT NOT NULL DEFAULT 'open',
+                turn_user_id BIGINT NOT NULL DEFAULT 0, rolling_user_id BIGINT NOT NULL DEFAULT 0,
+                winner_id BIGINT NOT NULL DEFAULT 0, message_id BIGINT NOT NULL DEFAULT 0,
+                created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+            )""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_horse_race_players(
+                race_id BIGINT NOT NULL, user_id BIGINT NOT NULL, position BIGINT NOT NULL DEFAULT 0,
+                join_order BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active', paid BIGINT NOT NULL DEFAULT 0,
+                joined_at BIGINT NOT NULL, PRIMARY KEY(race_id,user_id)
+            )""")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_horse_race_chat_status ON rpg_horse_races(chat_id,status,created_at DESC)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_horse_players_race_status ON rpg_horse_race_players(race_id,status,join_order)")
+            c.execute("ALTER TABLE rpg_horse_races ALTER COLUMN goal SET DEFAULT 20")
+            c.commit(); c.close()
+        _crime_db_schema_ready = True
 
 def _crime_rep_add(uid,delta):
     _ensure_world_memory_db(); now=int(time.time())
@@ -15798,22 +15853,32 @@ RPG_ENEMY_THREAT_HINTS={
  "quimera":42,"wyvern":48,"paladin_desterrado":50
 }
 
+_world_memory_db_schema_ready = False
+_world_memory_db_schema_lock = threading.Lock()
+
 def _ensure_world_memory_db():
-    with db_lock:
-        c=get_db()
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_reputation(user_id BIGINT PRIMARY KEY,score BIGINT DEFAULT 0,merciful BIGINT DEFAULT 0,cruel BIGINT DEFAULT 0,greedy BIGINT DEFAULT 0,protector BIGINT DEFAULT 0,honorable BIGINT DEFAULT 0,opportunist BIGINT DEFAULT 0,updated_at BIGINT DEFAULT 0)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_decision_log(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,event_key TEXT NOT NULL,event_type TEXT DEFAULT '',description TEXT DEFAULT '',rep_delta BIGINT DEFAULT 0,npc_key TEXT DEFAULT '',created_at BIGINT NOT NULL,UNIQUE(user_id,event_key))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_events(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,event_key TEXT NOT NULL,description TEXT DEFAULT '',affinity_delta BIGINT DEFAULT 0,created_at BIGINT NOT NULL,UNIQUE(user_id,npc_key,event_key))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_story_progress(user_id BIGINT PRIMARY KEY,chapter BIGINT DEFAULT 1,scene BIGINT DEFAULT 1,path TEXT DEFAULT 'wanderer',updated_at BIGINT DEFAULT 0)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_letters(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',subject TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'unread',created_at BIGINT NOT NULL)""")
-        c.execute("ALTER TABLE rpg_letters ADD COLUMN IF NOT EXISTS event_key TEXT DEFAULT ''")
-        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rpg_letters_user_event ON rpg_letters(user_id,event_key) WHERE event_key<>''")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_exclusive_missions(id BIGSERIAL PRIMARY KEY,target_user_id BIGINT NOT NULL,chat_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',title TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'open',reward BIGINT DEFAULT 0,rep_delta BIGINT DEFAULT 0,event_type TEXT DEFAULT 'pve_win',goal BIGINT DEFAULT 3,progress BIGINT DEFAULT 0,created_at BIGINT NOT NULL,completed_at BIGINT DEFAULT 0)""")
-        c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS event_type TEXT DEFAULT 'pve_win'")
-        c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS goal BIGINT DEFAULT 3")
-        c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS progress BIGINT DEFAULT 0")
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_marriage_shared_inventory(id BIGSERIAL PRIMARY KEY,marriage_id BIGINT NOT NULL,item_key TEXT NOT NULL,quantity BIGINT DEFAULT 1,serial_number BIGINT DEFAULT 0,deposited_by BIGINT NOT NULL,original_inventory_id BIGINT DEFAULT 0,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL)""")
-        c.commit(); c.close()
+    global _world_memory_db_schema_ready
+    if _world_memory_db_schema_ready:
+        return
+    with _world_memory_db_schema_lock:
+        if _world_memory_db_schema_ready:
+            return
+        with db_lock:
+            c=get_db()
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_reputation(user_id BIGINT PRIMARY KEY,score BIGINT DEFAULT 0,merciful BIGINT DEFAULT 0,cruel BIGINT DEFAULT 0,greedy BIGINT DEFAULT 0,protector BIGINT DEFAULT 0,honorable BIGINT DEFAULT 0,opportunist BIGINT DEFAULT 0,updated_at BIGINT DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_decision_log(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,event_key TEXT NOT NULL,event_type TEXT DEFAULT '',description TEXT DEFAULT '',rep_delta BIGINT DEFAULT 0,npc_key TEXT DEFAULT '',created_at BIGINT NOT NULL,UNIQUE(user_id,event_key))""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_events(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,event_key TEXT NOT NULL,description TEXT DEFAULT '',affinity_delta BIGINT DEFAULT 0,created_at BIGINT NOT NULL,UNIQUE(user_id,npc_key,event_key))""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_story_progress(user_id BIGINT PRIMARY KEY,chapter BIGINT DEFAULT 1,scene BIGINT DEFAULT 1,path TEXT DEFAULT 'wanderer',updated_at BIGINT DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_letters(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',subject TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'unread',created_at BIGINT NOT NULL)""")
+            c.execute("ALTER TABLE rpg_letters ADD COLUMN IF NOT EXISTS event_key TEXT DEFAULT ''")
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rpg_letters_user_event ON rpg_letters(user_id,event_key) WHERE event_key<>''")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_exclusive_missions(id BIGSERIAL PRIMARY KEY,target_user_id BIGINT NOT NULL,chat_id BIGINT NOT NULL,npc_key TEXT DEFAULT '',title TEXT NOT NULL,body TEXT NOT NULL,status TEXT DEFAULT 'open',reward BIGINT DEFAULT 0,rep_delta BIGINT DEFAULT 0,event_type TEXT DEFAULT 'pve_win',goal BIGINT DEFAULT 3,progress BIGINT DEFAULT 0,created_at BIGINT NOT NULL,completed_at BIGINT DEFAULT 0)""")
+            c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS event_type TEXT DEFAULT 'pve_win'")
+            c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS goal BIGINT DEFAULT 3")
+            c.execute("ALTER TABLE rpg_exclusive_missions ADD COLUMN IF NOT EXISTS progress BIGINT DEFAULT 0")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_marriage_shared_inventory(id BIGSERIAL PRIMARY KEY,marriage_id BIGINT NOT NULL,item_key TEXT NOT NULL,quantity BIGINT DEFAULT 1,serial_number BIGINT DEFAULT 0,deposited_by BIGINT NOT NULL,original_inventory_id BIGINT DEFAULT 0,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL)""")
+            c.commit(); c.close()
+        _world_memory_db_schema_ready = True
 
 def reputation_tier(score):
     score=int(score or 0)
@@ -19266,6 +19331,25 @@ def process_update(
         except Exception:
             logger.exception("No pude aplicar el silencio temporal del muerto")
 
+        # =================================================
+        # COMANDOS — FAST PATH
+        # =================================================
+        # Los comandos no necesitan pasar primero por observadores de texto, Crónicas,
+        # misiones rápidas ni estados conversacionales. Esos subsistemas pueden consultar
+        # PostgreSQL y antes añadían latencia a /carrera, /encuentro, /personaje, etc.
+        # La comprobación de muerte criminal permanece arriba para conservar exactamente
+        # el castigo: un jugador muerto tampoco puede saltárselo usando comandos.
+        if text.startswith("/"):
+            handled = process_command(message, text)
+            if handled:
+                return
+
+            # Un comando desconocido nunca debe caer en la IA conversacional.
+            # Esto evita que Groq invente respuestas para comandos RPG mal escritos
+            # (por ejemplo, /generarimagen) o comandos destinados a otros bots.
+            logger.info("Comando no manejado ignorado: %s | chat=%s | user=%s", command_name(text), chat_id, user_id)
+            return
+
         if handle_reset_password_message(message, text):
             return
         if handle_character_name_message(message, text):
@@ -19287,27 +19371,6 @@ def process_update(
         # Un dado solo afecta al RPG cuando existe un encuentro pendiente
         # para ESTE jugador en ESTE chat. Un número escrito jamás sustituye al dado.
         if message.get("dice") and handle_rpg_dice(message):
-            return
-
-
-        # =================================================
-        # COMANDOS
-        # =================================================
-
-        if text.startswith("/"):
-
-            handled = process_command(
-                message,
-                text
-            )
-
-            if handled:
-                return
-
-            # Un comando desconocido nunca debe caer en la IA conversacional.
-            # Esto evita que Groq invente respuestas para comandos RPG mal escritos
-            # (por ejemplo, /generarimagen) o comandos destinados a otros bots.
-            logger.info("Comando no manejado ignorado: %s | chat=%s | user=%s", command_name(text), chat_id, user_id)
             return
 
 

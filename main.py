@@ -6325,6 +6325,8 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
         _c=get_db(); _busy=_c.execute("SELECT 1 FROM rpg_battles WHERE chat_id=? AND user_id=? LIMIT 1",(int(chat_id),int(user_id))).fetchone(); _c.close()
     if _busy:
         return False, "⚔️ Ya tienes un combate activo aquí. Termínalo, usa /huir o /resetcombate antes de iniciar otro."
+    # Un encuentro nuevo jamás hereda cooldowns de un encuentro anterior del mismo chat.
+    _clear_equipped_move_cds("pve",chat_id,user_id)
     char = get_active_character(user_id)
     if not char:
         return False, "Necesitas un personaje activo. Usa /crear_personaje."
@@ -6720,12 +6722,13 @@ def rpg_defend_action(chat_id,user_id):
                 lost,_=_rpg_apply_defeat(conn,cdict)
                 conn.execute("DELETE FROM rpg_battles WHERE chat_id=? AND user_id=?",(int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
-                _tick_equipped_move_cds("pve",chat_id,user_id,ability_key,int(ability.get("cooldown") or EQUIPPED_MOVE_COOLDOWN))
+                _tick_equipped_move_cds("pve",chat_id,user_id)
                 send_message(chat_id,f"🛡️ Te defiendes, pero recibes {damage} de daño.\n💀 Has sido derrotado.\n📉 -{lost} EXP\n⏳ Recuperación: 3 minutos.")
             else:
                 conn.execute("UPDATE characters SET hp=?,updated_at=? WHERE id=?",(hp,int(time.time()),int(char["id"])))
                 conn.execute("UPDATE rpg_battles SET ultimate_cd=?,special_cd=?,hidden_blade_cd=?,updated_at=? WHERE chat_id=? AND user_id=?",(cd,special_cd,hidden_cd,int(time.time()),int(chat_id),int(user_id)))
                 conn.commit(); conn.close()
+                _tick_equipped_move_cds("pve",chat_id,user_id)
                 send_message(chat_id,f"🛡️ DEFENSA\n\nEl enemigo tira 🎲 {enemy_roll}.\nRecibes {damage} de daño (50% reducido).\n❤️ {char['name']}: {hp}/{eff['max_hp']}",
                              reply_markup=rpg_battle_keyboard(char["class_name"],cd,special_cd,user_id,hidden_cd,chat_id))
             return True
@@ -8250,6 +8253,17 @@ def _equipped_move_cd_map(scope,context_id,user_id):
             (str(scope),int(context_id),int(user_id))).fetchall(); c.close()
     return {str(r['ability_key']):max(0,int(r['remaining'] or 0)) for r in rows}
 
+def _clear_equipped_move_cds(scope,context_id,user_id=None):
+    """Limpia cooldowns temporales al iniciar/reiniciar un combate o tanda."""
+    _ensure_equipped_move_cd_table()
+    with db_lock:
+        c=get_db()
+        if user_id is None:
+            c.execute("DELETE FROM rpg_equipped_move_cooldowns WHERE scope=? AND context_id=?",(str(scope),int(context_id)))
+        else:
+            c.execute("DELETE FROM rpg_equipped_move_cooldowns WHERE scope=? AND context_id=? AND user_id=?",(str(scope),int(context_id),int(user_id)))
+        c.commit(); c.close()
+
 def _tick_equipped_move_cds(scope,context_id,user_id,used_key=None,cooldown=EQUIPPED_MOVE_COOLDOWN):
     """Avanza un turno: baja SOLO cooldowns de equipo activos y activa el usado."""
     _ensure_equipped_move_cd_table(); now=int(time.time())
@@ -9542,8 +9556,8 @@ def _omega_keyboard(event,user_id):
         [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
     ]}
     kb=_append_hidden_blade_button(kb,user_id,"omega_atk",hc,event['id'])
-    kb=_append_gacha_weapon_skill_button(kb,user_id,"omega_atk",event['id'],special_cd=sc)
-    return _append_recuerdo_skill_button(kb,user_id,"omega_atk",event['id'],special_cd=sc)
+    kb=_append_gacha_weapon_skill_button(kb,user_id,"omega_atk",event['id'],special_cd=sc,cd_scope="omega")
+    return _append_recuerdo_skill_button(kb,user_id,"omega_atk",event['id'],special_cd=sc,cd_scope="omega")
 
 def spawn_omega(chat_id):
     old=_omega_active(chat_id)
@@ -9605,11 +9619,16 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
                          (now,pmax0,pmax0,int(event_id),int(user_id)))
             conn.execute("UPDATE rpg_omega_scores SET runs=runs+1 WHERE event_id=? AND user_id=?",(int(event_id),int(user_id)))
             conn.commit(); conn.close()
+        _clear_equipped_move_cds("omega",event_id,user_id)
         run={'turns_used':0,'special_cd':0,'ultimate_cd':0,'hidden_blade_cd':0,'run_started_at':now,'hp':pmax0,'max_hp':pmax0}; turns=0
     ab=_rpg_get_ability_for_user(user_id,char['class_name'],ability_key)
     if not ab: return False,"Movimiento no válido o técnica no desbloqueada."
     if ability_key=='hidden_blade' and int(run.get('hidden_blade_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(run.get('hidden_blade_cd') or 0)} turnos."
-    if ability_key!='hidden_blade' and ab.get('special') and int(run['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['special_cd']} turnos."
+    equipped_move=str(ability_key).startswith(('gacha_skill_','recuerdo_skill_'))
+    if equipped_move:
+        ecd=_equipped_move_cd('omega',event_id,user_id,ability_key)
+        if ecd>0: return False,f"⏳ {ab['name']} estará disponible en {ecd} turnos."
+    if ability_key!='hidden_blade' and not equipped_move and ab.get('special') and int(run['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['special_cd']} turnos."
     if ab.get('ultimate') and int(run['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {run['ultimate_cd']} turnos."
     dr=send_dice(chat_id,'🎲')
     dice_mid=_telegram_message_id(dr)
@@ -9625,7 +9644,7 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         if roll>=5 and ab.get('high_roll_bonus'): dmg=max(1,int(round(dmg*(1+float(ab['high_roll_bonus'])))))
     sc=max(0,int(run['special_cd'])-1); uc=max(0,int(run['ultimate_cd'])-1); hc=max(0,int(run.get('hidden_blade_cd') or 0)-1)
     if ability_key=='hidden_blade': hc=int(ab.get('cooldown',3))
-    elif ab.get('special'): sc=int(ab.get('cooldown',2))
+    elif not equipped_move and ab.get('special'): sc=int(ab.get('cooldown',2))
     if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
     new_turns=turns+1
     own_hp=int(run.get('hp') or run.get('max_hp') or _boss_stats_for(user_id,char)['max_hp'])
@@ -9656,6 +9675,7 @@ def omega_attack(chat_id,user_id,event_id,ability_key):
         conn.execute("""UPDATE rpg_omega_scores SET total_damage=total_damage+?,total_turns=total_turns+1,last_attack_at=?
                         WHERE event_id=? AND user_id=?""",(dmg,now,int(event_id),int(user_id)))
         conn.commit(); conn.close()
+    _tick_equipped_move_cds('omega',event_id,user_id,ability_key if equipped_move else None,int(ab.get('cooldown') or EQUIPPED_MOVE_COOLDOWN))
     mission_event(user_id,"omega_damage",dmg)
     mission_line=_selected_mission_progress(user_id,"omega_damage")
     crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''
@@ -12842,6 +12862,7 @@ def dungeon_keyboard(dungeon,user_id):
     levels={str(r['technique_key']):max(1,min(RPG_TECHNIQUE_MAX_LEVEL,int(r['level']))) for r in level_rows}
     abs_=rpg_abilities_for(char['class_name']); rows=[]
     cds={'special':int(m.get('special_cd') or 0),'ultimate':int(m.get('ultimate_cd') or 0),'hidden':int(m.get('hidden_cd') or 0)}
+    extra_cds=_equipped_move_cd_map('dungeon',did,uid)
     def b(a):
         cd=cds['ultimate'] if a.get('ultimate') else cds['special'] if a.get('special') else 0
         lvl=levels.get(str(a['key']),1); power=float(a['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
@@ -12852,7 +12873,7 @@ def dungeon_keyboard(dungeon,user_id):
         rows.append([{"text":f"⏳ Hidden Blade ({hcd})" if hcd>0 else f"🗡️ Hidden Blade · ×{power:.2f}","callback_data":f"dungeon_atk:{did}:hidden_blade" if hcd<=0 else f"dungeon_wait:{did}"}])
     gacha=[_gacha_ability_from_equipped_row(r) for r in gear_rows if str(r.get('rarity'))=='mitico']
     for wab in gacha:
-        wcd=cds['special']
+        wcd=int(extra_cds.get(str(wab['key']),0))
         rows.append([{"text":f"⏳ {wab['name']} ({wcd}) · GACHA" if wcd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA",
                      "callback_data":f"dungeon_atk:{did}:{wab['key']}" if wcd<=0 else f"dungeon_wait:{did}"}])
     recuerdos=[]
@@ -12862,7 +12883,7 @@ def dungeon_keyboard(dungeon,user_id):
         if base:
             rab=dict(base); rab['weapon_name']=str(r.get('name') or ''); recuerdos.append(rab)
     for rab in recuerdos:
-        rcd=cds['special'] if rab.get('special') else 0
+        rcd=int(extra_cds.get(str(rab['key']),0))
         rows.append([{'text':f"⏳ {rab['name']} ({rcd})" if rcd>0 else f"{rab['emoji']} {rab['name']} · RECUERDO · ×{rab['power']:.2f}",
                       'callback_data':f"dungeon_atk:{did}:{rab['key']}" if rcd<=0 else f"dungeon_wait:{did}"}])
     rows.append([{"text":"🛡️ Defender","callback_data":f"dungeon_def:{did}"},{"text":"🔄 Actualizar","callback_data":f"dungeon_refresh:{did}"}])
@@ -13018,7 +13039,11 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
         ab=_rpg_get_ability_for_user(uid,char['class_name'],ability_key)
         if not ab: return False,"Movimiento no válido."
         if ability_key=='hidden_blade' and int(m.get('hidden_cd') or 0)>0: return False,f"⏳ Hidden Blade estará disponible en {int(m['hidden_cd'])} turnos."
-        if ability_key!='hidden_blade' and ab.get('special') and int(m.get('special_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(m['special_cd'])} turnos."
+        equipped_move=str(ability_key).startswith(('gacha_skill_','recuerdo_skill_'))
+        if equipped_move:
+            ecd=_equipped_move_cd('dungeon',did,uid,ability_key)
+            if ecd>0: return False,f"⏳ {ab['name']} estará disponible en {ecd} turnos."
+        if ability_key!='hidden_blade' and not equipped_move and ab.get('special') and int(m.get('special_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(m['special_cd'])} turnos."
         if ab.get('ultimate') and int(m.get('ultimate_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(m['ultimate_cd'])} turnos."
 
     claimed,why=_dungeon_claim_turn_for_action(chat_id,did,uid)
@@ -13054,6 +13079,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
                 nxt=_dungeon_next_turn(live,uid) if live else 0
                 conn.execute("UPDATE rpg_dungeons SET turn_user_id=?,turn_started_at=? WHERE id=?",(nxt,now if nxt else 0,did))
                 conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
+                _tick_equipped_move_cds('dungeon',did,uid)
                 return True,f"🛡️ {char['name']} se defiende y reduce el golpe enemigo a {edmg} de daño.\n\n"+dungeon_card(dict(d2))
 
             enemy_def=int(d.get('enemy_def') or 0); damage=0
@@ -13062,7 +13088,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
                 damage=max(1,int(round(raw*RPG_PVE_PLAYER_DAMAGE_MULT)))
             ehp=max(0,int(d['enemy_hp'])-damage)
             if ability_key=='hidden_blade': nhc=int(ab.get('cooldown',3))
-            elif ab.get('special'): nsc=int(ab.get('cooldown',2))
+            elif not equipped_move and ab.get('special'): nsc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): nuc=int(ab.get('cooldown',4))
 
             # El enemigo responde únicamente si sobrevivió al golpe.
@@ -13076,6 +13102,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
                 nxt=_dungeon_next_turn(live,uid) if live else 0
                 conn.execute("UPDATE rpg_dungeons SET enemy_hp=?,turn_user_id=?,turn_started_at=? WHERE id=?",(ehp,nxt,now if nxt else 0,did))
                 conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
+                _tick_equipped_move_cds('dungeon',did,uid,ability_key if equipped_move else None,int(ab.get('cooldown') or EQUIPPED_MOVE_COOLDOWN))
                 if not nxt: return False,"💀 Todo el grupo ha caído. La mazmorra queda sin aventureros capaces de actuar."
                 crit=' 💥 CRÍTICO' if int(roll)==6 else ''; miss=' — fallo total' if int(roll)==1 else ''
                 return True,f"🎲 {roll} · {ab['emoji']} {char['name']} usa {ab['name']}{crit}{miss}\n⚔️ {damage} de daño.\n💥 Recibes {edmg} de daño.\n\n"+dungeon_card(dict(d2))
@@ -13089,6 +13116,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
                 _dungeon_spawn_shared_enemy(conn,d,nr)
                 conn.execute("UPDATE rpg_dungeon_runs SET room=?,updated_at=? WHERE dungeon_id=? AND completed=0",(nr,now,did))
                 conn.commit(); d2=conn.execute("SELECT * FROM rpg_dungeons WHERE id=?",(did,)).fetchone(); conn.close()
+                _tick_equipped_move_cds('dungeon',did,uid,ability_key if equipped_move else None,int(ab.get('cooldown') or EQUIPPED_MOVE_COOLDOWN))
                 return True,f"🎲 {roll} · {ab['emoji']} {char['name']} remata al enemigo con {damage} de daño.\n🚪 ¡Sala {room} superada por todo el grupo!\n\n"+dungeon_card(dict(d2))
 
             # Final: marca completado ANTES de repartir para impedir doble cobro.
@@ -13097,6 +13125,7 @@ def _dungeon_action_impl(chat_id,user_id,dungeon_id,ability_key=None,defend=Fals
             conn.execute("UPDATE rpg_dungeon_party_members SET completed=1,room_cleared=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,did))
             conn.execute("UPDATE rpg_dungeon_runs SET completed=1,room=?,updated_at=? WHERE dungeon_id=?",(RPG_DUNGEON_ROOMS,now,did))
             conn.commit(); conn.close()
+            _clear_equipped_move_cds('dungeon',did)
         except Exception:
             conn.rollback(); conn.close(); raise
 

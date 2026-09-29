@@ -2647,6 +2647,31 @@ def send_private_message(user_id, text, reply_markup=None):
         set_current_message_thread_id(old_thread)
 
 
+def _crime_private_or_start(query, text, reply_markup=None):
+    """DM criminal seguro: si Telegram impide iniciar privado, explica el requisito en el propio botón."""
+    uid=int((query.get("from") or {}).get("id") or 0)
+    result=send_private_message(uid,text,reply_markup=reply_markup)
+    if isinstance(result,dict) and result.get("ok") is True:
+        cbid=query.get("id")
+        if cbid:
+            try: telegram("answerCallbackQuery",{"callback_query_id":cbid})
+            except Exception: pass
+        return True
+    desc=str((result or {}).get("description") or "") if isinstance(result,dict) else ""
+    cbid=query.get("id")
+    if cbid:
+        try:
+            telegram("answerCallbackQuery",{
+                "callback_query_id":cbid,
+                "text":"🔐 Primero abre el privado de KiwBot, pulsa Iniciar / Start y después vuelve a tocar este botón.",
+                "show_alert":True
+            })
+        except Exception: pass
+    if "can't initiate conversation" not in desc.lower():
+        logger.warning("No pude abrir flujo privado de crimen para user=%s: %s",uid,desc or result)
+    return False
+
+
 _COMBAT_DICE = {}
 _COMBAT_DICE_LOCK = threading.Lock()
 _DICE_CLEANUP_EXECUTOR = ThreadPoolExecutor(max_workers=2)
@@ -6424,6 +6449,10 @@ def send_one_winged_angel_finisher(chat_id):
 
 
 def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
+    deadmsg=_rpg_global_defeat_message(user_id)
+    if deadmsg:
+        send_message(chat_id,deadmsg+"\nNo puedes atacar criaturas mientras estás muerto. 😂")
+        return True
     with db_lock:
         conn=get_db()
         battle=conn.execute("SELECT * FROM rpg_battles WHERE chat_id=? AND user_id=? FOR UPDATE",
@@ -6656,6 +6685,10 @@ def resolve_rpg_action(chat_id, user_id, ability_key, callback_message_id=None):
 
 
 def rpg_defend_action(chat_id,user_id):
+    deadmsg=_rpg_global_defeat_message(user_id)
+    if deadmsg:
+        send_message(chat_id,deadmsg+"\nNo puedes continuar un combate mientras estás muerto. 😂")
+        return True
     with db_lock:
         conn=get_db()
         try:
@@ -9817,6 +9850,7 @@ def _boss_keyboard(b,user_id):
     return kb
 
 def spawn_boss(chat_id,key=None):
+    chat_id=_rpg_route_chat("boss",chat_id)
     if _boss_active(chat_id): return False,"Ya hay un Boss activo en este chat."
     if not key: key=random.choice([k for k in RPG_BOSSES if k != "will_trial"])
     key=str(key).lower().strip(); cfg=RPG_BOSSES.get(key)
@@ -10564,6 +10598,7 @@ def event_player_row(chat_id,event_key,user_id,lock=False,conn=None):
     return r
 
 def event_boss_card(chat_id,user_id):
+    chat_id=_rpg_route_chat("worldboss",chat_id)
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st)
     if not st or not cfg:return "📅 No hay temporada programada para esta fecha.",None
     if st.get('status')!='active': return "🌙 Ese evento ya terminó. El World Boss ya no puede ser atacado.",None
@@ -10577,6 +10612,7 @@ def event_boss_card(chat_id,user_id):
     return txt,kb
 
 def event_boss_combat_panel(chat_id,user_id):
+    chat_id=_rpg_route_chat("worldboss",chat_id)
     """Panel de entrada al World Boss del evento; no altera HP hasta pulsar GOLPEAR."""
     deadmsg=_rpg_global_defeat_message(user_id)
     if deadmsg: return deadmsg+"\nNo puedes entrar al World Boss estando muerto. 😂",None
@@ -10610,6 +10646,7 @@ def event_boss_combat_panel(chat_id,user_id):
     return txt,kb
 
 def event_boss_attack(chat_id,user_id):
+    chat_id=_rpg_route_chat("worldboss",chat_id)
     deadmsg=_rpg_global_defeat_message(user_id)
     if deadmsg: return False,deadmsg+"\nNo puedes golpear al World Boss estando muerto. 😂"
     st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); char=get_active_character(user_id)
@@ -10987,6 +11024,7 @@ def merchant_confirm_text(user_id, offer_id):
     return text,{"inline_keyboard":[[{"text":f"✅ Comprar · {int(o['price']):,} KW","callback_data":f"merchant_buy:{int(o['id'])}"},{"text":"❌ Cancelar","callback_data":f"merchant_back:{int(o['merchant_id'])}"}]]}
 
 def spawn_merchant(chatrow, now=None, forced=False):
+    chatrow=_rpg_routed_chatrow(chatrow,"mercader")
     now=int(now or time.time()); chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
     with db_lock:
         conn=get_db()
@@ -12023,6 +12061,7 @@ def handle_quick_mission_text(message,text):
     return True
 
 def spawn_quick_mission(chatrow,now=None,forced=False,forced_key=None):
+    chatrow=_rpg_routed_chatrow(chatrow,"misiones")
     now=int(now or time.time()); chat_id=int(chatrow['chat_id']); topic=chatrow.get('message_thread_id')
     with db_lock:
         conn=get_db()
@@ -12108,6 +12147,95 @@ RPG_AUTO_STORIES = [
     "⚔️ Los exploradores encontraron un monstruo antes de llegar a la puerta.",
 ]
 
+RPG_CHAT_ROUTE_CATEGORIES = {
+    "rpg": "RPG general + rumores/asesinatos",
+    "carreras": "Carreras de caballos",
+    "boss": "Boss normal",
+    "worldboss": "World Boss y eventos",
+    "mazmorras": "Mazmorras",
+    "encuentros": "Encuentros del mundo",
+    "misiones": "Misiones rápidas",
+    "mercader": "Mercader/Malkor",
+    "pvp": "PvP y duelos",
+    "taberna": "Taberna",
+}
+RPG_CHAT_ROUTE_ALIASES = {
+    "general":"rpg","rumores":"rpg","asesinatos":"rpg","asesinato":"rpg",
+    "carrera":"carreras","caballos":"carreras","jockey":"carreras",
+    "bosses":"boss","jefe":"boss","jefes":"boss",
+    "evento":"worldboss","eventos":"worldboss","bossevento":"worldboss","world":"worldboss",
+    "mazmorra":"mazmorras","dungeon":"mazmorras","dungeons":"mazmorras",
+    "encuentro":"encuentros","mundo":"encuentros","mundovivo":"encuentros",
+    "mision":"misiones","misionrapida":"misiones","minijuego":"misiones",
+    "malkor":"mercader","merchant":"mercader","tiendaespecial":"mercader",
+    "duelo":"pvp","duelos":"pvp","tavern":"taberna",
+}
+
+def _rpg_route_key(value):
+    k=str(value or '').strip().lower().replace('_','').replace('-','')
+    return RPG_CHAT_ROUTE_ALIASES.get(k,k)
+
+def _ensure_rpg_chat_routes():
+    with db_lock:
+        c=get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_chat_routes(
+            category TEXT PRIMARY KEY, chat_id BIGINT NOT NULL,
+            message_thread_id BIGINT, updated_by BIGINT NOT NULL DEFAULT 0,
+            updated_at BIGINT NOT NULL DEFAULT 0
+        )""")
+        c.commit(); c.close()
+
+def set_rpg_chat_route(category,chat_id,message_thread_id=None,updated_by=0):
+    category=_rpg_route_key(category)
+    if category not in RPG_CHAT_ROUTE_CATEGORIES: return False
+    _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db(); c.execute("""INSERT INTO rpg_chat_routes(category,chat_id,message_thread_id,updated_by,updated_at)
+          VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET chat_id=EXCLUDED.chat_id,
+          message_thread_id=EXCLUDED.message_thread_id,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at""",
+          (category,int(chat_id),int(message_thread_id) if message_thread_id is not None else None,int(updated_by or 0),int(time.time())))
+        c.commit(); c.close()
+    return True
+
+def delete_rpg_chat_route(category):
+    category=_rpg_route_key(category); _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db(); cur=c.execute("DELETE FROM rpg_chat_routes WHERE category=?",(category,)); changed=int(cur.rowcount or 0); c.commit(); c.close()
+    return changed>0
+
+def get_rpg_chat_route(category,fallback_chat_id=None,fallback_thread_id=None):
+    category=_rpg_route_key(category); _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT chat_id,message_thread_id FROM rpg_chat_routes WHERE category=?",(category,)).fetchone(); c.close()
+    if row:
+        return int(row['chat_id']), (int(row['message_thread_id']) if row.get('message_thread_id') is not None else None)
+    return (int(fallback_chat_id) if fallback_chat_id is not None else 0,
+            int(fallback_thread_id) if fallback_thread_id is not None else None)
+
+def _rpg_route_chat(category,fallback_chat_id):
+    return get_rpg_chat_route(category,fallback_chat_id,get_current_message_thread_id())[0]
+
+def _rpg_routed_chatrow(chatrow,category):
+    rr=dict(chatrow or {})
+    cid,tid=get_rpg_chat_route(category,rr.get('chat_id'),rr.get('message_thread_id'))
+    rr['chat_id']=cid; rr['message_thread_id']=tid
+    return rr
+
+def rpg_chat_routes_text():
+    _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT category,chat_id,message_thread_id FROM rpg_chat_routes").fetchall(); c.close()
+    saved={str(r['category']):r for r in rows}
+    lines=["📍 CHATS OFICIALES DEL RPG", "", "Usa /setchat tipo en el chat/topic que quieras asignar."]
+    for key,label in RPG_CHAT_ROUTE_CATEGORIES.items():
+        r=saved.get(key)
+        if r:
+            topic=f" · topic {int(r['message_thread_id'])}" if r.get('message_thread_id') is not None else ""
+            lines.append(f"• {key}: {int(r['chat_id'])}{topic} — {label}")
+        else: lines.append(f"• {key}: sin asignar — {label}")
+    lines += ["", "Asesinatos y rumores usan siempre: rpg", "Quitar: /delchat tipo"]
+    return "\n".join(lines)
+
 def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
     if str(chat_type or "") not in ("group","supergroup"):
         return
@@ -12174,6 +12302,7 @@ def _auto_encounter_card(enemy, story):
     )
 
 def _auto_spawn_one(chatrow, now=None):
+    chatrow=_rpg_routed_chatrow(chatrow,"encuentros")
     now=int(now or time.time())
     chat_id=int(chatrow["chat_id"])
     topic=chatrow.get("message_thread_id")
@@ -12432,6 +12561,7 @@ def dungeon_keyboard(dungeon,user_id):
 
 
 def _spawn_dungeon(chatrow, now=None):
+    chatrow=_rpg_routed_chatrow(chatrow,"mazmorras")
     now=int(now or time.time()); chat_id=int(chatrow["chat_id"]); topic=chatrow.get("message_thread_id"); d=random.choice(RPG_DUNGEONS)
     with db_lock:
         conn=get_db(); active=conn.execute("SELECT id FROM rpg_dungeons WHERE chat_id=? AND status='active' AND expires_at>? LIMIT 1",(chat_id,now)).fetchone()
@@ -14031,45 +14161,45 @@ def handle_rpg_callback(query):
     # El ACK genérico no forma parte de la resolución del juego. Enviarlo en
     # paralelo evita sumar una llamada Telegram completa ANTES de cada botón.
     _cbid=query.get("id")
-    if _cbid:
+    if _cbid and not data.startswith('crime:'):
         try:
             _CALLBACK_ACK_EXECUTOR.submit(telegram,"answerCallbackQuery",{"callback_query_id":_cbid})
         except Exception:
             pass
 
     if data=='crime:rumor':
-        send_private_message(uid,"🍺 RUMOR DE LA TABERNA\n\n“"+random.choice(TAVERN_RUMORS)+"”",reply_markup=_crime_rumors_keyboard()); return True
+        _crime_private_or_start(query,"🍺 RUMOR DE LA TABERNA\n\n“"+random.choice(TAVERN_RUMORS)+"”",reply_markup=_crime_rumors_keyboard()); return True
     if data=='crime:info':
-        send_private_message(uid,"🕯️ INFORMACIÓN DE LA TABERNA\n\nLos rumores cambian cada vez que preguntas. Algunos son tonterías, otros hablan del Mundo Vivo y otros quizá escondan algo.\n\nAquí nadie garantiza que lo que escuches sea verdad. 😂",reply_markup=_crime_rumors_keyboard()); return True
+        _crime_private_or_start(query,"🕯️ INFORMACIÓN DE LA TABERNA\n\nLos rumores cambian cada vez que preguntas. Algunos son tonterías, otros hablan del Mundo Vivo y otros quizá escondan algo.\n\nAquí nadie garantiza que lo que escuches sea verdad. 😂",reply_markup=_crime_rumors_keyboard()); return True
     if data=='crime:hood':
         _ensure_crime_db()
         with db_lock:
             c=get_db(); sess=c.execute("SELECT * FROM rpg_crime_sessions WHERE user_id=?",(int(uid),)).fetchone(); c.close()
-        if not sess: send_private_message(uid,"El encapuchado no sabe de qué reino vienes. Usa /rumores desde el grupo."); return True
+        if not sess: _crime_private_or_start(query,"El encapuchado no sabe de qué reino vienes. Usa /rumores desde el grupo."); return True
         kb=_crime_target_keyboard(int(sess['chat_id']),uid,'crime:target')
-        send_private_message(uid,f"🗡️ EL ENCAPUCHADO\n\nPuedo hacer desaparecer a alguien... pero no trabajo gratis.\n\n💰 Precio: {CRIME_COST:,} KW\n☠️ Éxito: 70%\n⏳ Si funciona: 10 minutos muerto.\n\nEl dinero se cobra incluso si fallo.\n\n¿Quién es el objetivo?",reply_markup=kb); return True
+        _crime_private_or_start(query,f"🗡️ EL ENCAPUCHADO\n\nPuedo hacer desaparecer a alguien... pero no trabajo gratis.\n\n💰 Precio: {CRIME_COST:,} KW\n☠️ Éxito: 70%\n⏳ Si funciona: 10 minutos muerto.\n\nEl dinero se cobra incluso si fallo.\n\n¿Quién es el objetivo?",reply_markup=kb); return True
     if data.startswith('crime:target:'):
         try: tid=int(data.rsplit(':',1)[1])
         except Exception: return True
         rep=int(get_reputation(tid).get('score') or 0)
-        send_private_message(uid,f"🕯️ OBJETIVO: {_player_name_by_id(tid)}\n⚖️ Reputación: {rep:+d}\n💰 Coste: {CRIME_COST:,} KW\n🎲 Probabilidad de éxito: 70%\n\n¿Confirmas el contrato?",reply_markup={'inline_keyboard':[[{'text':'🩸 CONFIRMAR CONTRATO','callback_data':f'crime:confirm:{tid}'}],[{'text':'❌ Retirarme','callback_data':'crime:rumor'}]]}); return True
+        _crime_private_or_start(query,f"🕯️ OBJETIVO: {_player_name_by_id(tid)}\n⚖️ Reputación: {rep:+d}\n💰 Coste: {CRIME_COST:,} KW\n🎲 Probabilidad de éxito: 70%\n\n¿Confirmas el contrato?",reply_markup={'inline_keyboard':[[{'text':'🩸 CONFIRMAR CONTRATO','callback_data':f'crime:confirm:{tid}'}],[{'text':'❌ Retirarme','callback_data':'crime:rumor'}]]}); return True
     if data.startswith('crime:confirm:'):
         try: tid=int(data.rsplit(':',1)[1])
         except Exception: return True
-        ok,txt,cid=_crime_start_contract(uid,tid); send_private_message(uid,txt); return True
+        ok,txt,cid=_crime_start_contract(uid,tid); _crime_private_or_start(query,txt); return True
     if data.startswith('crime:accuse:'):
         try: cid=int(data.rsplit(':',1)[1])
         except Exception: return True
         case=_crime_case(cid)
-        if not case or str(case['status'])!='open': send_private_message(uid,'Ese caso ya terminó.'); return True
-        if int(case['success'])==1 and int(case['victim_id'])==int(uid) and int(time.time())<int(case['dead_until']): send_private_message(uid,'☠️ Tú eres el muerto. No participas en la investigación. 😂'); return True
+        if not case or str(case['status'])!='open': _crime_private_or_start(query,'Ese caso ya terminó.'); return True
+        if int(case['success'])==1 and int(case['victim_id'])==int(uid) and int(time.time())<int(case['dead_until']): _crime_private_or_start(query,'☠️ Tú eres el muerto. No participas en la investigación. 😂'); return True
         kb=_crime_target_keyboard(int(case['chat_id']),0,f'crime:pick:{cid}')
-        send_private_message(uid,"🕵️ ¿A QUIÉN ACUSAS?\n\nMira las pistas y la reputación. Elige con cuidado: solo tienes UNA acusación.\n\nSi acusas a un inocente, pierdes reputación y el grupo verá tu error. 😂",reply_markup=kb); return True
+        _crime_private_or_start(query,"🕵️ ¿A QUIÉN ACUSAS?\n\nMira las pistas y la reputación. Elige con cuidado: solo tienes UNA acusación.\n\nSi acusas a un inocente, pierdes reputación y el grupo verá tu error. 😂",reply_markup=kb); return True
     if data.startswith('crime:pick:'):
         try:
             _,_,cid,tid=data.split(':',3); cid=int(cid); tid=int(tid)
         except Exception: return True
-        ok,txt=_crime_accuse(cid,uid,tid); send_private_message(uid,txt); return True
+        ok,txt=_crime_accuse(cid,uid,tid); _crime_private_or_start(query,txt); return True
 
     if data.startswith('horse:'):
         try:
@@ -15167,9 +15297,30 @@ def _crime_dead_in_chat(chat_id,user_id):
     return bool(case)
 
 def _rpg_global_defeat_left(user_id):
+    now=int(time.time()); until=0
     ch=get_active_character(user_id)
-    if not ch: return 0
-    return max(0,int(ch.get('defeated_until') or 0)-int(time.time()))
+    if ch:
+        until=max(until,int(ch.get('defeated_until') or 0))
+    # El castigo criminal pertenece al usuario, no solo al personaje activo.
+    # Así no puede esquivarse cambiando de personaje o por una fila activa inconsistente.
+    try:
+        _ensure_crime_db()
+        with db_lock:
+            c=get_db()
+            row=c.execute("""
+                SELECT GREATEST(
+                    COALESCE(MAX(CASE WHEN success=1 AND status='open' AND victim_id=? THEN dead_until ELSE 0 END),0),
+                    COALESCE(MAX(CASE WHEN status='solved' AND contractor_id=? THEN culprit_dead_until ELSE 0 END),0)
+                ) AS crime_until
+                FROM rpg_crime_cases
+                WHERE (victim_id=? OR contractor_id=?)
+            """,(int(user_id),int(user_id),int(user_id),int(user_id))).fetchone()
+            c.close()
+        if row:
+            until=max(until,int(row.get('crime_until') or 0))
+    except Exception as e:
+        logging.warning("No pude consultar derrota criminal global de %s: %s",user_id,e)
+    return max(0,until-now)
 
 def _rpg_global_defeat_message(user_id):
     left=_rpg_global_defeat_left(user_id)
@@ -15178,7 +15329,11 @@ def _rpg_global_defeat_message(user_id):
 
 def _crime_set_character_defeat(user_id,until_ts):
     with db_lock:
-        c=get_db(); c.execute("UPDATE characters SET defeated_until=?,updated_at=? WHERE user_id=? AND is_active=1",(max(0,int(until_ts)),int(time.time()),int(user_id))); c.commit(); c.close()
+        c=get_db()
+        c.execute("UPDATE characters SET defeated_until=?,updated_at=? WHERE user_id=? AND is_active=1",(max(0,int(until_ts)),int(time.time()),int(user_id)))
+        if int(until_ts)>int(time.time()):
+            c.execute("DELETE FROM rpg_battles WHERE user_id=?",(int(user_id),))
+        c.commit(); c.close()
 
 def _crime_finish_admin(chat_id,actor_id):
     _ensure_crime_db(); now=int(time.time())
@@ -15247,6 +15402,7 @@ def _crime_accuse(case_id,accuser_id,accused_id):
                 if not changed: c.rollback(); c.close(); return False,'Ese caso acaba de ser resuelto por otra persona.'
                 c.execute("UPDATE characters SET defeated_until=0,updated_at=? WHERE user_id=? AND is_active=1",(now,int(case['victim_id'])))
                 c.execute("UPDATE characters SET defeated_until=?,updated_at=? WHERE user_id=? AND is_active=1",(culprit_until,now,int(case['contractor_id'])))
+                c.execute("DELETE FROM rpg_battles WHERE user_id=?",(int(case['contractor_id']),))
             c.commit(); c.close()
         except Exception: c.rollback(); c.close(); raise
     chat_id=int(case['chat_id']); who=_player_name_by_id(accuser_id); accused=_player_name_by_id(accused_id)
@@ -15301,6 +15457,7 @@ def _horse_race_text(race_id):
     return '\n'.join(lines)
 
 def _horse_create(chat_id,user_id,wager):
+    chat_id=_rpg_route_chat("carreras",chat_id)
     _ensure_horse_race_db(); wager=int(wager); now=int(time.time())
     if wager<HORSE_RACE_MIN_WAGER or wager>HORSE_RACE_MAX_WAGER: return False,f"La apuesta debe estar entre {HORSE_RACE_MIN_WAGER:,} y {HORSE_RACE_MAX_WAGER:,} KW.",0
     if _rpg_global_defeat_left(user_id)>0: return False,_rpg_global_defeat_message(user_id),0
@@ -15448,7 +15605,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -15461,7 +15618,7 @@ def rpg_commands_text(user_id=0):
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
-        txt += ("\n\n👑 KIU / PRUEBAS\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/invocarnpc — Fuerza un NPC aleatorio.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
+        txt += ("\n\n👑 KIU / PRUEBAS\n/setchat tipo — Asigna este chat/topic a una función.\n/delchat tipo — Quita una asignación.\n/chatsrpg — Muestra destinos.\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/invocarnpc — Fuerza un NPC aleatorio.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
     txt += "\n\n📚 TODOS LOS COMANDOS REGISTRADOS (incluye alias)\n" + ALL_REGISTERED_COMMANDS_TEXT
     return txt
 
@@ -16565,20 +16722,46 @@ def process_command(
             send_message(chat_id,_combat_lock_message(_busy_state))
             return True
 
+    if command=="/setchat":
+        if chat.get("type")=="private": send_message(chat_id,"Usa /setchat dentro del grupo o topic que quieras asignar."); return True
+        if not is_admin(message): send_message(chat_id,"Solo un admin puede asignar chats del RPG."); return True
+        raw=_command_argument_text(text).strip(); key=_rpg_route_key(raw)
+        if key not in RPG_CHAT_ROUTE_CATEGORIES:
+            send_message(chat_id,"Tipo no válido. Usa: " + ", ".join(RPG_CHAT_ROUTE_CATEGORIES.keys())); return True
+        tid=message.get('message_thread_id')
+        set_rpg_chat_route(key,chat_id,tid,user_id)
+        # RPG general también conserva compatibilidad con /rpgaqui y scheduler actual.
+        if key=='rpg': set_rpg_notification_chat(chat_id,chat.get('type'),tid)
+        send_message(chat_id,f"📍 Este lugar quedó asignado a: {key}.\n{RPG_CHAT_ROUTE_CATEGORIES[key]}")
+        return True
+
+    if command=="/delchat":
+        if not is_admin(message): send_message(chat_id,"Solo un admin puede quitar chats del RPG."); return True
+        key=_rpg_route_key(_command_argument_text(text).strip())
+        if key not in RPG_CHAT_ROUTE_CATEGORIES: send_message(chat_id,"Tipo no válido. Usa /chatsrpg para ver las categorías."); return True
+        send_message(chat_id,(f"🧹 Se quitó el destino {key}. Volverá a usar el chat de origen." if delete_rpg_chat_route(key) else f"{key} no tenía un chat asignado.")); return True
+
+    if command=="/chatsrpg":
+        send_message(chat_id,rpg_chat_routes_text()); return True
+
     if command=="/terminarasesinato":
         if not is_owner(user_id):
             send_message(chat_id,"Solo Kiu puede terminar manualmente una investigación criminal.")
             return True
-        ok,txt=_crime_finish_admin(chat_id,user_id); send_message(chat_id,txt); return True
+        crime_chat=_rpg_route_chat("rpg",chat_id)
+        ok,txt=_crime_finish_admin(crime_chat,user_id); send_message(chat_id,txt); return True
 
     if command=="/carrera":
         if chat.get("type")=="private": send_message(chat_id,"🐎 Las carreras se crean en el grupo."); return True
         ensure_player(message.get("from",{}))
         arg=_command_argument_text(text).replace(',','').strip()
         if not arg.isdigit(): send_message(chat_id,f"🐎 Usa /carrera cantidad\nEjemplo: /carrera 5000\nApuesta mínima: {HORSE_RACE_MIN_WAGER:,} KW."); return True
-        ok,txt,rid=_horse_create(chat_id,user_id,int(arg))
+        race_chat=_rpg_route_chat("carreras",chat_id)
+        ok,txt,rid=_horse_create(race_chat,user_id,int(arg))
         if not ok: send_message(chat_id,txt); return True
-        race=_horse_race_row(rid); send_message(chat_id,_horse_race_text(rid),reply_markup=_horse_race_keyboard(race)); return True
+        race=_horse_race_row(rid); send_message(race_chat,_horse_race_text(rid),reply_markup=_horse_race_keyboard(race));
+        if int(race_chat)!=int(chat_id): send_message(chat_id,"🐎 Carrera enviada al chat oficial de carreras.")
+        return True
 
     if command=="/rumores":
         # Fachada secreta: en grupo se borra sin responder públicamente y todo continúa por DM.
@@ -16593,8 +16776,9 @@ def process_command(
         if not isinstance(deleted,dict) or deleted.get('ok') is not True:
             return True
         _ensure_crime_db(); now=int(time.time())
+        crime_chat=_rpg_route_chat("rpg",chat_id)
         with db_lock:
-            c=get_db(); c.execute("INSERT INTO rpg_crime_sessions(user_id,chat_id,created_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,created_at=EXCLUDED.created_at",(user_id,int(chat_id),now)); c.commit(); c.close()
+            c=get_db(); c.execute("INSERT INTO rpg_crime_sessions(user_id,chat_id,created_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,created_at=EXCLUDED.created_at",(user_id,int(crime_chat),now)); c.commit(); c.close()
         send_private_message(user_id,_crime_rumors_home(user_id),reply_markup=_crime_rumors_keyboard())
         return True
 
@@ -17091,7 +17275,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not is_owner(uid): send_message(chat_id,"Solo Kiu puede cambiar el chat de notificaciones RPG."); return True
         if chat.get("type") not in ("group","supergroup"): send_message(chat_id,"Usa este comando dentro del grupo donde quieres los avisos RPG."); return True
         set_rpg_notification_chat(chat_id,chat.get("type"),message.get("message_thread_id"))
-        send_message(chat_id,"📍 Este es ahora el ÚNICO chat con encuentros, mazmorras, Malkor y Misiones Relámpago automáticas de KiwRPG. Los chats anteriores quedaron silenciados."); return True
+        set_rpg_chat_route("rpg",chat_id,message.get("message_thread_id"),uid)
+        send_message(chat_id,"📍 Este es ahora el chat RPG general. También será el destino de rumores/asesinatos. Las demás funciones pueden separarse con /setchat tipo."); return True
 
     if command in ("/apagarrpg", "/rpgsilencio"):
         uid=message.get("from",{}).get("id")

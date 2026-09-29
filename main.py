@@ -12176,48 +12176,81 @@ def _rpg_route_key(value):
     return RPG_CHAT_ROUTE_ALIASES.get(k,k)
 
 def _ensure_rpg_chat_routes():
+    # V2: las rutas pertenecen a un reino/grupo. Dos grupos pueden tener sus
+    # propios chats/topics de carreras, Boss, encuentros, etc. sin mezclarse.
     with db_lock:
         c=get_db()
-        c.execute("""CREATE TABLE IF NOT EXISTS rpg_chat_routes(
-            category TEXT PRIMARY KEY, chat_id BIGINT NOT NULL,
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_chat_routes_v2(
+            realm_id BIGINT NOT NULL, category TEXT NOT NULL, chat_id BIGINT NOT NULL,
             message_thread_id BIGINT, updated_by BIGINT NOT NULL DEFAULT 0,
-            updated_at BIGINT NOT NULL DEFAULT 0
+            updated_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY(realm_id,category)
         )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_user_realms(
+            user_id BIGINT NOT NULL, realm_id BIGINT NOT NULL, touched_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY(user_id,realm_id)
+        )""")
+        # Migración no destructiva del sistema global anterior: cada destino
+        # existente pasa a pertenecer al mismo grupo en el que fue configurado.
+        try:
+            old=c.execute("SELECT category,chat_id,message_thread_id,updated_by,updated_at FROM rpg_chat_routes").fetchall()
+            for r in old:
+                c.execute("""INSERT INTO rpg_chat_routes_v2(realm_id,category,chat_id,message_thread_id,updated_by,updated_at)
+                    VALUES(?,?,?,?,?,?) ON CONFLICT(realm_id,category) DO NOTHING""",
+                    (int(r['chat_id']),str(r['category']),int(r['chat_id']),r.get('message_thread_id'),int(r.get('updated_by') or 0),int(r.get('updated_at') or 0)))
+        except Exception:
+            pass
         c.commit(); c.close()
 
-def set_rpg_chat_route(category,chat_id,message_thread_id=None,updated_by=0):
-    category=_rpg_route_key(category)
-    if category not in RPG_CHAT_ROUTE_CATEGORIES: return False
+def _touch_rpg_realm(user_id,realm_id):
+    if not user_id or not realm_id: return
     _ensure_rpg_chat_routes()
     with db_lock:
-        c=get_db(); c.execute("""INSERT INTO rpg_chat_routes(category,chat_id,message_thread_id,updated_by,updated_at)
-          VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET chat_id=EXCLUDED.chat_id,
+        c=get_db(); c.execute("""INSERT INTO rpg_user_realms(user_id,realm_id,touched_at) VALUES(?,?,?)
+            ON CONFLICT(user_id,realm_id) DO UPDATE SET touched_at=EXCLUDED.touched_at""",
+            (int(user_id),int(realm_id),int(time.time()))); c.commit(); c.close()
+
+def set_rpg_chat_route(category,chat_id,message_thread_id=None,updated_by=0,realm_id=None):
+    category=_rpg_route_key(category)
+    if category not in RPG_CHAT_ROUTE_CATEGORIES: return False
+    realm_id=int(realm_id if realm_id is not None else chat_id)
+    _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db(); c.execute("""INSERT INTO rpg_chat_routes_v2(realm_id,category,chat_id,message_thread_id,updated_by,updated_at)
+          VALUES(?,?,?,?,?,?) ON CONFLICT(realm_id,category) DO UPDATE SET chat_id=EXCLUDED.chat_id,
           message_thread_id=EXCLUDED.message_thread_id,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at""",
-          (category,int(chat_id),int(message_thread_id) if message_thread_id is not None else None,int(updated_by or 0),int(time.time())))
+          (realm_id,category,int(chat_id),int(message_thread_id) if message_thread_id is not None else None,int(updated_by or 0),int(time.time())))
         c.commit(); c.close()
+    if updated_by: _touch_rpg_realm(updated_by,realm_id)
     return True
 
-def delete_rpg_chat_route(category):
+def delete_rpg_chat_route(category,realm_id):
     category=_rpg_route_key(category); _ensure_rpg_chat_routes()
     with db_lock:
-        c=get_db(); cur=c.execute("DELETE FROM rpg_chat_routes WHERE category=?",(category,)); changed=int(cur.rowcount or 0); c.commit(); c.close()
+        c=get_db(); cur=c.execute("DELETE FROM rpg_chat_routes_v2 WHERE realm_id=? AND category=?",(int(realm_id),category)); changed=int(cur.rowcount or 0); c.commit(); c.close()
     return changed>0
 
-def get_rpg_chat_route(category,fallback_chat_id=None,fallback_thread_id=None):
+def get_rpg_chat_route(category,fallback_chat_id=None,fallback_thread_id=None,realm_id=None):
     category=_rpg_route_key(category); _ensure_rpg_chat_routes()
-    with db_lock:
-        c=get_db(); row=c.execute("SELECT chat_id,message_thread_id FROM rpg_chat_routes WHERE category=?",(category,)).fetchone(); c.close()
+    # En comandos de grupo, el chat del grupo ES el reino. En privado debe
+    # proporcionarse realm_id o resolverse antes mediante la sesión del usuario.
+    rid=realm_id if realm_id is not None else fallback_chat_id
+    row=None
+    if rid is not None:
+        with db_lock:
+            c=get_db(); row=c.execute("SELECT chat_id,message_thread_id FROM rpg_chat_routes_v2 WHERE realm_id=? AND category=?",(int(rid),category)).fetchone(); c.close()
     if row:
         return int(row['chat_id']), (int(row['message_thread_id']) if row.get('message_thread_id') is not None else None)
     return (int(fallback_chat_id) if fallback_chat_id is not None else 0,
             int(fallback_thread_id) if fallback_thread_id is not None else None)
 
 def _rpg_route_chat(category,fallback_chat_id):
-    return get_rpg_chat_route(category,fallback_chat_id,get_current_message_thread_id())[0]
+    return get_rpg_chat_route(category,fallback_chat_id,get_current_message_thread_id(),realm_id=fallback_chat_id)[0]
 
 def _rpg_routed_chatrow(chatrow,category):
     rr=dict(chatrow or {})
-    cid,tid=get_rpg_chat_route(category,rr.get('chat_id'),rr.get('message_thread_id'))
+    realm=int(rr.get('chat_id') or 0)
+    cid,tid=get_rpg_chat_route(category,rr.get('chat_id'),rr.get('message_thread_id'),realm_id=realm)
     rr['chat_id']=cid; rr['message_thread_id']=tid
     return rr
 
@@ -12240,29 +12273,26 @@ def _rpg_routes_at_place(chat_id,message_thread_id=None):
     with db_lock:
         c=get_db()
         if message_thread_id is None:
-            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id IS NULL",(int(chat_id),)).fetchall()
+            rows=c.execute("SELECT category FROM rpg_chat_routes_v2 WHERE realm_id=? AND chat_id=? AND message_thread_id IS NULL",(int(chat_id),int(chat_id))).fetchall()
         else:
-            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id=?",(int(chat_id),int(message_thread_id))).fetchall()
+            rows=c.execute("SELECT category FROM rpg_chat_routes_v2 WHERE realm_id=? AND chat_id=? AND message_thread_id=?",(int(chat_id),int(chat_id),int(message_thread_id))).fetchall()
         c.close()
     return {str(r['category']) for r in rows}
 
 def _rpg_route_command_block_reason(command,chat_id,message_thread_id=None):
     category=RPG_COMMAND_ROUTE_CATEGORY.get(str(command or '').lower())
-    if not category:
-        return None
-    # Si este lugar fue reservado para otra actividad, no se mezclan sistemas.
+    if not category: return None
     here=_rpg_routes_at_place(chat_id,message_thread_id)
     if here and category not in here:
         labels=', '.join(sorted(here))
         return f"🚫 Este chat/topic está reservado para: {labels}.\n{RPG_CHAT_ROUTE_CATEGORIES.get(category,category)} no puede iniciarse aquí."
-    # Si la actividad tiene destino oficial, solo puede iniciarse exactamente allí.
-    dest_chat,dest_thread=get_rpg_chat_route(category,None,None)
+    dest_chat,dest_thread=get_rpg_chat_route(category,None,None,realm_id=chat_id)
     if dest_chat:
         same_chat=int(dest_chat)==int(chat_id)
         same_thread=(dest_thread is None and message_thread_id is None) or (dest_thread is not None and message_thread_id is not None and int(dest_thread)==int(message_thread_id))
         if not (same_chat and same_thread):
             topic=f" · topic {dest_thread}" if dest_thread is not None else ''
-            return f"🚫 {RPG_CHAT_ROUTE_CATEGORIES.get(category,category)} tiene un lugar oficial.\nVe al chat {dest_chat}{topic}."
+            return f"🚫 {RPG_CHAT_ROUTE_CATEGORIES.get(category,category)} tiene un lugar oficial EN ESTE GRUPO.\nVe al chat {dest_chat}{topic}."
     return None
 
 def delete_rpg_routes_here(chat_id,message_thread_id=None):
@@ -12270,20 +12300,20 @@ def delete_rpg_routes_here(chat_id,message_thread_id=None):
     with db_lock:
         c=get_db()
         if message_thread_id is None:
-            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id IS NULL",(int(chat_id),)).fetchall()
-            c.execute("DELETE FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id IS NULL",(int(chat_id),))
+            rows=c.execute("SELECT category FROM rpg_chat_routes_v2 WHERE realm_id=? AND chat_id=? AND message_thread_id IS NULL",(int(chat_id),int(chat_id))).fetchall()
+            c.execute("DELETE FROM rpg_chat_routes_v2 WHERE realm_id=? AND chat_id=? AND message_thread_id IS NULL",(int(chat_id),int(chat_id)))
         else:
-            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id=?",(int(chat_id),int(message_thread_id))).fetchall()
-            c.execute("DELETE FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id=?",(int(chat_id),int(message_thread_id)))
+            rows=c.execute("SELECT category FROM rpg_chat_routes_v2 WHERE realm_id=? AND chat_id=? AND message_thread_id=?",(int(chat_id),int(chat_id),int(message_thread_id))).fetchall()
+            c.execute("DELETE FROM rpg_chat_routes_v2 WHERE realm_id=? AND chat_id=? AND message_thread_id=?",(int(chat_id),int(chat_id),int(message_thread_id)))
         c.commit(); c.close()
     return [str(r['category']) for r in rows]
 
-def rpg_chat_routes_text():
+def rpg_chat_routes_text(realm_id):
     _ensure_rpg_chat_routes()
     with db_lock:
-        c=get_db(); rows=c.execute("SELECT category,chat_id,message_thread_id FROM rpg_chat_routes").fetchall(); c.close()
+        c=get_db(); rows=c.execute("SELECT category,chat_id,message_thread_id FROM rpg_chat_routes_v2 WHERE realm_id=?",(int(realm_id),)).fetchall(); c.close()
     saved={str(r['category']):r for r in rows}
-    lines=["📍 CHATS OFICIALES DEL RPG", "", "Usa /setchat tipo en el chat/topic que quieras asignar."]
+    lines=["📍 CHATS OFICIALES DE ESTE GRUPO", "", "Estas asignaciones NO afectan a otros grupos.", "Usa /setchat tipo en el topic que quieras asignar."]
     for key,label in RPG_CHAT_ROUTE_CATEGORIES.items():
         r=saved.get(key)
         if r:
@@ -12292,6 +12322,21 @@ def rpg_chat_routes_text():
         else: lines.append(f"• {key}: sin asignar — {label}")
     lines += ["", "Asesinatos y rumores usan siempre: rpg", "Quitar: /delchat tipo"]
     return "\n".join(lines)
+
+def _private_rumor_realm(user_id):
+    """Devuelve el reino RPG más reciente del usuario, sin mezclar grupos."""
+    _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db()
+        row=c.execute("""SELECT u.realm_id,r.chat_id,r.message_thread_id
+            FROM rpg_user_realms u JOIN rpg_chat_routes_v2 r ON r.realm_id=u.realm_id AND r.category='rpg'
+            WHERE u.user_id=? ORDER BY u.touched_at DESC LIMIT 1""",(int(user_id),)).fetchone()
+        if not row:
+            # Compatibilidad cómoda cuando solo existe un reino RPG configurado.
+            rows=c.execute("SELECT realm_id,chat_id,message_thread_id FROM rpg_chat_routes_v2 WHERE category='rpg' ORDER BY updated_at DESC LIMIT 2").fetchall()
+            row=rows[0] if len(rows)==1 else None
+        c.close()
+    return row
 
 def register_rpg_auto_chat(chat_id, chat_type, message_thread_id=None):
     if str(chat_type or "") not in ("group","supergroup"):
@@ -15669,7 +15714,7 @@ def rpg_commands_text(user_id=0):
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Abre en privado la taberna de rumores y el sistema secreto de asesinatos. Si se escribe por error en un grupo, el bot borra el comando silenciosamente.\n/carrera cantidad — Crea una carrera pública de 2 a 4 jugadores con dado real de Telegram y apuesta KW. Gana quien llegue primero a 20.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Abre en privado la taberna de rumores y el sistema secreto de asesinatos. Si se escribe en un grupo, KiwBot borra el comando y te indica que le escribas por privado.\n/carrera cantidad — Crea una carrera pública de 2 a 4 jugadores con dado real de Telegram y apuesta KW. Gana quien llegue primero a 20.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
@@ -16769,6 +16814,8 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+    if chat.get("type") in ("group","supergroup"):
+        _touch_rpg_realm(user_id,chat_id)
 
     if command=="/delchataqui":
         if chat.get("type")=="private": send_message(chat_id,"Este comando se usa dentro del grupo/topic que quieras liberar."); return True
@@ -16814,10 +16861,10 @@ def process_command(
         if not is_admin(message): send_message(chat_id,"Solo un admin puede quitar chats del RPG."); return True
         key=_rpg_route_key(_command_argument_text(text).strip())
         if key not in RPG_CHAT_ROUTE_CATEGORIES: send_message(chat_id,"Tipo no válido. Usa /chatsrpg para ver las categorías."); return True
-        send_message(chat_id,(f"🧹 Se quitó el destino {key}. Volverá a usar el chat de origen." if delete_rpg_chat_route(key) else f"{key} no tenía un chat asignado.")); return True
+        send_message(chat_id,(f"🧹 Se quitó el destino {key}. Volverá a usar el chat de origen." if delete_rpg_chat_route(key,chat_id) else f"{key} no tenía un chat asignado.")); return True
 
     if command=="/chatsrpg":
-        send_message(chat_id,rpg_chat_routes_text()); return True
+        send_message(chat_id,rpg_chat_routes_text(chat_id)); return True
 
     if command=="/terminarasesinato":
         if not is_owner(user_id):
@@ -16840,18 +16887,22 @@ def process_command(
 
     if command=="/rumores":
         # El menú criminal existe SOLO en privado. Si el comando se escribe por
-        # accidente en un grupo, se borra silenciosamente y no se abre nada allí.
+        # accidente en un grupo, borramos el comando y dejamos únicamente un aviso
+        # discreto para que la persona continúe directamente con KiwBot.
         if chat.get("type")!="private":
             try:
                 delete_message(chat_id,message.get("message_id"))
             except Exception:
                 pass
+            send_message(chat_id,"🍺 Los rumores se hablan en privado. Escríbeme /rumores por privado.")
             return True
         # En privado el reino se obtiene del destino RPG oficial. Así nadie tiene
         # que escribir el comando secreto en público para iniciar una sesión.
-        crime_chat,_crime_thread=get_rpg_chat_route("rpg",None,None)
+        _realm=_private_rumor_realm(user_id)
+        crime_chat=int(_realm['chat_id']) if _realm else 0
+        _crime_thread=(int(_realm['message_thread_id']) if _realm and _realm.get('message_thread_id') is not None else None)
         if not int(crime_chat or 0):
-            send_private_message(user_id,"🍺 La taberna todavía no tiene un reino RPG configurado. Un admin debe usar /setchat rpg en el grupo principal.")
+            send_private_message(user_id,"🍺 La taberna todavía no tiene un reino RPG configurado. Un admin debe usar /setchat rpg o /rpgaqui en el grupo principal.")
             return True
         _ensure_crime_db(); now=int(time.time())
         with db_lock:

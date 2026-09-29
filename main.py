@@ -12221,6 +12221,63 @@ def _rpg_routed_chatrow(chatrow,category):
     rr['chat_id']=cid; rr['message_thread_id']=tid
     return rr
 
+# Comandos que pertenecen a una zona exclusiva. Las consultas generales del RPG
+# (personaje, inventario, saldo, etc.) siguen disponibles en cualquier chat.
+RPG_COMMAND_ROUTE_CATEGORY = {
+    '/carrera':'carreras',
+    '/encuentro':'encuentros','/combatir':'encuentros','/aventura':'encuentros',
+    '/boss':'boss','/bosses':'boss','/spawnboss':'boss','/invocarboss':'boss','/quitarboss':'boss',
+    '/bossevento':'worldboss','/eventorpg':'worldboss','/evento':'worldboss','/eventos':'worldboss',
+    '/mazmorra':'mazmorras','/testmazmorra':'mazmorras',
+    '/misiones':'misiones','/misionesrpg':'misiones','/misionrapida':'misiones','/testmision':'misiones',
+    '/mercader':'mercader','/malkor':'mercader','/quitarmercader':'mercader',
+    '/pvp':'pvp','/duelo':'pvp','/duelopvp':'pvp','/duelodados':'pvp','/peleadados':'pvp',
+    '/taberna':'taberna','/tavern':'taberna',
+}
+
+def _rpg_routes_at_place(chat_id,message_thread_id=None):
+    _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db()
+        if message_thread_id is None:
+            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id IS NULL",(int(chat_id),)).fetchall()
+        else:
+            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id=?",(int(chat_id),int(message_thread_id))).fetchall()
+        c.close()
+    return {str(r['category']) for r in rows}
+
+def _rpg_route_command_block_reason(command,chat_id,message_thread_id=None):
+    category=RPG_COMMAND_ROUTE_CATEGORY.get(str(command or '').lower())
+    if not category:
+        return None
+    # Si este lugar fue reservado para otra actividad, no se mezclan sistemas.
+    here=_rpg_routes_at_place(chat_id,message_thread_id)
+    if here and category not in here:
+        labels=', '.join(sorted(here))
+        return f"🚫 Este chat/topic está reservado para: {labels}.\n{RPG_CHAT_ROUTE_CATEGORIES.get(category,category)} no puede iniciarse aquí."
+    # Si la actividad tiene destino oficial, solo puede iniciarse exactamente allí.
+    dest_chat,dest_thread=get_rpg_chat_route(category,None,None)
+    if dest_chat:
+        same_chat=int(dest_chat)==int(chat_id)
+        same_thread=(dest_thread is None and message_thread_id is None) or (dest_thread is not None and message_thread_id is not None and int(dest_thread)==int(message_thread_id))
+        if not (same_chat and same_thread):
+            topic=f" · topic {dest_thread}" if dest_thread is not None else ''
+            return f"🚫 {RPG_CHAT_ROUTE_CATEGORIES.get(category,category)} tiene un lugar oficial.\nVe al chat {dest_chat}{topic}."
+    return None
+
+def delete_rpg_routes_here(chat_id,message_thread_id=None):
+    _ensure_rpg_chat_routes()
+    with db_lock:
+        c=get_db()
+        if message_thread_id is None:
+            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id IS NULL",(int(chat_id),)).fetchall()
+            c.execute("DELETE FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id IS NULL",(int(chat_id),))
+        else:
+            rows=c.execute("SELECT category FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id=?",(int(chat_id),int(message_thread_id))).fetchall()
+            c.execute("DELETE FROM rpg_chat_routes WHERE chat_id=? AND message_thread_id=?",(int(chat_id),int(message_thread_id)))
+        c.commit(); c.close()
+    return [str(r['category']) for r in rows]
+
 def rpg_chat_routes_text():
     _ensure_rpg_chat_routes()
     with db_lock:
@@ -14175,7 +14232,7 @@ def handle_rpg_callback(query):
         _ensure_crime_db()
         with db_lock:
             c=get_db(); sess=c.execute("SELECT * FROM rpg_crime_sessions WHERE user_id=?",(int(uid),)).fetchone(); c.close()
-        if not sess: _crime_private_or_start(query,"El encapuchado no sabe de qué reino vienes. Usa /rumores desde el grupo."); return True
+        if not sess: _crime_private_or_start(query,"El encapuchado perdió tu rastro. Usa /rumores otra vez aquí en privado."); return True
         kb=_crime_target_keyboard(int(sess['chat_id']),uid,'crime:target')
         _crime_private_or_start(query,f"🗡️ EL ENCAPUCHADO\n\nPuedo hacer desaparecer a alguien... pero no trabajo gratis.\n\n💰 Precio: {CRIME_COST:,} KW\n☠️ Éxito: 70%\n⏳ Si funciona: 10 minutos muerto.\n\nEl dinero se cobra incluso si fallo.\n\n¿Quién es el objetivo?",reply_markup=kb); return True
     if data.startswith('crime:target:'):
@@ -15356,7 +15413,7 @@ def _crime_start_contract(contractor_id,victim_id):
         c=get_db()
         try:
             sess=c.execute("SELECT * FROM rpg_crime_sessions WHERE user_id=? FOR UPDATE",(int(contractor_id),)).fetchone()
-            if not sess: c.rollback(); c.close(); return False,'El rastro de la taberna se enfrió. Vuelve a usar /rumores en el grupo.',0
+            if not sess: c.rollback(); c.close(); return False,'El rastro de la taberna se enfrió. Vuelve a usar /rumores aquí en privado.',0
             chat_id=int(sess['chat_id'])
             if int(contractor_id)==int(victim_id): c.rollback(); c.close(); return False,'Ni el encapuchado acepta contratos contra ti mismo. 😂',0
             active=c.execute("SELECT 1 FROM rpg_crime_cases WHERE chat_id=? AND status='open' AND ends_at>?",(chat_id,now)).fetchone()
@@ -15605,20 +15662,20 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
          "🧙 PERSONAJE\n/rpg — Menú principal.\n/personaje — Personaje activo.\n/perfil — Perfil público y estadísticas.\n/personajes — Tus personajes.\n/usar_personaje — Cambia el activo.\n/crear_personaje — Crea un personaje.\n/clases — Consulta las clases.\n\n"
          "⚔️ COMBATE\n/encuentro — Combate PvE (máx. 15 por día).\n/huir — Abandona el PvE.\n/mazmorra — Mazmorra activa.\n/boss — Boss activo.\n/bosses — Catálogo de Bosses.\n/duelo — Duelo con stats reales.\n/duelopvp — PvP normalizado.\n/rendirse — Abandona un duelo.\n/pvp — Perfil PvP.\n/rankingpvp — Ranking PvP.\n/habilidades — Técnicas y mejoras en privado.\n/resetcombate — Libera un combate PvE trabado.\n/salirtodo — Emergencia: libera tus PvE, PvP y peleas de dados personales.\n/limpiarcombates — Kiu: libera TODOS los combates personales atascados del chat.\n/omega — Desafío Kenny Omega.\n/rankingomega — Ranking Omega.\n\n"
          "📜 PROGRESO Y MUNDO\n/misiones — Tablón de misiones.\n/eventorpg — Misión Relámpago activa.\n/cronicas — Crónicas.\n/mundo — Mundo Vivo.\n/bestiario — Criaturas descubiertas.\n/logros — Tus logros.\n/titulos — Administra y cambia tus títulos en privado.\n/primeros — Sala de los Primeros.\n/objetosclave — Objetos misteriosos.\n/eventos — Evento actual.\n/bossevento — Boss de temporada.\n/tiendaevento — Tienda de temporada.\n/heroes — Registros especiales.\n\n"
-         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Entrada discreta a los rumores de la taberna. En grupo se borra y continúa por privado.\n/carrera cantidad — Carrera pública de 2 a 4 jugadores con dados reales y apuesta KW.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
+         "🎒 EQUIPO Y ECONOMÍA\n/inventario — Objetos; se administra en privado.\n/equipo — Equipo equipado.\n/mejorequipo — Propone y equipa lo mejor compatible en privado.\n/autoequipar — Alias de /mejorequipo.\n/desmantelar — Selecciona varias piezas y conviértelas en Polvo de Forja.\n/reciclar — Alias de /desmantelar.\n/banco — Panel del Banco de Aeternus.\n/prestamo — Préstamos de hasta 500,000 KW; uno activo a la vez.\n/pagar [cantidad] — Abona una cantidad; sin cantidad liquida toda la deuda.\n/liquidar — Liquida toda la deuda pendiente.\n/empeno — Abre Banco/Casa de Empeño.\n/forja — Forja y mejoras.\n/mejorararma — Abre directo el menú para subir armas y equipo.\n/tienda — Tienda RPG.\n/materiales — Materiales.\n/espadas — Espadas del Ángel, si aplica.\n/saldo — Tus Kiwons.\n/transferir — Envía Kiwons.\n/robo @usuario — 3 intentos diarios; mala fama de la víctima aumenta riesgo y botín hasta 30,000 KW.\n/rumores — Abre en privado la taberna de rumores y el sistema secreto de asesinatos. Si se escribe por error en un grupo, el bot borra el comando silenciosamente.\n/carrera cantidad — Crea una carrera pública de 2 a 4 jugadores con dado real de Telegram y apuesta KW. Gana quien llegue primero a 20.\n/reputacion — Tu fama y rasgos.\n/decisiones — Huellas que el mundo recuerda.\n/ricos — Ranking por Kiwons personales.\n/peleadados cantidad — Reto abierto con apuesta; cada jugador tira su propio dado.\n/ranking — Ranking general.\n/intercambio — Intercambios pendientes.\n/intercambiar — Ofrece un objeto.\n\n"
          "🍺 TABERNA\n/taberna — Juegos, apuestas, bebidas, snacks y mercancía.\n\n"
          "🐾 MASCOTAS\n/mascota — Mascota equipada.\n/mascotas — Colección en privado.\n/gacha — Cofre de Familiar (rotación mensual).\n/gachaarmas — Gacha mensual de armas por 10,000 KW.\n\n"
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
-        txt += ("\n\n👑 KIU / PRUEBAS\n/setchat tipo — Asigna este chat/topic a una función.\n/delchat tipo — Quita una asignación.\n/chatsrpg — Muestra destinos.\n/rpgaqui — Fija chat/topic RPG.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/invocarnpc — Fuerza un NPC aleatorio.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
+        txt += ("\n\n👑 ADMINISTRACIÓN / KIU\n/setchat tipo — Asigna este chat/topic a una categoría: rpg, carreras, boss, worldboss, mazmorras, encuentros, misiones, mercader, pvp o taberna.\n/delchat tipo — Quita la asignación especial de una categoría.\n/delchataqui — Libera todas las categorías asignadas al chat/topic actual.\n/chatsrpg — Muestra todos los chats/topics oficiales configurados.\n/terminarasesinato — Cierra manualmente la investigación activa y revive a la víctima sin revelar al culpable.\n/rpgaqui — Fija este chat/topic como RPG general y destino público de asesinatos/rumores.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/invocarnpc — Fuerza un NPC aleatorio.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
     txt += "\n\n📚 TODOS LOS COMANDOS REGISTRADOS (incluye alias)\n" + ALL_REGISTERED_COMMANDS_TEXT
     return txt
 
@@ -16713,6 +16770,24 @@ def process_command(
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
 
+    if command=="/delchataqui":
+        if chat.get("type")=="private": send_message(chat_id,"Este comando se usa dentro del grupo/topic que quieras liberar."); return True
+        if not is_admin(message): send_message(chat_id,"Solo un admin puede liberar chats del RPG."); return True
+        removed=delete_rpg_routes_here(chat_id,message.get('message_thread_id'))
+        if removed:
+            send_message(chat_id,"🧹 Este chat/topic quedó libre. Se quitaron: " + ", ".join(sorted(removed)))
+        else:
+            send_message(chat_id,"Este chat/topic no tenía ninguna categoría asignada.")
+        return True
+
+    # Los chats/topics especializados son exclusivos: una carrera no comparte
+    # lugar con encuentros, Boss, PvP, etc.
+    if chat.get("type")!="private":
+        _route_block=_rpg_route_command_block_reason(command,chat_id,message.get('message_thread_id'))
+        if _route_block:
+            send_message(chat_id,_route_block)
+            return True
+
     # Exclusividad de actividad: mientras exista un combate/duelo personal,
     # no se puede iniciar otra actividad jugable. Consultas y comandos de salida
     # permanecen disponibles para no encerrar al jugador.
@@ -16764,19 +16839,21 @@ def process_command(
         return True
 
     if command=="/rumores":
-        # Fachada secreta: en grupo se borra sin responder públicamente y todo continúa por DM.
-        if chat.get("type")=="private":
-            send_private_message(user_id,"🍺 Para entrar a los rumores de TU reino, usa /rumores desde el grupo. El mensaje se borrará solo.")
+        # El menú criminal existe SOLO en privado. Si el comando se escribe por
+        # accidente en un grupo, se borra silenciosamente y no se abre nada allí.
+        if chat.get("type")!="private":
+            try:
+                delete_message(chat_id,message.get("message_id"))
+            except Exception:
+                pass
             return True
-        try:
-            deleted=delete_message(chat_id,message.get("message_id"))
-        except Exception:
-            deleted=None
-        # Seguridad de fachada: solo iniciamos el flujo si Telegram confirmó el borrado.
-        if not isinstance(deleted,dict) or deleted.get('ok') is not True:
+        # En privado el reino se obtiene del destino RPG oficial. Así nadie tiene
+        # que escribir el comando secreto en público para iniciar una sesión.
+        crime_chat,_crime_thread=get_rpg_chat_route("rpg",None,None)
+        if not int(crime_chat or 0):
+            send_private_message(user_id,"🍺 La taberna todavía no tiene un reino RPG configurado. Un admin debe usar /setchat rpg en el grupo principal.")
             return True
         _ensure_crime_db(); now=int(time.time())
-        crime_chat=_rpg_route_chat("rpg",chat_id)
         with db_lock:
             c=get_db(); c.execute("INSERT INTO rpg_crime_sessions(user_id,chat_id,created_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,created_at=EXCLUDED.created_at",(user_id,int(crime_chat),now)); c.commit(); c.close()
         send_private_message(user_id,_crime_rumors_home(user_id),reply_markup=_crime_rumors_keyboard())

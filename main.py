@@ -7734,17 +7734,20 @@ def _pvp_keyboard(duel, viewer_turn=True):
         hb=_duel_ability_for_mode(turn,char['class_name'],'hidden_blade',mode); htxt=f"🗡️ Hidden Blade · ×{float(hb['power']):.2f}" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
         rows.append([{'text':htxt,'callback_data':(f"pvp_atk:{duel['id']}:hidden_blade" if hcd<=0 else f"pvp_wait:{duel['id']}:hidden_blade:{hcd}")}])
     if mode!='ranked':
-        # Duelo amistoso: todas las técnicas adicionales realmente equipadas.
-        # /duelopvp ranked sigue excluyéndolas por diseño y también se valida en servidor.
+        # Duelo amistoso: cooldown independiente por movimiento equipado.
+        # Se cargan todos en una sola consulta para no añadir latencia por botón.
+        extra_cds=_equipped_move_cd_map('pvp',duel['id'],turn)
+        seen_extra=set()
         for wab in _equipped_gacha_weapon_abilities(turn,char_id):
-            wcd=scd
+            if wab['key'] in seen_extra: continue
+            seen_extra.add(wab['key']); wcd=int(extra_cds.get(str(wab['key']),0))
             wtxt=(f"⏳ {wab['name']} ({wcd}) · GACHA" if wcd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA")
             wcb=(f"pvp_atk:{duel['id']}:{wab['key']}" if wcd<=0 else f"pvp_wait:{duel['id']}:{wab['key']}:{wcd}")
             rows.append([{'text':wtxt,'callback_data':wcb}])
         for rab in _equipped_recuerdo_abilities(turn,char_id):
-            rcd=scd if rab.get('special') else 0
-            rtxt=(f"⏳ {rab['name']} ({rcd}) · RECUERDO" if rcd>0
-                  else f"{rab['emoji']} {rab['name']} · DMG ×{rab['power']:.2f} · RECUERDO")
+            if rab['key'] in seen_extra: continue
+            seen_extra.add(rab['key']); rcd=int(extra_cds.get(str(rab['key']),0))
+            rtxt=(f"⏳ {rab['name']} ({rcd}) · RECUERDO" if rcd>0 else f"{rab['emoji']} {rab['name']} · DMG ×{rab['power']:.2f} · RECUERDO")
             cb=(f"pvp_atk:{duel['id']}:{rab['key']}" if rcd<=0 else f"pvp_wait:{duel['id']}:{rab['key']}:{rcd}")
             rows.append([{'text':rtxt,'callback_data':cb}])
     rows.append([{'text':defend_text,'callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}])
@@ -7862,6 +7865,7 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
                 conn.rollback(); conn.close(); return False,'🛡️ Ya usaste tus 3 defensas en este duelo.'
             nsc=max(0,scd-1); nuc=max(0,ucd-1); nhc=max(0,hcd-1); other=int(d['opponent_id'] if is_ch else d['challenger_id'])
             conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_defending=1,{pref}_defends_used={pref}_defends_used+1,{pref}_special_cd=?,{pref}_ultimate_cd=?,{pref}_hidden_cd=?,turn_user_id=?,updated_at=? WHERE id=?",(nsc,nuc,nhc,other,int(time.time()),int(duel_id))); conn.commit(); conn.close()
+            _tick_equipped_move_cds('pvp',duel_id,uid)
             nd=_pvp_get(duel_id); remaining=max(0,3-int(nd[pref+'_defends_used']))
             send_message(d['chat_id'],f"🛡️ {_pvp_name(uid)} adopta una postura defensiva. ({remaining}/3 restantes)\n\n"+_pvp_card(nd),reply_markup=_pvp_keyboard(nd)); return True,''
         mode=str(d.get('duel_mode') or 'friendly')
@@ -7874,7 +7878,11 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
         if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
         if ability_key=='hidden_blade' and hcd>0: conn.rollback(); conn.close(); return False,f"⏳ Hidden Blade estará disponible en {hcd} turnos."
-        if ab.get('special') and scd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {scd} turnos."
+        equipped_move=str(ability_key).startswith(('gacha_skill_','recuerdo_skill_'))
+        if equipped_move:
+            ecd=_equipped_move_cd('pvp',duel_id,uid,ability_key)
+            if ecd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {ecd} turnos."
+        if not equipped_move and ab.get('special') and scd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {scd} turnos."
         if ab.get('ultimate') and ucd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {ucd} turnos."
         conn.rollback(); conn.close()
     dr=send_dice(d['chat_id'],'🎲'); roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or random.randint(1,6))
@@ -7891,6 +7899,10 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
             conn.rollback(); conn.close(); return False,'🗡️ No tienes Hidden Blade desbloqueada.'
         ab=_duel_ability_for_mode(uid,char['class_name'],ability_key,mode)
         if not ab: conn.rollback(); conn.close(); return False,'Movimiento no válido.'
+        equipped_move=str(ability_key).startswith(('gacha_skill_','recuerdo_skill_'))
+        if equipped_move:
+            ecd=_equipped_move_cd('pvp',duel_id,uid,ability_key)
+            if ecd>0: conn.rollback(); conn.close(); return False,f"⏳ {ab['name']} estará disponible en {ecd} turnos."
         duel_level=_pvp_equal_level(char,opp); eff=_duel_stats_for_mode(char,duel_level,mode); oe=_duel_stats_for_mode(opp,duel_level,mode)
         target_hp=int(d['opponent_hp'] if is_ch else d['challenger_hp']); defending=int(d['opponent_defending'] if is_ch else d['challenger_defending']); dmg=0; heal=0
         if roll!=1:
@@ -7902,10 +7914,11 @@ def pvp_action(duel_id, uid, ability_key=None, defend=False):
         target_hp=max(0,target_hp-dmg); own_hp=int(d['challenger_hp'] if is_ch else d['opponent_hp']); own_hp=min(int(eff['max_hp']),own_hp+heal)
         pref='challenger' if is_ch else 'opponent'; opref='opponent' if is_ch else 'challenger'; scd=int(d[pref+'_special_cd']); ucd=int(d[pref+'_ultimate_cd']); hcd=int(d.get(pref+'_hidden_cd',0)); scd=max(0,scd-1); ucd=max(0,ucd-1); hcd=max(0,hcd-1)
         if ability_key=='hidden_blade': hcd=int(ab.get('cooldown',3))
-        elif ab.get('special'): scd=int(ab.get('cooldown',2));
+        elif not equipped_move and ab.get('special'): scd=int(ab.get('cooldown',2));
         if ab.get('ultimate'): ucd=int(ab.get('cooldown',4));
         other=int(d['opponent_id'] if is_ch else d['challenger_id']); status='finished' if target_hp<=0 else 'active'; turn=None if status=='finished' else other
         conn.execute(f"UPDATE rpg_pvp_duels SET {pref}_hp=?,{opref}_hp=?,{pref}_special_cd=?,{pref}_ultimate_cd=?,{pref}_hidden_cd=?,{opref}_defending=0,status=?,turn_user_id=?,updated_at=? WHERE id=?",(own_hp,target_hp,scd,ucd,hcd,status,turn,int(time.time()),int(duel_id))); conn.commit(); conn.close()
+        _tick_equipped_move_cds('pvp',duel_id,uid,ability_key if equipped_move else None,int(ab.get('cooldown') or EQUIPPED_MOVE_COOLDOWN))
     nd=_pvp_get(duel_id); crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; heal_txt=f' · ❤️ +{heal}' if heal else ''
     if nd['status']=='finished':
         loser_id=int(nd['opponent_id']) if uid==int(nd['challenger_id']) else int(nd['challenger_id'])
@@ -8228,6 +8241,14 @@ def _equipped_move_cd(scope,context_id,user_id,ability_key):
         c=get_db(); r=c.execute("SELECT remaining FROM rpg_equipped_move_cooldowns WHERE scope=? AND context_id=? AND user_id=? AND ability_key=?",
             (str(scope),int(context_id),int(user_id),str(ability_key))).fetchone(); c.close()
     return max(0,int(r['remaining'] or 0)) if r else 0
+
+def _equipped_move_cd_map(scope,context_id,user_id):
+    """Carga todos los cooldowns equipados del contexto en una sola consulta."""
+    _ensure_equipped_move_cd_table()
+    with db_lock:
+        c=get_db(); rows=c.execute("SELECT ability_key,remaining FROM rpg_equipped_move_cooldowns WHERE scope=? AND context_id=? AND user_id=? AND remaining>0",
+            (str(scope),int(context_id),int(user_id))).fetchall(); c.close()
+    return {str(r['ability_key']):max(0,int(r['remaining'] or 0)) for r in rows}
 
 def _tick_equipped_move_cds(scope,context_id,user_id,used_key=None,cooldown=EQUIPPED_MOVE_COOLDOWN):
     """Avanza un turno: baja SOLO cooldowns de equipo activos y activa el usado."""

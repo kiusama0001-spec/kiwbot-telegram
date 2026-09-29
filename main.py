@@ -9967,10 +9967,12 @@ def _boss_keyboard_base(b,user_id):
         rows.append([{"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"}])
     if char:
         for wab in _equipped_gacha_weapon_abilities(user_id,int(char['id'])):
-            wtxt=(f"⏳ {wab['name']} ({scd}) · GACHA" if scd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA")
+            wcd=_equipped_move_cd('boss',b['id'],user_id,wab['key'])
+            wtxt=(f"⏳ {wab['name']} ({wcd}) · GACHA" if wcd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA")
             rows.append([{"text":wtxt,"callback_data":f"boss_atk:{b['id']}:{wab['key']}"}])
         for rab in _equipped_recuerdo_abilities(user_id,int(char['id'])):
-            rtxt=(f"⏳ {rab['name']} ({scd}) · RECUERDO" if scd>0 else f"{rab['emoji']} {rab['name']} · DMG ×{rab['power']:.2f} · RECUERDO")
+            rcd=_equipped_move_cd('boss',b['id'],user_id,rab['key'])
+            rtxt=(f"⏳ {rab['name']} ({rcd}) · RECUERDO" if rcd>0 else f"{rab['emoji']} {rab['name']} · DMG ×{rab['power']:.2f} · RECUERDO")
             rows.append([{"text":rtxt,"callback_data":f"boss_atk:{b['id']}:{rab['key']}"}])
     rows.append([{"text":"🛡️ Defender","callback_data":f"boss_def:{b['id']}"},{"text":"🧪 Pociones","callback_data":f"boss_potions:{b['id']}"}])
     rows.append([{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}])
@@ -10329,12 +10331,17 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
         if not claimed: return False,why
         with db_lock:
             conn=get_db(); conn.execute("UPDATE rpg_boss_participants SET defending=1,defends_used=defends_used+1,special_cd=GREATEST(0,special_cd-1),ultimate_cd=GREATEST(0,ultimate_cd-1),hidden_blade_cd=GREATEST(0,hidden_blade_cd-1),last_action_at=? WHERE boss_id=? AND user_id=?",(int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+        _tick_equipped_move_cds('boss',boss_id,user_id)
         player_text=f"🛡️ {_pvp_name(user_id)} se prepara para resistir."
     else:
         ab=_rpg_get_ability_for_user(user_id,char['class_name'],ability_key)
         if not ab: return False,"Movimiento no válido."
         if ability_key=='hidden_blade' and int(p.get('hidden_blade_cd') or 0)>0: return False,f"⏳ {ab['name']} estará disponible en {int(p.get('hidden_blade_cd') or 0)} turnos."
-        if ability_key!='hidden_blade' and ab.get('special') and int(p['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['special_cd']} turnos."
+        equipped_move=str(ability_key).startswith(('gacha_skill_','recuerdo_skill_'))
+        if equipped_move:
+            equipped_cd=_equipped_move_cd('boss',boss_id,user_id,ability_key)
+            if equipped_cd>0: return False,f"⏳ {ab['name']} estará disponible en {equipped_cd} turnos."
+        if ability_key!='hidden_blade' and not equipped_move and ab.get('special') and int(p['special_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['special_cd']} turnos."
         if ab.get('ultimate') and int(p['ultimate_cd'])>0: return False,f"⏳ {ab['name']} estará disponible en {p['ultimate_cd']} turnos."
         claimed,why=_boss_claim_turn_for_action(boss_id,user_id)
         if not claimed: return False,why
@@ -10363,7 +10370,7 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
             old_phase=int(fresh['phase'])
             boss_phase_change=(nh>0 and phase>old_phase)
             if ability_key=='hidden_blade': hc=int(ab.get('cooldown',3))
-            elif ab.get('special'): sc=int(ab.get('cooldown',2))
+            elif not equipped_move and ab.get('special'): sc=int(ab.get('cooldown',2))
             if ab.get('ultimate'): uc=int(ab.get('cooldown',4))
             ownhp=min(int(livep['max_hp']),int(livep['hp'])+heal)
             counter=0
@@ -10378,6 +10385,7 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
             status='defeated' if nh<=0 else 'active'
             conn.execute("UPDATE rpg_boss_instances SET hp=?,phase=?,defending=0,status=?,defeated_at=?,last_hit_user_id=? WHERE id=?",(nh,phase,status,int(time.time()) if nh<=0 else None,int(user_id) if nh<=0 else fresh['last_hit_user_id'],int(boss_id)))
             conn.execute("UPDATE rpg_boss_participants SET hp=?,damage=damage+?,special_cd=?,ultimate_cd=?,hidden_blade_cd=?,defeated=?,defeated_until=?,last_action_at=? WHERE boss_id=? AND user_id=?",(ownhp,dmg,sc,uc,hc,1 if ownhp<=0 else 0,(int(time.time())+BOSS_RECOVERY_SECONDS) if ownhp<=0 else 0,int(time.time()),int(boss_id),int(user_id))); conn.commit(); conn.close()
+        _tick_equipped_move_cds('boss',boss_id,user_id,ability_key,int(ab.get('cooldown') or EQUIPPED_MOVE_COOLDOWN))
         mission_dmg=int(dmg)
         crit=' 💥 CRÍTICO' if roll==6 else ''; miss=' — fallo total' if roll==1 else ''; player_text=f"🎲 {roll} · {ab['name']}{crit}{miss}\n⚔️ {dmg} daño"+(f" · ❤️ +{heal}" if heal else '')
         if counter:

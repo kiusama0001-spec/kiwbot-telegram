@@ -14568,6 +14568,27 @@ def handle_rpg_callback(query):
         ok,msg2=clan_leave(uid); send_message(chat_id,msg2,reply_markup=clan_keyboard(uid)); return True
     if data=="clan_cancel":
         send_message(chat_id,clan_card(uid),reply_markup=clan_keyboard(uid)); return True
+    if data=="opening_reset_prepare":
+        if not is_owner(uid):
+            send_message(chat_id,"Solo Kiu puede reiniciar la Gran Apertura."); return True
+        if not is_active_rpg_chat(chat_id,thread_id):
+            send_message(chat_id,"📍 Primero usa /rpgaqui aquí. La Apertura solo puede reiniciarse en el reino RPG activo."); return True
+        send_message(chat_id,"⚠️ CONFIRMACIÓN FINAL\n\nSe reiniciará la ronda de Apertura EN ESTE REINO. Las fichas restantes, objetos e historial de compras se conservan; Boss, ataques, daño y temporizadores vuelven a empezar.",reply_markup={"inline_keyboard":[[{"text":"🎆 SÍ, REINICIAR AQUÍ","callback_data":"opening_reset_confirm"}],[{"text":"❌ Cancelar","callback_data":"opening_reset_cancel"}]]}); return True
+    if data=="opening_reset_cancel":
+        if is_owner(uid): send_message(chat_id,"👌 Reinicio de Apertura cancelado.")
+        return True
+    if data=="opening_reset_confirm":
+        if not is_owner(uid):
+            send_message(chat_id,"Solo Kiu puede reiniciar la Gran Apertura."); return True
+        if not is_active_rpg_chat(chat_id,thread_id):
+            send_message(chat_id,"📍 Este ya no es el reino RPG activo. No se modificó la Apertura."); return True
+        try:
+            ok,msg2=reset_grand_opening_for_new_realm(chat_id,uid)
+            send_message(chat_id,msg2)
+        except Exception:
+            logger.exception("Error reiniciando Gran Apertura")
+            send_message(chat_id,"⚠️ No pude reiniciar la Gran Apertura. No vuelvas a pulsar hasta revisar el log.")
+        return True
     if data=="event_boss_enter":
         if not is_active_rpg_chat(chat_id,thread_id):
             send_message(chat_id,"📍 Este World Boss pertenece al chat/topic RPG activo. Usa /rpgaqui en el lugar correcto."); return True
@@ -15762,7 +15783,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -15775,9 +15796,73 @@ def rpg_commands_text(user_id=0):
          "💞 SOCIAL Y PAREJA\n/clan — Tu clan.\n/crearclan — Funda un clan.\n/unirclan — Únete a uno.\n/salirclan — Abandona tu clan.\n/casar @usuario — Propone matrimonio.\n/cancelarpropuesta — Cancela tu propuesta.\n/rechazarpropuesta — Rechaza una recibida.\n/pareja — Estado de pareja.\n/fondopareja — Fondo compartido.\n/depositarpareja — Deposita KW.\n/retirarpareja — Retira KW.\n/regalarpareja — Regala KW.\n/inventariopareja — Almacén matrimonial realmente compartido.\n/depositaritempareja ID — Deposita un objeto.\n/retiraritempareja ID — Retira un objeto compartido.\n/compartiritem — Entrega un objeto directamente.\n/divorcio — Termina el matrimonio.\n\n"
          "❓ AYUDA\n/bienvenida — Introducción e historia.\n/comandos — Esta guía en privado.")
     if is_owner(user_id):
-        txt += ("\n\n👑 ADMINISTRACIÓN / KIU\n/setchat tipo — Asigna este chat/topic a una categoría: rpg, carreras, boss, worldboss, mazmorras, encuentros, misiones, mercader, pvp o taberna.\n/delchat tipo — Quita la asignación especial de una categoría.\n/delchataqui — Libera todas las categorías asignadas al chat/topic actual.\n/chatsrpg — Muestra todos los chats/topics oficiales configurados.\n/terminarasesinato — Cierra manualmente la investigación activa y revive a la víctima sin revelar al culpable.\n/rpgaqui — Fija este chat/topic como RPG general y destino público de asesinatos/rumores.\n/apagarrpg — Pausa avisos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/invocarnpc — Fuerza un NPC aleatorio.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
+        txt += ("\n\n👑 ADMINISTRACIÓN / KIU\n/setchat tipo — Asigna este chat/topic a una categoría: rpg, carreras, boss, worldboss, mazmorras, encuentros, misiones, mercader, pvp o taberna.\n/delchat tipo — Quita la asignación especial de una categoría.\n/delchataqui — Libera todas las categorías asignadas al chat/topic actual.\n/chatsrpg — Muestra todos los chats/topics oficiales configurados.\n/terminarasesinato — Cierra manualmente la investigación activa y revive a la víctima sin revelar al culpable.\n/rpgaqui — Fija este chat/topic como RPG general y destino público de asesinatos/rumores.\n/apagarrpg — Pausa avisos.\n/reiniciarapertura — Muestra el botón seguro para reiniciar/mover la Gran Apertura conservando fichas y objetos.\n/reiniciarrpg — Reinicia mundo.\n/iniciarevento — Inicia evento.\n/invocarboss — Fuerza Boss.\n/invocarnpc — Fuerza un NPC aleatorio.\n/quitarboss — Retira Boss.\n/testmazmorra — Fuerza mazmorra.\n/misionrapida — Fuerza misión rápida.\n/testwill — Prueba Hidden Blade.\n/testesencia — Da Esencia.\n/resetwill — Reinicia Will.\n/testanillo — Da y verifica anillo.\n/resetmatrimonio — Limpia propuestas atascadas sin tocar bodas activas.\n/testusuario — Verifica @usuario.\n/testboda — Prueba propuesta.\n/testdivorcio — Finaliza boda de prueba.\n/testmundo — Fuerza Mundo Vivo.\n/resetomega — Reinicia Omega.\n/omega1hp — Omega a 1 HP.\n/darr — Da recursos.\n/darkiwons — Da Kiwons.\n/quitarkiwons — Quita Kiwons.\n/darpocion — Da pociones.\n/darprimeros — Concede Los Primeros.\n/mercader — Fuerza Malkor.\n/quitarmercader — Retira Malkor.\n/generarimagen — Genera asset.\n/regenerarimagen — Regenera asset.\n/registrarimagen — Registra file_id.\n/verimagen — Consulta asset.\n/borrarimagenrpg — Borra registro.\n/imagenesrpg — Lista assets.\n/dbstatus — Estado DB.")
     txt += "\n\n📚 TODOS LOS COMANDOS REGISTRADOS (incluye alias)\n" + ALL_REGISTERED_COMMANDS_TEXT
     return txt
+
+def reset_grand_opening_for_new_realm(chat_id,user_id):
+    """Reinicia SOLO el estado temporal de la Gran Apertura y la mueve a este reino.
+
+    Conserva saldos de Fichas de Apertura, compras ya realizadas e inventarios.
+    Reinicia progreso de combate/Boss/ataques para que la nueva ronda sea limpia.
+    """
+    if not is_owner(user_id):
+        return False,"Solo Kiu puede reiniciar la Gran Apertura."
+    now=int(time.time()); target=int(chat_id); event_key='opening_2026'
+    with db_lock:
+        c=get_db()
+        try:
+            route=c.execute("SELECT enabled FROM rpg_auto_chats WHERE chat_id=?",(target,)).fetchone()
+            if not route or int(route.get('enabled') or 0)!=1:
+                c.rollback(); c.close()
+                return False,"📍 Primero usa /rpgaqui en el grupo/topic donde quieres reiniciar la Gran Apertura."
+
+            # Una sola transacción: no existe una ventana donde las fichas puedan duplicarse.
+            c.execute("SELECT pg_advisory_xact_lock(?)",(987654323,))
+            players=c.execute("SELECT user_id,currency FROM rpg_event_players WHERE event_key=? FOR UPDATE",(event_key,)).fetchall()
+            purchases=c.execute("SELECT user_id,reward_key,quantity FROM rpg_event_purchases WHERE event_key=? FOR UPDATE",(event_key,)).fetchall()
+
+            balances={}
+            for r in players:
+                uid=int(r['user_id']); balances[uid]=balances.get(uid,0)+int(r.get('currency') or 0)
+            bought={}
+            for r in purchases:
+                key=(int(r['user_id']),str(r['reward_key']))
+                bought[key]=bought.get(key,0)+int(r.get('quantity') or 0)
+
+            # Cerramos cualquier copia anterior del evento antes de crear la nueva ronda.
+            c.execute("UPDATE rpg_event_state SET status='inactive' WHERE event_key=?",(event_key,))
+            c.execute("DELETE FROM rpg_event_players WHERE event_key=?",(event_key,))
+            c.execute("DELETE FROM rpg_event_purchases WHERE event_key=?",(event_key,))
+
+            # La cartera se mueve al nuevo reino; combate y premio del nuevo Boss empiezan limpios.
+            for uid,amount in balances.items():
+                c.execute("""INSERT INTO rpg_event_players
+                    (chat_id,event_key,user_id,currency,total_damage,total_attacks,attacks_day,attacks_today,daily_reward_day,boss_reward_claimed,updated_at)
+                    VALUES(?,?,?, ?,0,0,'',0,'',0,?)""",(target,event_key,uid,amount,now))
+            # Las compras permanecen registradas para respetar límites y evitar duplicados accidentales.
+            for (uid,reward_key),qty in bought.items():
+                c.execute("""INSERT INTO rpg_event_purchases(chat_id,event_key,user_id,reward_key,quantity,updated_at)
+                    VALUES(?,?,?,?,?,?)""",(target,event_key,uid,reward_key,qty,now))
+
+            c.execute("DELETE FROM rpg_chronicles_settings WHERE setting_key LIKE 'opening_2026:%'")
+            c.execute("""INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at)
+                VALUES('grand_opening_started','0',?)
+                ON CONFLICT(setting_key) DO UPDATE SET value='0',updated_at=EXCLUDED.updated_at""",(now,))
+            c.commit(); c.close()
+        except Exception:
+            c.rollback(); c.close(); raise
+
+    ok,txt=grand_opening_start(target,user_id)
+    if not ok:
+        return False,"⚠️ El estado de Apertura se preparó, pero no pudo iniciarse de nuevo.\n\n"+txt
+    return True,("🎆 GRAN APERTURA REINICIADA EN ESTE REINO\n\n"
+                 "✅ Fichas restantes conservadas y trasladadas.\n"
+                 "✅ Objetos e inventarios intactos.\n"
+                 "✅ Compras anteriores conservadas para respetar sus límites.\n"
+                 "🔄 Boss, ataques, daño y temporizadores comenzaron una ronda nueva.\n\n"
+                 "La Apertura ya puede continuar aquí sin borrar lo ganado.")
+
 
 def grand_opening_start(chat_id,user_id):
     if not is_owner(user_id): return False,"Ese botón es solo para Kiu."
@@ -17794,6 +17879,11 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
     if command=="/tiendaevento":
         if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 La tienda del evento solo existe en el chat elegido con /rpgaqui."); return True
         txt,kb=event_shop_text(chat_id,user_id); send_message(chat_id,txt,reply_markup=kb); return True
+    if command=="/reiniciarapertura":
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede reiniciar la Gran Apertura."); return True
+        if not is_active_rpg_chat(chat_id,message.get("message_thread_id")):
+            send_message(chat_id,"📍 Primero usa /rpgaqui en el grupo/topic donde quieres llevar la Gran Apertura."); return True
+        send_message(chat_id,"🎆 REINICIAR GRAN APERTURA\n\nEste botón prepara una nueva ronda en ESTE reino sin borrar fichas restantes, objetos ni compras ya realizadas.",reply_markup={"inline_keyboard":[[{"text":"🔄 Reiniciar Apertura aquí","callback_data":"opening_reset_prepare"}]]}); return True
     if command=="/iniciarevento":
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede iniciar manualmente un evento."); return True
         with db_lock:

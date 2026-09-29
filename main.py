@@ -4651,8 +4651,6 @@ def character_card(row):
     eff=effective_character_stats(row)
     b=eff["bonus"]
     extra=""
-    if row["class_name"]=="The Cleaner" and is_owner(row["user_id"]) and bool(row["secret_blades_active"]):
-        extra="\n🗡️🗡️ Estado especial: Doble Espada — ACTIVO"
     atk=f"{row['atk']}"+(f" + {b['atk']} = {eff['atk']}" if b['atk'] else "")
     deff=f"{row['defense']}"+(f" + {b['defense']} = {eff['defense']}" if b['defense'] else "")
     maxhp=eff['max_hp']
@@ -6252,8 +6250,8 @@ def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, h
          {"text":"🏃 Huir","callback_data":"rpg_flee"}]
     ]}
     kb=_append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
-    kb=_append_gacha_weapon_skill_button(kb,user_id,"rpg_attack")
-    return _append_recuerdo_skill_button(kb,user_id,"rpg_attack")
+    kb=_append_gacha_weapon_skill_button(kb,user_id,"rpg_attack",special_cd=special_cd)
+    return _append_recuerdo_skill_button(kb,user_id,"rpg_attack",special_cd=special_cd)
 
 def _rpg_get_ability(class_name, key):
     for a in rpg_abilities_for(class_name):
@@ -6782,10 +6780,6 @@ def rpg_inventory_page(user_id, page=1):
         nav.append({"text":f"📖 {page}/{pages}","callback_data":f"rpg_show_inventory:{page}"})
         if page<pages: nav.append({"text":"Siguiente ➡️","callback_data":f"rpg_show_inventory:{page+1}"})
         kb.append(nav)
-    char=get_active_character(user_id)
-    if char and is_owner(user_id) and char['class_name']=='The Cleaner':
-        active=bool(char['secret_blades_active'])
-        kb.append([{"text":"🗡️🗡️ Guardar Espadas del Ángel" if active else "🗡️🗡️ Sacar Espadas del Ángel","callback_data":"rpg_toggle_blades"}])
     txt=(f"🎒 INVENTARIO — Página {page}/{pages}\n\nToca un objeto para verlo y administrarlo.\n📦 {total} tipos/piezas visibles." if total else "🎒 INVENTARIO\n\nTodavía está vacío.")
     return txt,{"inline_keyboard":kb}
 
@@ -6988,14 +6982,9 @@ def effective_character_stats(char):
         b["hp"]+=int(r.get("hp_bonus") or 0)+int(fb.get("hp") or 0)+int(r.get("enchant_hp") or 0)
 
     lvlb=rpg_level_character_bonus(char)
+    # El antiguo toggle de Espadas del Ángel fue retirado.
+    # The Cleaner obtiene sus bonos exclusivamente del equipo real que lleve puesto.
     secret_atk=0
-    try:
-        if (str(char.get("class_name") or "")=="The Cleaner"
-                and is_owner(char.get("user_id"))
-                and bool(int(char.get("secret_blades_active") or 0))):
-            secret_atk=6
-    except Exception:
-        secret_atk=0
     founder={"atk":3,"defense":3,"hp":30} if founder_row else {"atk":0,"defense":0,"hp":0}
     pre_atk=int(char["atk"])+b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]
     pre_def=int(char["defense"])+b["defense"]+lvlb["defense"]+founder["defense"]
@@ -7169,14 +7158,29 @@ def equip_inventory_item(chat_id,user_id,inventory_id):
     ok,reason=item_compatibility(row,char)
     if not ok: return send_message(chat_id,f"❌ No puedes equipar {row['name']}.\n{reason}")
     slot=row['equip_slot']; now=int(time.time())
+    dual_weapon=(slot=='arma' and is_owner(user_id) and char['class_name']=='The Cleaner')
+    # La segunda espada de Kiu se administra exclusivamente en el privado del bot.
+    # Una vez equipada, sus estadísticas/habilidad sí funcionan normalmente en combate grupal.
+    if dual_weapon and int(chat_id or 0)<0:
+        return send_message(chat_id,"🗡️ Tu segunda espada se equipa únicamente en mi chat privado. Abre /inventario conmigo.")
     with db_lock:
         conn=get_db();
         try:
-            conn.execute("UPDATE rpg_inventory i SET equipped=0 FROM rpg_items x WHERE i.item_key=x.item_key AND i.character_id=? AND i.equipped=1 AND x.equip_slot=?",(int(char['id']),slot))
+            if dual_weapon:
+                equipped=conn.execute("""SELECT i.id FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+                    WHERE i.character_id=? AND i.equipped=1 AND x.equip_slot='arma'
+                    ORDER BY i.id ASC FOR UPDATE""",(int(char['id']),)).fetchall()
+                # The Cleaner puede llevar exactamente dos armas. Al intentar una tercera,
+                # sustituye la más antigua sin tocar ninguna otra pieza del equipo.
+                if len(equipped)>=2:
+                    conn.execute("UPDATE rpg_inventory SET equipped=0 WHERE id=?",(int(equipped[0]['id']),))
+            else:
+                conn.execute("UPDATE rpg_inventory i SET equipped=0 FROM rpg_items x WHERE i.item_key=x.item_key AND i.character_id=? AND i.equipped=1 AND x.equip_slot=?",(int(char['id']),slot))
             conn.execute("UPDATE rpg_inventory SET equipped=1, character_id=? WHERE id=? AND user_id=?",(int(char['id']),int(inventory_id),int(user_id)))
             conn.execute("UPDATE characters SET updated_at=? WHERE id=?",(now,int(char['id']))); conn.commit(); conn.close()
         except Exception: conn.rollback(); conn.close(); raise
-    send_message(chat_id,f"🟢 EQUIPADO\n\n{row['name']} → {slot.title()}")
+    suffix=" · espada adicional privada" if dual_weapon else ""
+    send_message(chat_id,f"🟢 EQUIPADO\n\n{row['name']} → {slot.title()}{suffix}")
 
 def unequip_inventory_item(chat_id,user_id,inventory_id):
     row=inventory_item_row(user_id,inventory_id)
@@ -7372,10 +7376,18 @@ def equipment_text(user_id):
     if not char: return "No tienes un personaje activo."
     with db_lock:
         conn=get_db(); rows=conn.execute("""SELECT i.id,x.name,x.equip_slot,x.rarity FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.character_id=? AND i.equipped=1 ORDER BY x.equip_slot""",(int(char['id']),)).fetchall(); conn.close()
-    slots={"arma":"⚔️ Arma","casco":"🪖 Casco","armadura":"🛡️ Armadura","guantes":"🧤 Guantes","botas":"👢 Botas","accesorio":"💍 Accesorio"}; by={r['equip_slot']:r for r in rows}
+    slots={"arma":"⚔️ Arma","casco":"🪖 Casco","armadura":"🛡️ Armadura","guantes":"🧤 Guantes","botas":"👢 Botas","accesorio":"💍 Accesorio"}
+    by={}
+    for r in rows: by.setdefault(r['equip_slot'],[]).append(r)
     eff=effective_character_stats(char); b=eff['bonus']
     lines=[f"🎽 EQUIPO — {char['name']}",""]
-    for k,label in slots.items(): lines.append(f"{label}: {by[k]['name'] if k in by else '—'}")
+    for k,label in slots.items():
+        vals=by.get(k,[])
+        if k=='arma' and len(vals)>1 and is_owner(user_id) and char['class_name']=='The Cleaner':
+            lines.append(f"{label}: {vals[0]['name']}")
+            lines.append(f"🗡️ Segunda arma: {vals[1]['name']}")
+        else:
+            lines.append(f"{label}: {vals[0]['name'] if vals else '—'}")
     lines += ["",f"📊 BONOS: ⚔️ +{b['atk']} · 🛡️ +{b['defense']} · ❤️ +{b['hp']}",f"TOTAL: ⚔️ {eff['atk']} · 🛡️ {eff['defense']} · ❤️ {eff['max_hp']}"]
     return "\n".join(lines)
 
@@ -7698,11 +7710,19 @@ def _pvp_keyboard(duel, viewer_turn=True):
         hb=_duel_ability_for_mode(turn,char['class_name'],'hidden_blade',mode); htxt=f"🗡️ Hidden Blade · ×{float(hb['power']):.2f}" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
         rows.append([{'text':htxt,'callback_data':(f"pvp_atk:{duel['id']}:hidden_blade" if hcd<=0 else f"pvp_wait:{duel['id']}:hidden_blade:{hcd}")}])
     if mode!='ranked':
-        wab=_equipped_gacha_weapon_ability(turn,char_id)
-        if wab: rows.append([{'text':f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}",'callback_data':f"pvp_atk:{duel['id']}:{wab['key']}"}])
-    if mode!='ranked':
-        rab=_equipped_recuerdo_ability(turn,char_id)
-        if rab: rows.append([{'text':f"{rab['emoji']} {rab['name']} · RECUERDO · ×{rab['power']:.2f}",'callback_data':f"pvp_atk:{duel['id']}:{rab['key']}"}])
+        # Duelo amistoso: todas las técnicas adicionales realmente equipadas.
+        # /duelopvp ranked sigue excluyéndolas por diseño y también se valida en servidor.
+        for wab in _equipped_gacha_weapon_abilities(turn,char_id):
+            wcd=scd
+            wtxt=(f"⏳ {wab['name']} ({wcd}) · GACHA" if wcd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA")
+            wcb=(f"pvp_atk:{duel['id']}:{wab['key']}" if wcd<=0 else f"pvp_wait:{duel['id']}:{wab['key']}:{wcd}")
+            rows.append([{'text':wtxt,'callback_data':wcb}])
+        for rab in _equipped_recuerdo_abilities(turn,char_id):
+            rcd=scd if rab.get('special') else 0
+            rtxt=(f"⏳ {rab['name']} ({rcd}) · RECUERDO" if rcd>0
+                  else f"{rab['emoji']} {rab['name']} · DMG ×{rab['power']:.2f} · RECUERDO")
+            cb=(f"pvp_atk:{duel['id']}:{rab['key']}" if rcd<=0 else f"pvp_wait:{duel['id']}:{rab['key']}:{rcd}")
+            rows.append([{'text':rtxt,'callback_data':cb}])
     rows.append([{'text':defend_text,'callback_data':f"pvp_def:{duel['id']}"},{'text':'🏳️ Rendirse','callback_data':f"pvp_surrender:{duel['id']}"}])
     return {'inline_keyboard':rows}
 
@@ -8159,6 +8179,8 @@ def open_weapon_gacha(user_id):
                  f"{jackpot}\n\n🪙 Saldo: {get_kiwons(user_id):,} KW")
 
 
+EQUIPPED_MOVE_COOLDOWN=3
+
 RECUERDO_ABILITIES={'recuerdo_arma_primer_latido':{'key':'recuerdo_skill_latido','emoji':'🌠','name':'Primer Latido','power':1.72,'pen':.38,'high_roll_bonus':.20},'recuerdo_armadura_guardia_cero':{'key':'recuerdo_skill_juramento','emoji':'🛡️','name':'Juramento Cero','power':1.54,'pen':.25,'heal_pct':.10},'recuerdo_casco_testigo':{'key':'recuerdo_skill_memoria','emoji':'👑','name':'Memoria Viva','power':1.64,'pen':.32},'recuerdo_guantes_complices':{'key':'recuerdo_skill_caos','emoji':'💫','name':'Caos Compartido','power':1.69,'pen':.30,'high_roll_bonus':.25,'special':True,'cooldown':3},'recuerdo_botas_comienzo':{'key':'recuerdo_skill_paso','emoji':'🌌','name':'Paso Imposible','power':1.62,'pen':.35,'execute':True},'recuerdo_sello_eterno':{'key':'recuerdo_skill_codigo','emoji':'❤️','name':'Nunca Fue Solo Código','power':1.66,'pen':.30,'heal_pct':.07}}
 
 def _equipped_recuerdo_abilities(user_id,character_id=None):
@@ -8172,20 +8194,31 @@ def _equipped_recuerdo_abilities(user_id,character_id=None):
     out=[]
     for r in rows:
         base=RECUERDO_ABILITIES.get(str(r['item_key']))
-        if base:a=dict(base);a['weapon_name']=str(r['name']);a['recuerdo_skill']=True;out.append(a)
+        if base:
+            a=dict(base); a['weapon_name']=str(r['name']); a['recuerdo_skill']=True
+            # Todo movimiento de equipo usa recuperación real. Reutiliza special_cd,
+            # que ya es persistente en PvE/Boss/Mazmorra/Omega/PvP amistoso.
+            a['special']=True; a['cooldown']=int(a.get('cooldown') or EQUIPPED_MOVE_COOLDOWN)
+            out.append(a)
     return out
 
 def _equipped_recuerdo_ability(user_id,character_id=None,ability_key=None):
     aa=_equipped_recuerdo_abilities(user_id,character_id)
     return next((a for a in aa if str(a['key'])==str(ability_key)),None) if ability_key is not None else (aa[0] if aa else None)
 
-def _append_recuerdo_skill_button(kb,user_id,prefix,context_id=None):
+def _append_recuerdo_skill_button(kb,user_id,prefix,context_id=None,special_cd=0):
+    # Los RECUERDO marcados como special comparten el mismo cooldown especial
+    # que la técnica de clase. El servidor ya lo validaba; reflejarlo aquí evita
+    # mostrar un movimiento como disponible cuando todavía está enfriándose.
     aa=_equipped_recuerdo_abilities(user_id)
     if not aa:return kb
     rows=list((kb or {}).get('inline_keyboard') or []);pos=max(0,len(rows)-1)
     for ab in aa:
+        cd=int(special_cd or 0) if ab.get('special') else 0
         cb=f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}"
-        rows.insert(pos,[{'text':f"{ab['emoji']} {ab['name']} · RECUERDO · ×{ab['power']:.2f}",'callback_data':cb}]);pos+=1
+        text=(f"⏳ {ab['name']} ({cd}) · RECUERDO" if cd>0
+              else f"{ab['emoji']} {ab['name']} · DMG ×{ab['power']:.2f} · RECUERDO")
+        rows.insert(pos,[{'text':text,'callback_data':cb}]);pos+=1
     return {'inline_keyboard':rows}
 
 def _gacha_ability_from_equipped_row(row):
@@ -8199,16 +8232,16 @@ def _gacha_ability_from_equipped_row(row):
     }
     if str(row['name']) in permanent:
         emoji,skill_name,power,pen=permanent[str(row['name'])]
-        return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True}
+        return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True,'special':True,'cooldown':EQUIPPED_MOVE_COOLDOWN}
     branch,_=_weapon_gacha_branch(); current_prefix=f"gacha_weapon_{branch}_mitico_"
     if key.startswith(current_prefix):
         myths=_weapon_gacha_monthly_mythics()
         if 1 <= idx <= len(myths):
             m=myths[idx-1]; _,_,_,_,_,skill_key,emoji,skill_name,power,pen=m
-            return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True}
+            return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True,'special':True,'cooldown':EQUIPPED_MOVE_COOLDOWN}
     default=GACHA_WEAPON_SKILL_DEFAULTS.get(idx,GACHA_WEAPON_SKILL_DEFAULTS[1])
     sk,emoji,skill_name,power,pen=default
-    return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True}
+    return {'key':f'gacha_skill_{idx}','emoji':emoji,'name':skill_name,'power':float(power),'pen':float(pen),'weapon_name':str(row['name']),'weapon_skill':True,'special':True,'cooldown':EQUIPPED_MOVE_COOLDOWN}
 
 def _equipped_gacha_weapon_abilities(user_id, character_id=None):
     """Todas las habilidades concedidas por piezas míticas de gacha equipadas."""
@@ -8231,14 +8264,17 @@ def _equipped_gacha_weapon_ability(user_id, character_id=None, ability_key=None)
         return next((a for a in abilities if str(a.get('key'))==str(ability_key)),None)
     return abilities[0] if abilities else None
 
-def _append_gacha_weapon_skill_button(kb,user_id,prefix,context_id=None):
+def _append_gacha_weapon_skill_button(kb,user_id,prefix,context_id=None,special_cd=0):
     abilities=_equipped_gacha_weapon_abilities(user_id)
     if not abilities: return kb
     rows=list((kb or {}).get('inline_keyboard') or [])
     pos=max(0,len(rows)-1)
     for ab in abilities:
+        cd=int(special_cd or 0)
         cb=(f"{prefix}:{ab['key']}" if context_id is None else f"{prefix}:{int(context_id)}:{ab['key']}")
-        rows.insert(pos,[{'text':f"{ab['emoji']} {ab['name']} · {ab['weapon_name']} · ×{ab['power']:.2f}",'callback_data':cb}]); pos+=1
+        text=(f"⏳ {ab['name']} ({cd}) · GACHA" if cd>0
+              else f"{ab['emoji']} {ab['name']} · DMG ×{ab['power']:.2f} · GACHA")
+        rows.insert(pos,[{'text':text,'callback_data':cb}]); pos+=1
     return {'inline_keyboard':rows}
 
 # =========================================================
@@ -9416,8 +9452,8 @@ def _omega_keyboard(event,user_id):
         [{"text":"📊 Actualizar ranking","callback_data":f"omega_refresh:{event['id']}"}]
     ]}
     kb=_append_hidden_blade_button(kb,user_id,"omega_atk",hc,event['id'])
-    kb=_append_gacha_weapon_skill_button(kb,user_id,"omega_atk",event['id'])
-    return _append_recuerdo_skill_button(kb,user_id,"omega_atk",event['id'])
+    kb=_append_gacha_weapon_skill_button(kb,user_id,"omega_atk",event['id'],special_cd=sc)
+    return _append_recuerdo_skill_button(kb,user_id,"omega_atk",event['id'],special_cd=sc)
 
 def spawn_omega(chat_id):
     old=_omega_active(chat_id)
@@ -9846,18 +9882,29 @@ def _boss_keyboard_base(b,user_id):
         return {"inline_keyboard":rows}
     char=get_active_character(user_id); a=rpg_abilities_for(char['class_name']) if char else rpg_abilities_for('Guerrero')
     scd=int(p['special_cd']); ucd=int(p['ultimate_cd']); hcd=int(p.get('hidden_blade_cd') or 0)
-    rows=[[{"text":f"{a[0]['emoji']} {a[0]['name']}","callback_data":f"boss_atk:{b['id']}:{a[0]['key']}"},
-           {"text":f"{a[1]['emoji']} {a[1]['name']}" if scd<=0 else f"⏳ {a[1]['name']} ({scd})","callback_data":f"boss_atk:{b['id']}:{a[1]['key']}"}],
-          [{"text":f"{a[2]['emoji']} {a[2]['name']}" if ucd<=0 else f"⏳ {a[2]['name']} ({ucd})","callback_data":f"boss_atk:{b['id']}:{a[2]['key']}"}],
-          [{"text":"🛡️ Defender","callback_data":f"boss_def:{b['id']}"},{"text":"🧪 Pociones","callback_data":f"boss_potions:{b['id']}"}],
-          [{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}]]
+    levels=technique_levels_for_user(user_id)
+    def _boss_move_text(ab,cd=0):
+        lvl=levels.get(str(ab['key']),1)
+        power=float(ab['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+        return (f"⏳ {ab['name']} ({cd}) · Nv.{lvl}" if int(cd)>0
+                else f"{ab['emoji']} {ab['name']} · Nv.{lvl} · DMG ×{power:.2f}")
+    # Primero TODOS los movimientos ofensivos. Las acciones defensivas van al final.
+    rows=[[{"text":_boss_move_text(a[0]),"callback_data":f"boss_atk:{b['id']}:{a[0]['key']}"},
+           {"text":_boss_move_text(a[1],scd),"callback_data":f"boss_atk:{b['id']}:{a[1]['key']}"}],
+          [{"text":_boss_move_text(a[2],ucd),"callback_data":f"boss_atk:{b['id']}:{a[2]['key']}"}]]
     if has_special_technique(user_id,"hidden_blade"):
-        htxt="🗡️ Hidden Blade" if hcd<=0 else f"⏳ Hidden Blade ({hcd})"
-        rows.insert(2,[{"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"}])
-    wab=_equipped_gacha_weapon_ability(user_id,int(char['id'])) if char else None
-    if wab: rows.insert(max(0,len(rows)-1),[{"text":f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}","callback_data":f"boss_atk:{b['id']}:{wab['key']}"}])
-    if char and is_owner(user_id) and char['class_name']=='The Cleaner':
-        active=bool(char['secret_blades_active']); rows.append([{"text":"🗡️🗡️ Guardar Espadas" if active else "🗡️🗡️ Sacar Espadas","callback_data":f"boss_blades:{b['id']}"}])
+        hlvl=levels.get('hidden_blade',1); hpwr=float(HIDDEN_BLADE_ABILITY['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(hlvl-1))
+        htxt=(f"⏳ Hidden Blade ({hcd}) · Nv.{hlvl}" if hcd>0 else f"🗡️ Hidden Blade · Nv.{hlvl} · DMG ×{hpwr:.2f}")
+        rows.append([{"text":htxt,"callback_data":f"boss_atk:{b['id']}:hidden_blade"}])
+    if char:
+        for wab in _equipped_gacha_weapon_abilities(user_id,int(char['id'])):
+            wtxt=(f"⏳ {wab['name']} ({scd}) · GACHA" if scd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA")
+            rows.append([{"text":wtxt,"callback_data":f"boss_atk:{b['id']}:{wab['key']}"}])
+        for rab in _equipped_recuerdo_abilities(user_id,int(char['id'])):
+            rtxt=(f"⏳ {rab['name']} ({scd}) · RECUERDO" if scd>0 else f"{rab['emoji']} {rab['name']} · DMG ×{rab['power']:.2f} · RECUERDO")
+            rows.append([{"text":rtxt,"callback_data":f"boss_atk:{b['id']}:{rab['key']}"}])
+    rows.append([{"text":"🛡️ Defender","callback_data":f"boss_def:{b['id']}"},{"text":"🧪 Pociones","callback_data":f"boss_potions:{b['id']}"}])
+    rows.append([{"text":"🔄 Actualizar","callback_data":f"boss_refresh:{b['id']}"}])
     return {"inline_keyboard":rows}
 
 
@@ -10044,28 +10091,58 @@ def _boss_grant_loot(b,p):
         if row: got.append((dict(row),actual))
     return got
 
+def _boss_gacha_exclusive_keys():
+    """Claves exclusivas del Gacha que jamás deben entrar en cajas de Boss."""
+    keys=set()
+    try:
+        for branch in RPG_WEAPON_GACHA_BRANCHES.values():
+            for entry in branch:
+                if entry: keys.add(str(entry[0]))
+    except Exception:
+        logger.exception("No pude construir la lista de equipo exclusivo del Gacha")
+    return keys
+
+def _boss_weighted_box_pick(rows):
+    """70% ultra raro, 25% legendario, 5% mítico; luego pieza aleatoria de esa rareza."""
+    pools={'ultra_raro':[],'legendario':[],'mitico':[]}
+    for r in rows or []:
+        rr=dict(r); rarity=str(rr.get('rarity') or '')
+        if rarity in pools: pools[rarity].append(rr)
+    available=[k for k,v in pools.items() if v]
+    if not available: return None
+    weights={'ultra_raro':70,'legendario':25,'mitico':5}
+    # Si falta una rareza, renormaliza únicamente entre las disponibles.
+    chosen=random.choices(available,weights=[weights[k] for k in available],k=1)[0]
+    return random.choice(pools[chosen])
+
 def _boss_final_hit_boxes(b, user_id):
-    """Golpe final: abre una Caja de Armas y una Caja de Accesorios y entrega una pieza de cada una."""
+    """Golpe final: caja ponderada no-Gacha de arma + accesorio."""
     uid=int(user_id); char=get_active_character(uid)
     if not char: return []
-    cid=int(char['id']); world=current_rpg_world(); rewards=[]
+    cid=int(char['id']); rewards=[]; excluded=_boss_gacha_exclusive_keys()
     with db_lock:
         conn=get_db()
         weapons=conn.execute("""SELECT item_key,name,rarity FROM rpg_items
             WHERE equip_slot='arma' AND COALESCE(max_global_copies,999999)>0
-              AND rarity IN ('raro','ultra_raro','legendario','mitico')
-              AND (COALESCE(allowed_classes,'')='' OR allowed_classes LIKE ?)
-            ORDER BY RANDOM() LIMIT 1""",(f"%{char['class_name']}%",)).fetchall()
+              AND rarity IN ('ultra_raro','legendario','mitico')
+              AND (COALESCE(allowed_classes,'')='' OR allowed_classes LIKE ?)""",(f"%{char['class_name']}%",)).fetchall()
         accessories=conn.execute("""SELECT item_key,name,rarity FROM rpg_items
             WHERE equip_slot='accesorio' AND COALESCE(max_global_copies,999999)>0
-              AND rarity IN ('raro','ultra_raro','legendario','mitico')
-              AND (COALESCE(allowed_classes,'')='' OR allowed_classes LIKE ?)
-            ORDER BY RANDOM() LIMIT 1""",(f"%{char['class_name']}%",)).fetchall()
+              AND rarity IN ('ultra_raro','legendario','mitico')
+              AND (COALESCE(allowed_classes,'')='' OR allowed_classes LIKE ?)""",(f"%{char['class_name']}%",)).fetchall()
         conn.close()
+    # Excluir por catálogo real del Gacha, no por prefijo: Dark Repulser, Elucidator, etc.
+    weapons=[r for r in weapons if str(r['item_key']) not in excluded]
+    accessories=[r for r in accessories if str(r['item_key']) not in excluded]
     for label,rows in (("📦 Caja de Armas",weapons),("💎 Caja de Accesorios",accessories)):
-        if not rows: continue
-        row=dict(rows[0]); item=grant_rpg_item(uid,cid,row['item_key'],source=f"boss_final:{b.get('boss_key','boss')}:{label}")
-        if item: rewards.append((label,item))
+        candidates=list(rows)
+        while candidates:
+            row=_boss_weighted_box_pick(candidates)
+            if not row: break
+            item=grant_rpg_item(uid,cid,row['item_key'],source=f"boss_final:{b.get('boss_key','boss')}:{label}")
+            if item:
+                rewards.append((label,item)); break
+            candidates=[x for x in candidates if str(x['item_key'])!=str(row['item_key'])]
     if rewards:
         lines=["🏆 PREMIO POR GOLPE FINAL",""]
         for label,item in rewards:
@@ -12677,7 +12754,9 @@ def dungeon_keyboard(dungeon,user_id):
         rows.append([{"text":f"⏳ Hidden Blade ({hcd})" if hcd>0 else f"🗡️ Hidden Blade · ×{power:.2f}","callback_data":f"dungeon_atk:{did}:hidden_blade" if hcd<=0 else f"dungeon_wait:{did}"}])
     gacha=[_gacha_ability_from_equipped_row(r) for r in gear_rows if str(r.get('rarity'))=='mitico']
     for wab in gacha:
-        rows.append([{"text":f"{wab['emoji']} {wab['name']} · ×{wab['power']:.2f}","callback_data":f"dungeon_atk:{did}:{wab['key']}"}])
+        wcd=cds['special']
+        rows.append([{"text":f"⏳ {wab['name']} ({wcd}) · GACHA" if wcd>0 else f"{wab['emoji']} {wab['name']} · DMG ×{wab['power']:.2f} · GACHA",
+                     "callback_data":f"dungeon_atk:{did}:{wab['key']}" if wcd<=0 else f"dungeon_wait:{did}"}])
     recuerdos=[]
     for r in gear_rows:
         if str(r.get('rarity'))!='recuerdo': continue
@@ -14755,25 +14834,7 @@ def handle_rpg_callback(query):
         if not b: send_message(chat_id,"No hay un Boss activo."); return True
         send_message(chat_id,_boss_card(b,uid),reply_markup=_boss_keyboard(b,uid)); return True
     if data.startswith("boss_blades:"):
-        bid=int(data.split(":",1)[1])
-        b=_boss_active(chat_id)
-        if not b or int(b.get("id") or 0)!=bid:
-            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"Ese Boss ya terminó.","show_alert":False}); return True
-        char=get_active_character(uid)
-        if not char or not is_owner(uid) or char['class_name']!='The Cleaner':
-            telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"Esa habilidad no te pertenece. 😌","show_alert":False}); return True
-        active=bool(char['secret_blades_active'])
-        ok,msg2=toggle_secret_blades(uid,activate=not active)
-        notice=("🗡️🗡️ Espadas del Ángel activadas · +6 ATK" if not active and ok else "🗡️ Espadas del Ángel guardadas · +6 ATK desactivado" if active and ok else msg2)
-        # El callback ya fue respondido al entrar al handler; refrescamos la tarjeta
-        # para que el botón y el ATK visible cambien inmediatamente.
-        b=_boss_active(chat_id)
-        if b:
-            send_message(chat_id,notice+"\n\n"+_boss_card(b,uid),reply_markup=_boss_keyboard(b,uid))
-            _delete_old_combat_card(chat_id,msg)
-        else:
-            send_message(chat_id,notice)
-        return True
+        telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":"🗡️ Ese control fue retirado. Administra tus espadas en privado con /inventario.","show_alert":False}); return True
     if data.startswith("boss_rejoin:"):
         bid=int(data.split(":",1)[1]); ok,msg2=boss_rejoin(chat_id,uid,bid); b=_boss_active(chat_id)
         send_message(chat_id,msg2+("\n\n"+_boss_card(b,uid) if b else ""),reply_markup=_boss_keyboard(b,uid) if b else None); return True
@@ -14970,15 +15031,7 @@ def handle_rpg_callback(query):
         text_inv,kb=rpg_inventory_page(uid,page)
         send_message(chat_id,text_inv,reply_markup=kb); return True
     if data=="rpg_toggle_blades":
-        char=get_active_character(uid)
-        if not char or not is_owner(uid) or char['class_name']!='The Cleaner':
-            send_message(chat_id,"Esa habilidad no te pertenece. 😌"); return True
-        active=bool(char['secret_blades_active']); ok,msg2=toggle_secret_blades(uid,activate=not active)
-        if not ok: send_message(chat_id,msg2); return True
-        notice="🗡️🗡️ Espadas del Ángel activadas · +6 ATK" if not active else "🗡️ Espadas del Ángel guardadas · +6 ATK desactivado"
-        if _is_private_chat_obj(msg.get("chat")): send_message(chat_id,notice)
-        else: telegram("answerCallbackQuery", {"callback_query_id":query.get("id"),"text":notice,"show_alert":False})
-        return True
+        send_message(chat_id,"🗡️ Ese control fue retirado. Ahora The Cleaner puede equipar una segunda arma real desde el inventario privado."); return True
     if data.startswith("rpg_class:"):
         class_preview(chat_id,uid,data.split(":",1)[1]); return True
     if data.startswith("rpg_choose:"):

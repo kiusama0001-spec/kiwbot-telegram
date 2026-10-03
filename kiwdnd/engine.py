@@ -437,6 +437,25 @@ def handle_callback(query):
         if uid!=int(camp['created_by']): _S(chat_id,thread,'⚙️ Reinicio cancelado: no eres quien creó la campaña.'); return True
         _reset_campaign(camp); _S(chat_id,thread,'🗑️ Campaña KiwD&D de prueba eliminada COMPLETAMENTE.\n\nEl vínculo con este tema quedó libre. Ahora ve al ÚNICO tema donde quieras jugar y usa /dndcrear.\n\nKiwRPG, PiPesos y el resto del bot no fueron tocados.'); return True
     if action=='controls': _S(chat_id,thread,"⚙️ CONTROLES\n\n▶️ /dndcomenzar\n🎭 /dndficha\n👥 /dndgrupo\n📖 /dndhistoria\n🪦 /dndcementerio\n🌍 /dndestado\n🎒 /dndinventario\n🗡️ /dndmisiones\n🤝 /dndrelaciones\n🔐 /dndsecretos\n🛏️ /dnddescansar\n📚 /dndmanual\n🗺️ /dndcampana\n⏸️ /dndpausa\n▶️ /dndreanudar\n🧭 /dndsecundarias\n🔄 /dndreiniciar\n\nTodo funciona únicamente en este tema. El reinicio requiere confirmación y solo borra esta campaña D&D.",reply_markup=_menu()); return True
+    if action.startswith('suggest:'):
+        parts=action.split(':')
+        mode=parts[1] if len(parts)>1 else 'scene'
+        try: idx=int(parts[2])
+        except Exception: idx=-1
+        ch=_char(camp['id'],uid)
+        if not ch: _S(chat_id,thread,"🎭 Primero crea tu personaje."); return True
+        # Reconstruimos desde el estado/contexto persistente actual; el botón no contiene texto largo.
+        context=str(camp.get('scene_text') or '')+' '+str(camp.get('flags') or '')
+        opts=_suggestion_options(camp,context,mode)
+        if idx<0 or idx>=len(opts): _S(chat_id,thread,"🐉 Esa opción ya cambió con la escena. Escribe lo que quieres intentar."); return True
+        chosen=re.sub(r'^[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+','',opts[idx]).strip()
+        if 'cualquier otra cosa' in _norm(chosen) or 'otra estrategia' in _norm(chosen) or 'otra maniobra' in _norm(chosen) or 'otra ruta' in _norm(chosen):
+            _S(chat_id,thread,f"✍️ {_mention(user)}, escribe lo que quieras intentar. No estás limitado por las opciones."); return True
+        now=int(time.time())
+        c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'suggested_action',f"{_mention(user)} eligió: {chosen}",now)); c.commit(); c.close()
+        narration=_local_narration(camp,ch,chosen)
+        _S(chat_id,thread,f"🎭 {_mention(user)} — {chosen}\n\n{_with_suggestions(camp,narration,chosen)}",reply_markup=_suggestion_keyboard(camp,chosen))
+        return True
     if action=='free': _S(chat_id,thread,f"✍️ {_mention(user)}, escribe exactamente lo que tu personaje quiere intentar. No necesitas usar una frase especial."); return True
     if action=='customclass': _S(chat_id,thread,f"✍️ {_mention(user)}, escribe: `Clase: <lo que quieras>`\nEjemplo: Clase: samurái que utiliza magia de sangre.\n\nKiwD&D conservará el concepto pero lo llevará a estadísticas jugables."); return True
     if action.startswith('class:'):
@@ -452,7 +471,7 @@ def handle_callback(query):
         choice=opts[idx]; consequence,flag=SCENE_BRANCHES.get(choice,("La decisión cambia el rumbo de la escena.","choice_"+str(idx)))
         flags=json.loads(camp.get('flags') or '{}'); flags[flag]={'by':uid,'at':int(time.time()),'choice':choice}
         now=int(time.time()); c=_db(); c.execute("UPDATE dnd_campaigns SET flags=?,scene=scene+1,updated_at=? WHERE id=?",(json.dumps(flags,ensure_ascii=False),now,int(camp['id']))); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'decision',f"{_mention(user)} decidió: {choice}.",now)); c.commit(); c.close()
-        _S(chat_id,thread,_with_suggestions(camp,f"🕯️ {_mention(user)} — {choice}\n\n{consequence}\n\nLa campaña ha guardado esta decisión. Sus consecuencias no tienen por qué terminar en esta escena.",choice)); return True
+        _S(chat_id,thread,_with_suggestions(camp,f"🕯️ {_mention(user)} — {choice}\n\n{consequence}\n\nLa campaña ha guardado esta decisión. Sus consecuencias no tienen por qué terminar en esta escena.",choice),reply_markup=_suggestion_keyboard(camp,choice)); return True
     if action.startswith('react:'):
         parts=action.split(':'); reaction=parts[1] if len(parts)>1 else 'resist'; actor=int(parts[2]) if len(parts)>2 and parts[2].isdigit() else 0
         c=_db(); r=c.execute("SELECT * FROM dnd_reactions WHERE campaign_id=? AND actor_id=? AND target_id=? AND status='pending' ORDER BY id DESC LIMIT 1",(int(camp['id']),actor,uid)).fetchone()
@@ -519,8 +538,8 @@ def _save_flag(camp,key,value=True):
     flags=_flags(camp); flags[key]=value; now=int(time.time())
     c=_db(); c.execute('UPDATE dnd_campaigns SET flags=?,updated_at=? WHERE id=?',(json.dumps(flags,ensure_ascii=False),now,int(camp['id']))); c.commit(); c.close()
 
-def _suggestions(camp, context='', mode='scene'):
-    """Pistas contextuales. Son ejemplos, nunca limitan la acción libre."""
+def _suggestion_options(camp, context='', mode='scene'):
+    """Acciones contextuales reutilizables como texto y como botones."""
     low=_norm(context); flags=_flags(camp); opts=[]
     def add(x):
         if x and x not in opts: opts.append(x)
@@ -557,7 +576,20 @@ def _suggestions(camp, context='', mode='scene'):
         add('🗣️ Hablar con alguien presente')
         add('🧭 Avanzar')
         add('✍️ Hacer cualquier otra cosa')
-    return '\n\n¿Qué quieres hacer?\n'+'\n'.join('• '+x for x in opts[:4])
+    return opts[:4]
+
+def _suggestions(camp, context='', mode='scene'):
+    opts=_suggestion_options(camp,context,mode)
+    return '\n\n¿Qué quieres hacer?\n'+'\n'.join('• '+x for x in opts)
+
+def _suggestion_keyboard(camp, context='', mode='scene'):
+    opts=_suggestion_options(camp,context,mode)
+    rows=[]
+    for idx,opt in enumerate(opts[:4]):
+        label=str(opt)[:60]
+        # callback corto: el servidor reconstruye la opción desde el contexto actual.
+        rows.append([{"text":label,"callback_data":f"dnd:suggest:{mode}:{idx}"}])
+    return {"inline_keyboard":rows} if rows else None
 
 def _local_narration(camp,ch,text):
     """Director local: interpreta acciones frecuentes sin IA y conserva pistas básicas."""
@@ -653,4 +685,4 @@ def handle_message(message,text):
     now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'free_action',f"{_mention(user)}: {t[:700]}",now)); c.commit(); c.close()
     narration=_local_narration(camp,ch,t[:1200])
     # Conversación libre: sugerencias contextuales, nunca menú obligatorio.
-    _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{_with_suggestions(camp,narration,t)}"); return True
+    _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{_with_suggestions(camp,narration,t)}",reply_markup=_suggestion_keyboard(camp,t)); return True

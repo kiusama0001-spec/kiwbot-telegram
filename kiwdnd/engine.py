@@ -1,7 +1,7 @@
 """KiwD&D — motor independiente de campaña persistente para Telegram.
 No importa ni modifica KiwRPG. main.py solo inyecta helpers de Telegram/DB.
 """
-import json, random, time, re, unicodedata
+import json, random, time, re
 
 _SEND=None; _SEND_TOPIC=None; _DICE=None; _DB=None; _ADMIN=None; _PHOTO=None; _NARRATE=None
 
@@ -507,111 +507,6 @@ def _request_roll(camp,user,reason,needed=1,difficulty=10,stat=''):
     c=_db(); c.execute("""INSERT INTO dnd_pending_rolls(campaign_id,user_id,reason,stat,needed,current,rolls,difficulty,created_at) VALUES(?,?,?,?,?,0,'[]',?,?) ON CONFLICT(campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id,reason=EXCLUDED.reason,stat=EXCLUDED.stat,needed=EXCLUDED.needed,current=0,rolls='[]',difficulty=EXCLUDED.difficulty,created_at=EXCLUDED.created_at""",(int(camp['id']),int(user['id']),reason,stat,int(needed),int(difficulty),int(time.time()))); c.commit(); c.close()
     _S(int(camp['chat_id']),int(camp.get('thread_id') or 0),f"🎲 {_mention(user)} — {reason}\nNecesito {needed} dado{'s' if needed!=1 else ''}.\n\n🎲 DADO 1/{needed} — lánzalo en Telegram.")
 
-
-# ---------------------------------------------------------------------------
-# Director local: KiwD&D NO depende de IA para avanzar la campaña.
-# ---------------------------------------------------------------------------
-def _norm(txt):
-    txt=(txt or '').lower().strip()
-    txt=''.join(c for c in unicodedata.normalize('NFD',txt) if unicodedata.category(c)!='Mn')
-    # Escritura informal/faltas muy comunes del grupo.
-    swaps={r'\bq\b':'que',r'\bk\b':'que',r'\bxq\b':'porque',r'\baber\b':'a ver',r'\baver\b':'a ver',
-           r'\brebiso\b':'reviso',r'\brebisar\b':'revisar',r'\bkemo\b':'quemo',r'\bkemar\b':'quemar',
-           r'\bquemo\b':'quemar',r'\babiento\b':'aviento',r'\baviiento\b':'aviento',r'\bmoustro\b':'monstruo',
-           r'\bnel\b':'no',r'\bpa\b':'para'}
-    for a,b in swaps.items(): txt=re.sub(a,b,txt)
-    txt=re.sub(r'j+a+j+a+|j{3,}|x+d+|lol+',' ',txt)
-    return re.sub(r'\s+',' ',txt).strip()
-
-def _has(txt,*words):
-    return any(w in txt for w in words)
-
-def _flags(camp):
-    try: return json.loads(camp.get('flags') or '{}')
-    except Exception: return {}
-
-def _save_flags(camp, flags):
-    c=_db(); c.execute('UPDATE dnd_campaigns SET flags=?,updated_at=? WHERE id=?',(json.dumps(flags,ensure_ascii=False),int(time.time()),int(camp['id']))); c.commit(); c.close()
-
-def _journal(camp,uid,kind,text):
-    c=_db(); c.execute('INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)',(int(camp['id']),int(camp['chapter']),int(uid),kind,str(text)[:1400],int(time.time()))); c.commit(); c.close()
-
-def _local_scene_action(camp,ch,user,raw):
-    """Resuelve acciones narrativas frecuentes sin red/LLM. Retorna (texto, necesita_dado, dificultad)."""
-    n=_norm(raw); f=_flags(camp); sk=str(camp.get('scene_key') or '')
-    who=ch.get('name') or _mention(user)
-
-    # Contexto de la pluma/ceniza: conserva consecuencias entre mensajes.
-    if sk=='ceniza':
-        if _has(n,'quemar','fuego','prendo','incend') and _has(n,'pluma','esa cosa','eso'):
-            if f.get('ash_feather_burned'):
-                return ('Solo quedan cenizas negras. Cuando acercas otra llama, las runas del suelo responden con un brillo azul muy tenue. Nox no aparta la mirada.\n\n—Ya la quemaste. Ahora averigüemos qué despertaste.',False,0)
-            f['ash_feather_burned']=True; f['ash_runes_revealed']=True; f['nox_alarm']=int(f.get('nox_alarm',0))+1; _save_flags(camp,f)
-            return ('Acercas la pluma al fuego.\n\n—Kiu, espera... —alcanza a decir Nox.\n\nTarde. La pluma prende con una llama azul y se vuelve ceniza en segundos. Debajo aparecen unas runas que antes no estaban ahí. Mara deja de sonreír.\n\n—Bueno... eso definitivamente no estaba ahí.\n\nNox se agacha frente a las marcas. —No las pises.',False,0)
-        if _has(n,'runa','marca','simbolo') and _has(n,'reviso','revisar','examino','examinar','leo','leer','investigo','investigar','miro','ver','dicen'):
-            if f.get('ash_runes_revealed'):
-                if not f.get('ash_runes_read'):
-                    f['ash_runes_read']=True; f['clue_shadow_truth']=True; _save_flags(camp,f)
-                    return ('Te agachas frente a las runas. No forman una frase completa, sino una advertencia repetida tres veces: **«Quien busque la verdad debe abrazar la sombra»**.\n\nNox reconoce el símbolo central y se queda callado demasiado tiempo.\n\n—He visto esto antes —admite al fin—. Pero no aquí.',False,0)
-                return ('Vuelves a estudiar las runas. La advertencia no cambia, pero notas algo nuevo: una de las marcas apunta hacia el norte del pueblo, como si fuera una dirección y no parte del texto. Nox también lo nota.',False,0)
-            return ('Buscas runas o marcas en la pluma y la olla. A simple vista no hay ninguna. Nox observa lo que haces y murmura: —Prueba con luz, calor... o algo que obligue a la pluma a reaccionar.',False,0)
-        if _has(n,'nox') and _has(n,'pregunto','preguntar','digo','hablo','interrogo','interrogar','sabe','explica'):
-            if f.get('ash_runes_read'):
-                return ('Nox suspira. —Sé que esas runas pertenecen a un culto que desapareció hace nueve años. También sé que alguien quiere que las encontremos. Lo que no sé es por qué te señalaron a ti.\n\nMara cruza los brazos. —Conveniente que recuerdes eso justo ahora.',False,0)
-            return ('Nox ladea la cabeza. —Sé que esa pluma no debería estar aquí. Y sé que quemarla, romperla o seguir su rastro podría darnos respuestas... o avisarle a quien la dejó de que la encontramos.',False,0)
-        if _has(n,'guardo','guardar','bolsillo','inventario') and _has(n,'pluma','ceniza'):
-            if f.get('ash_feather_burned'):
-                return ('Intentas recoger los restos. La ceniza se deshace entre tus dedos, pero consigues guardar una pequeña muestra en un trozo de tela. Nox te mira como si quisiera decir que es una pésima idea. No lo dice.',False,0)
-            return ('Guardas la pluma con cuidado. Sigue tibia incluso lejos del fuego. Nox no intenta detenerte, aunque claramente no le encanta la idea.',False,0)
-        if _has(n,'salgo','salir','afuera','origen','huellas','rastro','norte'):
-            return ('Sales siguiendo las señales fuera de la casa. La ceniza está casi intacta, excepto por una línea de huellas que conduce hacia el norte. Lo raro es la dirección: **las huellas salen del pueblo; no entran**. Seguirlas sin preparación podría meterte en problemas.',True,4)
-
-    # Contexto de las campanas/puerta.
-    if sk=='campanas':
-        if _has(n,'puerta','abro','abrir'):
-            f['door_opened_free']=True; _save_flags(camp,f)
-            return SCENE_BRANCHES['Abrir la puerta'][0],False,0
-        if _has(n,'orin') and _has(n,'pregunto','interrogo','hablo','digo','explica'):
-            return SCENE_BRANCHES['Interrogar a Orin'][0],False,0
-        if _has(n,'ventana','miro','reviso'):
-            return SCENE_BRANCHES['Mirar por una ventana'][0],False,0
-        if _has(n,'embosc','escond','preparo','trampa'):
-            return SCENE_BRANCHES['Preparar una emboscada'][0],False,0
-
-    # Intenciones genéricas que funcionan en cualquier capítulo.
-    if _has(n,'investigo','investigar','reviso','revisar','examino','examinar','busco','buscar','miro alrededor','observo'):
-        f['local_investigations']=int(f.get('local_investigations',0))+1; _save_flags(camp,f)
-        variants=[
-          'Te tomas un momento para revisar el lugar con calma. Encuentras pequeños detalles que antes pasaban desapercibidos: marcas recientes, polvo movido y señales de que alguien estuvo aquí antes que ustedes. No es una respuesta completa, pero sí una pista.',
-          'Sigues investigando sin precipitarte. Nada salta a la vista al principio, hasta que notas que una parte de la escena no encaja con las demás. Hay algo colocado demasiado a propósito como para ser casualidad.',
-          'Revisas el entorno paso a paso. No encuentras un enemigo escondido, pero sí una pista física que confirma algo importante: lo ocurrido aquí fue provocado; no fue un accidente.'
-        ]
-        return (variants[int(f['local_investigations'])%len(variants)],False,0)
-    if _has(n,'hablo','pregunto','digo','platico','converso'):
-        return ('La conversación continúa. La otra persona responde a lo que realmente preguntaste, pero evita regalar información que todavía no tiene motivos para compartir. Si quieres presionarla, engañarla o intimidarla, eso sí puede requerir una tirada.',False,0)
-    if _has(n,'ataco','golpeo','apuñalo','disparo','pego','rompo','fuerzo','trepo','salto','robo','escapo','persigo','desarmo'):
-        return (f'{who} lo intenta. La acción es posible, pero el resultado no está garantizado.',True,4)
-    if _has(n,'corro','me voy','me regreso','regreso','camino','avanzo','entro','salgo'):
-        return ('Te mueves como dijiste. El mundo no se congela mientras lo haces: los demás pueden seguirte, quedarse o tomar otra ruta. La escena cambia de posición, no de historia.',False,0)
-    if _has(n,'espero','no hago nada','observo','me quedo'):
-        return ('Decides no precipitarte. Durante unos segundos nadie habla. Esa pausa sirve: alguien en la escena se incomoda antes que los demás y termina mirando justo hacia aquello que intentaba ignorar.',False,0)
-    return ('La acción es válida, pero no produce un resultado automático. El entorno reacciona de forma coherente: puedes concretar qué objeto, persona o lugar quieres afectar, o intentar otra cosa. No has perdido el turno ni cambiado tu personaje.',False,0)
-
-def _local_roll_outcome(camp,ch,reason,rolls,total,target,success):
-    n=_norm(reason); f=_flags(camp)
-    if success:
-        if _has(n,'huellas','rastro','norte','origen'):
-            f['ash_trail_followed']=True; _save_flags(camp,f)
-            return 'Sigues el rastro sin perderlo. Tras varios minutos encuentras una zona donde la ceniza fue apartada a mano. Debajo hay una pieza de metal negro con el mismo símbolo de las runas. Alguien quería que llegaras hasta aquí.'
-        if _has(n,'ataco','golpeo','pego','apuñalo','disparo'):
-            return 'Tu ataque conecta. El enemigo cede terreno y la situación cambia a tu favor; el daño y las consecuencias quedan registrados por el combate, no por una narración inventada.'
-        return 'Lo consigues. La acción sale a tu favor y abre una oportunidad concreta para continuar, sin borrar el riesgo de la escena.'
-    if _has(n,'huellas','rastro','norte','origen'):
-        return 'Pierdes el rastro durante unos minutos y haces suficiente ruido para que algo más adelante sepa que vienes. No quedas bloqueado: puedes regresar, buscar otra ruta o seguir sabiendo que ya no tienes el factor sorpresa.'
-    if _has(n,'ataco','golpeo','pego','apuñalo','disparo'):
-        return 'El ataque falla y te deja mal colocado. El enemigo obtiene una oportunidad de responder; fallar cambia la situación, no termina automáticamente la partida.'
-    return 'No sale como esperabas. La acción tiene una consecuencia concreta y la escena se complica, pero todavía puedes reaccionar y buscar otra solución.'
-
 def handle_message(message,text):
     chat_id=int((message.get('chat') or {}).get('id') or 0); thread=_topic(message); user=message.get('from') or {}; uid=int(user.get('id') or 0); camp=_campaign(chat_id,thread)
     if not camp: return False
@@ -628,7 +523,10 @@ def handle_message(message,text):
         if cur<needed:
             c.execute("UPDATE dnd_pending_rolls SET current=?,rolls=? WHERE campaign_id=?",(cur,json.dumps(rolls),int(camp['id']))); c.commit(); c.close(); _S(chat_id,thread,f"🎲 DADO {cur}/{needed}: {val}\n\n🎲 DADO {cur+1}/{needed} — {_mention(user)}, lánzalo."); return True
         c.execute("DELETE FROM dnd_pending_rolls WHERE campaign_id=?",(int(camp['id']),)); c.commit(); c.close(); total=sum(rolls); target=int(p['difficulty'])*needed; success=total>=target
-        outcome=_local_roll_outcome(camp,_char(camp['id'],uid),str(p.get('reason') or ''),rolls,total,target,success)
+        outcome=("La situación se inclina a tu favor, pero el mundo registra cómo lo lograste." if success else "No sale como esperabas. No es un GAME OVER: la historia toma una ruta más peligrosa.")
+        if _NARRATE:
+            try: outcome=_NARRATE(camp,_char(camp['id'],uid),str(p.get('reason') or ''),{"success":success,"rolls":rolls,"total":total,"target":target}) or outcome
+            except Exception: pass
         now=int(time.time()); cj=_db(); cj.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'roll_result',f"{_mention(user)} intentó {str(p.get('reason') or '')[:350]} — {'éxito' if success else 'consecuencia'} ({total}/{target}).",now)); cj.commit(); cj.close()
         reason_low=str(p.get('reason') or '').lower(); lethal=any(w in reason_low for w in ('salto al vac','me sacrific','recibo el golpe','boss','lava','abismo','explos','caigo','caída','veneno mortal'))
         if (not success) and lethal and (all(v<=2 for v in rolls) or total<=needed*2):
@@ -654,10 +552,21 @@ def handle_message(message,text):
         target=mentioned[0]; now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_reactions(campaign_id,actor_id,target_id,action_text,status,created_at) VALUES(?,?,?,?, 'pending',?)",(int(camp['id']),uid,int(target['user_id']),t[:700],now)); c.commit(); c.close()
         kb={"inline_keyboard":[[{"text":"🤼 Resistirme","callback_data":f"dnd:react:resist:{uid}"},{"text":"🤝 Aceptar","callback_data":f"dnd:react:accept:{uid}"}],[{"text":"🏃 Apartarme","callback_data":f"dnd:react:avoid:{uid}"},{"text":"✍️ Otra reacción","callback_data":"dnd:free"}]]}
         _S(chat_id,thread,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\n🎯 {target['telegram_name']} está involucrado. Nadie controla automáticamente a otro personaje: le toca reaccionar.",reply_markup=kb); return True
-    # Acción libre: el Director LOCAL resuelve primero. No requiere Groq/IA.
-    narration,needs_roll,difficulty=_local_scene_action(camp,ch,user,t)
-    _journal(camp,uid,'free_action',f"{_mention(user)}: {t[:700]}")
-    if needs_roll:
-        _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{narration}")
-        _request_roll(camp,user,t[:500],needed=1,difficulty=max(2,int(difficulty or 4)),stat=''); return True
+    # Acción libre: heurística tolerante. Errores comunes como abiento/aviento no invalidan la intención.
+    risky=any(w in low for w in ('ataco','golpeo','salto','trepo','robo','fuerzo','rompo','persigo','seduz','engaño','miento','intimido','convenzo','escapo','escondo','desarmo','aviento','abiento','empujo'))
+    if risky:
+        needed=2 if any(w in low for w in ('seduz','engaño','intimido','persigo','desarmo')) else 1
+        _S(chat_id,thread,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\nLa intención es válida y puede cambiar la escena.")
+        _request_roll(camp,user,t[:500],needed=needed,difficulty=3 if needed==1 else 4,stat=''); return True
+    now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'free_action',f"{_mention(user)}: {t[:700]}",now)); c.commit(); c.close()
+    narration=None
+    if _NARRATE:
+        try:
+            narration=_NARRATE(camp,ch,t[:1200],None)
+        except Exception:
+            narration=None
+    if not narration:
+        narration=("Tu acción queda clara, pero el narrador no pudo continuar la escena en este momento. "
+                   "Inténtalo otra vez; no se ha perdido ni cambiado tu personaje.")
+    # Conversación libre: NO adjuntar el panel. /dnd lo abre cuando el jugador lo quiera.
     _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{narration}"); return True

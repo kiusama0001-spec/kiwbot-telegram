@@ -20337,12 +20337,31 @@ def send_kiwdnd_topic_message(chat_id, thread_id, text, reply_markup=None):
     return result
 
 def generate_kiwdnd_character_portrait(chat_id, character, thread_id=0):
-    """Retrato D&D separado de los assets KiwRPG; reutiliza Workers AI y su cuota segura."""
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        raise RuntimeError("Falta configurar Cloudflare Workers AI.")
+    """Retrato D&D persistente: reutiliza el file_id de Telegram y solo genera una vez."""
     appearance=str(character.get('appearance') or '').strip()
     if not appearance:
         raise RuntimeError("Primero describe tu personaje con: Apariencia: ...")
+
+    # CACHE PRIMERO: volver a ver el retrato no consume Workers AI.
+    cached_file_id=str(character.get('portrait_file_id') or '').strip()
+    if cached_file_id:
+        data={
+            "chat_id": int(chat_id),
+            "photo": cached_file_id,
+            "caption": f"🎨 {character.get('name')} · {character.get('class_name')}\n♻️ Retrato guardado",
+        }
+        if int(thread_id or 0):
+            data["message_thread_id"]=int(thread_id)
+        result=telegram("sendPhoto",data)
+        if isinstance(result,dict) and result.get("ok"):
+            return result
+        # Nunca regenerar automáticamente si Telegram rechazara el caché:
+        # así un fallo temporal no puede gastar otra generación.
+        raise RuntimeError("El retrato guardado no pudo enviarse. No generé otro para evitar gastar IA.")
+
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise RuntimeError("Falta configurar Cloudflare Workers AI.")
+
     prompt=(
         "Premium dark fantasy tabletop RPG character concept art, full body, cinematic and emotionally expressive, "
         f"character name {character.get('name')}, class {character.get('class_name')}. "
@@ -20351,22 +20370,59 @@ def generate_kiwdnd_character_portrait(chat_id, character, thread_id=0):
         "no text, no letters, no logo, no watermark, no UI, no border."
     )
     ok,used,limit,day=_rpg_ai_usage_reserve()
-    if not ok: raise RuntimeError(f"Límite diario de arte IA alcanzado ({used}/{limit}).")
+    if not ok:
+        raise RuntimeError(f"Límite diario de arte IA alcanzado ({used}/{limit}).")
     url=f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
     try:
-        r=TELEGRAM_SESSION.post(url,headers={"Authorization":f"Bearer {CLOUDFLARE_API_TOKEN}","Content-Type":"application/json"},json={"prompt":prompt},timeout=90)
-        if r.status_code!=200: raise RuntimeError(f"Cloudflare HTTP {r.status_code}: {(r.text or '')[:400]}")
-        ctype=str(r.headers.get('content-type') or '').lower(); raw=r.content
+        r=TELEGRAM_SESSION.post(
+            url,
+            headers={"Authorization":f"Bearer {CLOUDFLARE_API_TOKEN}","Content-Type":"application/json"},
+            json={"prompt":prompt},
+            timeout=90,
+        )
+        if r.status_code!=200:
+            raise RuntimeError(f"Cloudflare HTTP {r.status_code}: {(r.text or '')[:400]}")
+        ctype=str(r.headers.get('content-type') or '').lower()
+        raw=r.content
         if 'application/json' in ctype:
-            payload=r.json(); result=payload.get('result') if isinstance(payload,dict) else None; b64=(result or {}).get('image') if isinstance(result,dict) else None
+            payload=r.json()
+            result=payload.get('result') if isinstance(payload,dict) else None
+            b64=(result or {}).get('image') if isinstance(result,dict) else None
             if not b64 and isinstance(result,dict): b64=result.get('data')
             if not b64 and isinstance(payload,dict): b64=payload.get('image')
             if not b64: raise RuntimeError("Cloudflare devolvió JSON sin imagen.")
-            import base64; raw=base64.b64decode(b64); ctype='image/png'
-        if len(raw)<1000: raise RuntimeError("Cloudflare devolvió una imagen vacía.")
-        return send_photo_bytes(chat_id,raw,caption=f"🎨 {character.get('name')} · {character.get('class_name')}",message_thread_id=(int(thread_id) if thread_id else None),content_type=(ctype.split(';',1)[0] or 'image/png'))
+            import base64
+            raw=base64.b64decode(b64)
+            ctype='image/png'
+        if len(raw)<1000:
+            raise RuntimeError("Cloudflare devolvió una imagen vacía.")
+
+        sent=send_photo_bytes(
+            chat_id,raw,
+            caption=f"🎨 {character.get('name')} · {character.get('class_name')}\n💾 Retrato guardado permanentemente",
+            message_thread_id=(int(thread_id) if thread_id else None),
+            content_type=(ctype.split(';',1)[0] or 'image/png'),
+        )
+        photos=((sent or {}).get("result") or {}).get("photo") or []
+        file_id=str((photos[-1] if photos else {}).get("file_id") or "").strip()
+        if not file_id:
+            raise RuntimeError("Telegram envió el retrato pero no devolvió un file_id reutilizable.")
+
+        # Guardado persistente en PostgreSQL. No depende del proceso de Render.
+        db=get_db()
+        try:
+            db.execute(
+                "UPDATE dnd_characters SET portrait_file_id=?, portrait_prompt=?, updated_at=? "
+                "WHERE campaign_id=? AND user_id=?",
+                (file_id,appearance,int(time.time()),int(character.get('campaign_id')),int(character.get('user_id'))),
+            )
+            db.commit()
+        finally:
+            db.close()
+        return sent
     except Exception:
-        _rpg_ai_usage_release(day); raise
+        _rpg_ai_usage_release(day)
+        raise
 
 def narrate_kiwdnd_action(campaign, character, action, result=None):
     """Narrador improvisacional. El estado canónico permanece en PostgreSQL, no en la IA."""

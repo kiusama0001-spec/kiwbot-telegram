@@ -169,6 +169,10 @@ def _campaign(chat_id,thread_id):
 def _campaign_any(chat_id,thread_id):
     _schema(); c=_db(); r=c.execute("SELECT * FROM dnd_campaigns WHERE chat_id=? AND thread_id=?",(int(chat_id),int(thread_id))).fetchone(); c.close(); return r
 
+def _campaign_in_chat(chat_id):
+    """Única mesa KiwD&D del grupo, sin importar desde qué tema preguntaron."""
+    _schema(); c=_db(); r=c.execute("SELECT * FROM dnd_campaigns WHERE chat_id=? ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",(int(chat_id),)).fetchone(); c.close(); return r
+
 def _char(cid,uid):
     c=_db(); r=c.execute("SELECT * FROM dnd_characters WHERE campaign_id=? AND user_id=?",(int(cid),int(uid))).fetchone(); c.close(); return r
 
@@ -300,12 +304,13 @@ def _reset_keyboard():
     return {"inline_keyboard":[[{"text":"⚠️ Sí, borrar SOLO esta campaña D&D","callback_data":"dnd:resetconfirm"}],[{"text":"❌ Cancelar","callback_data":"dnd:controls"}]]}
 
 def _reset_campaign(camp):
+    """Borra COMPLETAMENTE la campaña de prueba y libera el tema. No toca KiwRPG/PiPesos."""
     cid=int(camp['id']); c=_db()
     tables=['dnd_pending_rolls','dnd_death_saves','dnd_injuries','dnd_reactions','dnd_inventory','dnd_relationships','dnd_secrets','dnd_quests','dnd_sidequest_pool','dnd_memories','dnd_journal','dnd_graveyard','dnd_characters','dnd_world_clock']
-    for table in tables: c.execute(f"DELETE FROM {table} WHERE campaign_id=?",(cid,))
-    scene=random.choice(OPENING_SCENES); now=int(time.time())
-    c.execute("UPDATE dnd_campaigns SET status='active',arc=1,chapter=1,scene=1,scene_key=?,scene_text=?,flags='{}',updated_at=? WHERE id=?",(scene[0],scene[1],now,cid)); c.commit(); c.close()
-    fresh=_campaign(int(camp['chat_id']),int(camp.get('thread_id') or 0)); _seed_campaign(fresh)
+    for table in tables:
+        c.execute(f"DELETE FROM {table} WHERE campaign_id=?",(cid,))
+    c.execute("DELETE FROM dnd_campaigns WHERE id=?",(cid,))
+    c.commit(); c.close()
 
 def _find_mentioned_characters(camp,text,actor_id):
     names={m.lower() for m in re.findall(r'@([A-Za-z0-9_]{3,})', text or '')}
@@ -332,11 +337,18 @@ def handle_command(message,text):
     chat=message.get('chat') or {}; uid=int((message.get('from') or {}).get('id') or 0); chat_id=int(chat.get('id') or 0); thread=_topic(message); user=message.get('from') or {}
     if cmd in ('/dndcrear','/dndiniciar'):
         if chat.get('type')=='private': _S(chat_id,thread,"🐉 Crea la campaña dentro del tema del grupo donde quieran jugar."); return True
-        _schema(); now=int(time.time()); c=_db(); existing=c.execute("SELECT * FROM dnd_campaigns WHERE chat_id=? AND thread_id=?",(chat_id,thread)).fetchone()
-        if existing and existing['status']=='active': c.close(); _S(chat_id,thread,"🐉 Ya existe una campaña KiwD&D activa EN ESTE TEMA.\n\nUsa /dnd para abrir sus controles.",reply_markup=_menu()); return True
+        _schema(); now=int(time.time()); c=_db()
+        existing_here=c.execute("SELECT * FROM dnd_campaigns WHERE chat_id=? AND thread_id=?",(chat_id,thread)).fetchone()
+        existing_chat=c.execute("SELECT * FROM dnd_campaigns WHERE chat_id=? ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",(chat_id,)).fetchone()
+        if existing_chat and int(existing_chat.get('thread_id') or 0)!=thread:
+            bound=int(existing_chat.get('thread_id') or 0); c.close()
+            _S(chat_id,thread,f"🐉 KiwD&D ya está vinculado a OTRO tema de este grupo (tema ID {bound}).\n\nNo abriré controles ni avanzaré la campaña aquí. Ve al tema vinculado y usa 🔄 Reiniciar prueba si quieres borrarla por completo y crearla aquí después.")
+            return True
+        if existing_here and existing_here['status']=='active':
+            c.close(); _S(chat_id,thread,"🐉 Ya existe una campaña KiwD&D activa EN ESTE TEMA.\n\nUsa /dnd para abrir sus controles.",reply_markup=_menu()); return True
         name='Las Cenizas de Aeternus'; scene=random.choice(OPENING_SCENES)
-        if existing:
-            c.execute("UPDATE dnd_campaigns SET status='active',name=?,scene_key=?,scene_text=?,updated_at=? WHERE id=?",(name,scene[0],scene[1],now,int(existing['id'])))
+        if existing_here:
+            c.execute("UPDATE dnd_campaigns SET status='active',name=?,scene_key=?,scene_text=?,updated_at=? WHERE id=?",(name,scene[0],scene[1],now,int(existing_here['id'])))
         else:
             c.execute("INSERT INTO dnd_campaigns(chat_id,thread_id,name,scene_key,scene_text,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(chat_id,thread,name,scene[0],scene[1],uid,now,now))
         c.commit(); c.close(); camp=_campaign(chat_id,thread)
@@ -349,7 +361,12 @@ def handle_command(message,text):
         c=_db(); c.execute("UPDATE dnd_campaigns SET status='active',updated_at=? WHERE id=?",(int(time.time()),int(anycamp['id']))); c.commit(); c.close(); _S(chat_id,thread,"▶️ Campaña reanudada. El mundo vuelve a moverse.",reply_markup=_menu()); return True
     camp=_campaign(chat_id,thread)
     if not camp:
-        _S(chat_id,thread,"🐉 No hay una campaña KiwD&D activa en ESTE tema.\n\nUsa /dndcrear aquí para convertir este tema en la mesa de juego."); return True
+        elsewhere=_campaign_in_chat(chat_id)
+        if elsewhere and int(elsewhere.get('thread_id') or 0)!=thread:
+            _S(chat_id,thread,f"🐉 KiwD&D está vinculado a otro tema de este grupo (tema ID {int(elsewhere.get('thread_id') or 0)}).\n\nAquí no se mostrarán controles ni avanzará la historia.")
+        else:
+            _S(chat_id,thread,"🐉 No hay una campaña KiwD&D activa en ESTE tema.\n\nUsa /dndcrear aquí para convertir este tema en la mesa de juego.")
+        return True
     if cmd in ('/dnd','/dndmenu'): _S(chat_id,thread,f"🐉 {camp['name']}\n📖 Arco {camp['arc']} · Capítulo {camp['chapter']}\n\nElige un control o escribe una acción cuando la escena esté activa.",reply_markup=_menu()); return True
     if cmd in ('/dndunirme','/dndcrearpersonaje'):
         if _char(camp['id'],uid): _S(chat_id,thread,"🎭 Ya tienes personaje en esta campaña.",reply_markup=_menu()); return True
@@ -416,7 +433,7 @@ def handle_callback(query):
         _S(chat_id,thread,'⚠️ REINICIAR CAMPAÑA DE PRUEBA\n\nBorrará SOLO KiwD&D de este tema. No toca KiwRPG ni PiPesos. ¿Seguro?',reply_markup=_reset_keyboard()); return True
     if action=='resetconfirm':
         if uid!=int(camp['created_by']): _S(chat_id,thread,'⚙️ Reinicio cancelado: no eres quien creó la campaña.'); return True
-        _reset_campaign(camp); _S(chat_id,thread,'🔄 KiwD&D reiniciado. Este tema volvió al día 1 sin tocar nada fuera de esta campaña.\n\nUsa /dndunirme para comenzar otra prueba.',reply_markup=_menu()); return True
+        _reset_campaign(camp); _S(chat_id,thread,'🗑️ Campaña KiwD&D de prueba eliminada COMPLETAMENTE.\n\nEl vínculo con este tema quedó libre. Ahora ve al ÚNICO tema donde quieras jugar y usa /dndcrear.\n\nKiwRPG, PiPesos y el resto del bot no fueron tocados.'); return True
     if action=='controls': _S(chat_id,thread,"⚙️ CONTROLES\n\n▶️ /dndcomenzar\n🎭 /dndficha\n👥 /dndgrupo\n📖 /dndhistoria\n🪦 /dndcementerio\n🌍 /dndestado\n🎒 /dndinventario\n🗡️ /dndmisiones\n🤝 /dndrelaciones\n🔐 /dndsecretos\n🛏️ /dnddescansar\n📚 /dndmanual\n🗺️ /dndcampana\n⏸️ /dndpausa\n▶️ /dndreanudar\n🧭 /dndsecundarias\n🔄 /dndreiniciar\n\nTodo funciona únicamente en este tema. El reinicio requiere confirmación y solo borra esta campaña D&D.",reply_markup=_menu()); return True
     if action=='free': _S(chat_id,thread,f"✍️ {_mention(user)}, escribe exactamente lo que tu personaje quiere intentar. No necesitas usar una frase especial."); return True
     if action=='customclass': _S(chat_id,thread,f"✍️ {_mention(user)}, escribe: `Clase: <lo que quieras>`\nEjemplo: Clase: samurái que utiliza magia de sangre.\n\nKiwD&D conservará el concepto pero lo llevará a estadísticas jugables."); return True

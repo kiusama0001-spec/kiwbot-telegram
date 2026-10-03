@@ -2,6 +2,7 @@ import threading
 from pathlib import Path
 import json
 import logging
+from kiwdnd import engine as kiwdnd_engine
 import hashlib
 import hmac
 from urllib.parse import parse_qsl
@@ -2546,6 +2547,10 @@ def apply_current_topic(data):
 # TELEGRAM HELPERS
 # =========================================================
 
+_TELEGRAM_DEAD_CHATS = set()
+_TELEGRAM_DEAD_CHATS_LOCK = threading.Lock()
+
+
 def telegram(
     method,
     data=None
@@ -2557,6 +2562,11 @@ def telegram(
     try:
 
         payload = apply_current_topic(data or {})
+        target_chat = payload.get("chat_id")
+        if target_chat is not None:
+            with _TELEGRAM_DEAD_CHATS_LOCK:
+                if int(target_chat) in _TELEGRAM_DEAD_CHATS:
+                    return None
 
         response = TELEGRAM_SESSION.post(
             f"{TELEGRAM_API}/{method}",
@@ -2566,12 +2576,17 @@ def telegram(
 
         if not response.ok:
 
-            logger.error(
-                "Telegram %s -> %s",
-                method,
-                response.text[:500]
-            )
-
+            body = response.text[:500]
+            # Un grupo del que el bot fue expulsado no se reintenta durante la vida
+            # del proceso. Evita jobs muertos golpeando Telegram cada pocos minutos.
+            if response.status_code == 403 and target_chat is not None and (
+                "bot was kicked" in body.lower() or "not a member" in body.lower() or "forbidden" in body.lower()
+            ):
+                with _TELEGRAM_DEAD_CHATS_LOCK:
+                    _TELEGRAM_DEAD_CHATS.add(int(target_chat))
+                logger.warning("Chat Telegram desactivado en memoria tras 403 | chat=%s | method=%s", target_chat, method)
+                return None
+            logger.error("Telegram %s -> %s", method, body)
             return None
 
         return response.json()
@@ -4795,6 +4810,66 @@ RPG_ENEMIES = [
     {"key":"arquera_frontera","name":"Arquera de la Frontera","hp":80,"atk":24,"def":7,"exp":55,"kw":46},
     {"key":"mago_duelista","name":"Mago Duelista","hp":78,"atk":25,"def":7,"exp":58,"kw":48},
     {"key":"paladin_desterrado","name":"Paladín Desterrado","hp":116,"atk":21,"def":13,"exp":68,"kw":58},
+    {"key":"sabueso_vacio","name":"Sabueso del Vacío","hp":1620,"atk":80,"def":31,"exp":380,"kw":295,"dice_count":2},
+    {"key":"guardian_obsidiana","name":"Guardián de Obsidiana","hp":1661,"atk":82,"def":31,"exp":389,"kw":301,"dice_count":2},
+    {"key":"bruja_ceniza","name":"Bruja de las Cenizas","hp":1702,"atk":83,"def":31,"exp":398,"kw":308,"dice_count":2},
+    {"key":"devorador_almas","name":"Devorador de Almas","hp":1744,"atk":84,"def":32,"exp":407,"kw":315,"dice_count":2},
+    {"key":"caballero_abismo","name":"Caballero del Abismo","hp":1785,"atk":85,"def":32,"exp":416,"kw":322,"dice_count":2},
+    {"key":"mantis_cristal","name":"Mantis de Cristal","hp":1827,"atk":87,"def":33,"exp":426,"kw":329,"dice_count":2},
+    {"key":"gigante_tumba","name":"Gigante de la Tumba","hp":1868,"atk":88,"def":33,"exp":435,"kw":336,"dice_count":2},
+    {"key":"quimera_nocturna","name":"Quimera Nocturna","hp":1909,"atk":89,"def":34,"exp":444,"kw":343,"dice_count":2},
+    {"key":"serafin_roto","name":"Serafín Roto","hp":1951,"atk":90,"def":34,"exp":453,"kw":350,"dice_count":2},
+    {"key":"verdugo_astral","name":"Verdugo Astral","hp":1992,"atk":92,"def":35,"exp":462,"kw":357,"dice_count":2},
+    {"key":"dragon_hueso","name":"Dragón de Hueso","hp":2034,"atk":93,"def":35,"exp":472,"kw":364,"dice_count":2},
+    {"key":"oraculo_ciego","name":"Oráculo Ciego","hp":2075,"atk":94,"def":36,"exp":481,"kw":370,"dice_count":2},
+    {"key":"bestia_runa","name":"Bestia Rúnica","hp":2116,"atk":95,"def":36,"exp":490,"kw":377,"dice_count":2},
+    {"key":"cosechador_sangre","name":"Cosechador de Sangre","hp":2158,"atk":97,"def":36,"exp":499,"kw":384,"dice_count":2},
+    {"key":"golem_catedral","name":"Gólem Catedral","hp":2199,"atk":98,"def":37,"exp":508,"kw":391,"dice_count":2},
+    {"key":"wyvern_tormenta","name":"Wyvern de Tormenta","hp":2241,"atk":99,"def":37,"exp":518,"kw":398,"dice_count":2},
+    {"key":"demonio_espejo","name":"Demonio del Espejo","hp":2282,"atk":100,"def":38,"exp":527,"kw":405,"dice_count":2},
+    {"key":"rey_ogro","name":"Rey Ogro Errante","hp":2323,"atk":102,"def":38,"exp":536,"kw":412,"dice_count":2},
+    {"key":"espectro_corona","name":"Espectro de la Corona","hp":2365,"atk":103,"def":39,"exp":545,"kw":419,"dice_count":2},
+    {"key":"guardian_umbral","name":"Guardián del Umbral","hp":2406,"atk":104,"def":39,"exp":554,"kw":426,"dice_count":2},
+    {"key":"hidra_ceniza","name":"Hidra de Ceniza","hp":2448,"atk":106,"def":40,"exp":564,"kw":433,"dice_count":2},
+    {"key":"apostol_vacio","name":"Apóstol del Vacío","hp":2489,"atk":107,"def":40,"exp":573,"kw":439,"dice_count":2},
+    {"key":"coloso_hierro","name":"Coloso de Hierro Negro","hp":2530,"atk":108,"def":41,"exp":582,"kw":446,"dice_count":2},
+    {"key":"cazador_almas","name":"Cazador de Almas","hp":2572,"atk":109,"def":41,"exp":591,"kw":453,"dice_count":2},
+    {"key":"dragon_tormenta","name":"Dragón de Tormenta","hp":2613,"atk":111,"def":42,"exp":600,"kw":460,"dice_count":2},
+    {"key":"titiritera","name":"La Titiritera Carmesí","hp":2655,"atk":112,"def":42,"exp":610,"kw":467,"dice_count":2},
+    {"key":"monje_sin_rostro","name":"Monje sin Rostro","hp":2696,"atk":113,"def":42,"exp":619,"kw":474,"dice_count":2},
+    {"key":"leviatan_joven","name":"Leviatán Joven","hp":2737,"atk":114,"def":43,"exp":628,"kw":481,"dice_count":2},
+    {"key":"arcangel_ceniza","name":"Arcángel de Ceniza","hp":2779,"atk":116,"def":43,"exp":637,"kw":488,"dice_count":2},
+    {"key":"bestia_reloj","name":"Bestia del Reloj","hp":2820,"atk":117,"def":44,"exp":646,"kw":495,"dice_count":2},
+    {"key":"demonio_catedral","name":"Demonio Catedral","hp":2862,"atk":118,"def":44,"exp":656,"kw":502,"dice_count":2},
+    {"key":"caballero_luna","name":"Caballero de la Luna Muerta","hp":2903,"atk":119,"def":45,"exp":665,"kw":508,"dice_count":2},
+    {"key":"reina_espectros","name":"Reina de los Espectros","hp":2944,"atk":121,"def":45,"exp":674,"kw":515,"dice_count":2},
+    {"key":"golem_estelar","name":"Gólem Estelar","hp":2986,"atk":122,"def":46,"exp":683,"kw":522,"dice_count":2},
+    {"key":"devorador_recuerdos","name":"Devorador de Recuerdos","hp":3027,"atk":123,"def":46,"exp":692,"kw":529,"dice_count":2},
+    {"key":"dragon_eclipse","name":"Dragón del Eclipse","hp":3069,"atk":125,"def":47,"exp":702,"kw":536,"dice_count":2},
+    {"key":"heraldo_caos","name":"Heraldo del Caos","hp":3110,"atk":126,"def":47,"exp":711,"kw":543,"dice_count":2},
+    {"key":"sacerdote_abismo","name":"Sacerdote del Abismo","hp":3151,"atk":127,"def":48,"exp":720,"kw":550,"dice_count":2},
+    {"key":"gigante_celeste","name":"Gigante Celeste Caído","hp":3193,"atk":128,"def":48,"exp":729,"kw":557,"dice_count":2},
+    {"key":"verdugo_tiempo","name":"Verdugo del Tiempo","hp":3234,"atk":130,"def":48,"exp":738,"kw":564,"dice_count":2},
+    {"key":"quimera_vacio","name":"Quimera del Vacío","hp":3276,"atk":131,"def":49,"exp":748,"kw":571,"dice_count":2},
+    {"key":"serpiente_mundo","name":"Serpiente del Mundo Joven","hp":3317,"atk":132,"def":49,"exp":757,"kw":577,"dice_count":2},
+    {"key":"demonio_rey","name":"Demonio de Sangre Real","hp":3358,"atk":133,"def":50,"exp":766,"kw":584,"dice_count":2},
+    {"key":"guardian_primordial","name":"Guardián Primordial","hp":3400,"atk":135,"def":50,"exp":775,"kw":591,"dice_count":2},
+    {"key":"angel_guerra","name":"Ángel de Guerra Roto","hp":3441,"atk":136,"def":51,"exp":784,"kw":598,"dice_count":2},
+    {"key":"coloso_abismo","name":"Coloso del Abismo","hp":3483,"atk":137,"def":51,"exp":794,"kw":605,"dice_count":2},
+    {"key":"dragon_negro","name":"Dragón Negro de Aeternus","hp":3524,"atk":138,"def":52,"exp":803,"kw":612,"dice_count":2},
+    {"key":"avatar_hambre","name":"Avatar del Hambre","hp":3565,"atk":140,"def":52,"exp":812,"kw":619,"dice_count":2},
+    {"key":"caballero_fin","name":"Caballero del Fin","hp":3607,"atk":141,"def":53,"exp":821,"kw":626,"dice_count":2},
+    {"key":"profeta_roto","name":"Profeta Roto","hp":3648,"atk":142,"def":53,"exp":830,"kw":633,"dice_count":2},
+    {"key":"bestia_primordial","name":"Bestia Primordial","hp":3690,"atk":144,"def":54,"exp":840,"kw":640,"dice_count":2},
+    {"key":"heraldo_noche","name":"Heraldo de la Noche Eterna","hp":3731,"atk":145,"def":54,"exp":849,"kw":646,"dice_count":2},
+    {"key":"titan_ceniza","name":"Titán de Ceniza","hp":3772,"atk":146,"def":54,"exp":858,"kw":653,"dice_count":2},
+    {"key":"demonio_antiguo","name":"Demonio Antiguo","hp":3814,"atk":147,"def":55,"exp":867,"kw":660,"dice_count":2},
+    {"key":"guardian_fin","name":"Guardián del Fin del Camino","hp":3855,"atk":149,"def":55,"exp":876,"kw":667,"dice_count":2},
+    {"key":"dragon_primordial","name":"Dragón Primordial","hp":3897,"atk":150,"def":56,"exp":886,"kw":674,"dice_count":2},
+    {"key":"avatar_vacio","name":"Avatar del Vacío","hp":3938,"atk":151,"def":56,"exp":895,"kw":681,"dice_count":2},
+    {"key":"serafin_abismo","name":"Serafín del Abismo","hp":3979,"atk":152,"def":57,"exp":904,"kw":688,"dice_count":2},
+    {"key":"devorador_mundos","name":"Devorador de Mundos Menor","hp":4021,"atk":154,"def":57,"exp":913,"kw":695,"dice_count":2},
+    {"key":"eco_aeternus","name":"Eco Hostil de Aeternus","hp":4062,"atk":155,"def":58,"exp":922,"kw":702,"dice_count":2},
 ]
 
 # =========================================================
@@ -5951,7 +6026,7 @@ RPG_ABILITIES = {
     ],
 }
 
-RPG_MAX_LEVEL = 100
+RPG_MAX_LEVEL = 200
 
 def exp_needed(level):
     """EXP necesaria para subir de nivel. Desde Nv.70 comienza el endgame."""
@@ -6287,15 +6362,21 @@ def _rpg_apply_defeat(conn, char):
 
 
 def _rpg_enemy_damage(battle, eff, defending=False):
-    enemy_roll = random.randint(1,6)
-    if enemy_roll == 1:
-        return enemy_roll, 0
-    mult = RPG_DICE_MULT[enemy_roll]
+    base = next((x for x in RPG_ENEMIES if x.get("key")==battle.get("enemy_key")), {})
+    dice_count = max(1, int(base.get("dice_count") or 1))
+    rolls = [random.randint(1,6) for _ in range(dice_count)]
+    # Enemigos de la expansión 100-200 tiran dos dados: ambos aportan potencia.
+    if dice_count == 1 and rolls[0] == 1:
+        return rolls[0], 0
+    mult = sum(RPG_DICE_MULT[r] for r in rolls) / max(1, dice_count)
+    if dice_count > 1:
+        mult *= 1.22
     raw = (int(battle["enemy_atk"]) * 0.72 * mult) - (eff["defense"] * 0.46)
     dmg = max(1, int(round(raw * RPG_PVE_ENEMY_DAMAGE_MULT)))
     if defending:
         dmg = max(0, int(round(dmg * 0.50)))
-    return enemy_roll, dmg
+    shown = "+".join(str(r) for r in rolls) if dice_count > 1 else rolls[0]
+    return shown, dmg
 
 
 def _reserve_manual_encounter(user_id):
@@ -9286,6 +9367,16 @@ RPG_BOSSES = {
     "nidhogg": {"name":"Nidhogg, Devorador de Mundos","level":36,"hp":7200,"atk":48,"defense":22,"style":"dragon","hours":4},
     "chronos": {"name":"Chronos, Guardián del Tiempo","level":39,"hp":6400,"atk":47,"defense":20,"style":"time","hours":4},
     "azath": {"name":"Azath, Dios del Abismo","level":45,"hp":9000,"atk":54,"defense":24,"style":"abyss","hours":5},
+    "morvath": {"name":"Morvath, Rey de las Tumbas","level":70,"hp":15000,"atk":68,"defense":30,"style":"healer","hours":4,"dice_count":2},
+    "valkyria_negra": {"name":"Valkyria Negra de Aeternus","level":85,"hp":18500,"atk":76,"defense":34,"style":"counter","hours":4,"dice_count":2},
+    "ouroboros": {"name":"Ouroboros, Serpiente del Ciclo","level":100,"hp":22000,"atk":84,"defense":38,"style":"regenerator","hours":5,"dice_count":2},
+    "belial": {"name":"Belial, Rey Infernal","level":120,"hp":28000,"atk":96,"defense":42,"style":"aggressive","hours":5,"dice_count":2},
+    "azazel": {"name":"Azazel, Devorador de Almas","level":140,"hp":34000,"atk":108,"defense":46,"style":"abyss","hours":5,"dice_count":2},
+    "serafin_fin": {"name":"Serafín del Último Juramento","level":155,"hp":39000,"atk":116,"defense":50,"style":"tactical","hours":5,"dice_count":2},
+    "leviatan_negro": {"name":"Leviatán Negro, Hambre del Mar","level":170,"hp":46000,"atk":126,"defense":54,"style":"colossus","hours":6,"dice_count":2},
+    "chronos_roto": {"name":"Chronos Roto, Fin de las Horas","level":180,"hp":52000,"atk":136,"defense":58,"style":"time","hours":6,"dice_count":2},
+    "rey_sin_nombre": {"name":"El Rey sin Nombre","level":190,"hp":61000,"atk":148,"defense":62,"style":"chaos","hours":6,"dice_count":2},
+    "aeternus_despierto": {"name":"Aeternus Despierto","level":200,"hp":75000,"atk":165,"defense":70,"style":"abyss","hours":8,"dice_count":2},
     "will_trial": {"name":"Aeternus, Titán del Vacío","level":50,"hp":12000,"atk":58,"defense":27,"style":"chaos","hours":1},
 }
 
@@ -10519,10 +10610,16 @@ def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
     else:
         if eff is None: eff=_boss_stats_for(user_id,char)
         phase=_boss_phase(b); move_name,mult=_boss_attack_move(b,choice); mult*=1.12 if phase==2 else (1.25 if phase==3 else 1.0)
-        dr=send_dice(chat_id,'🎲')
-        roll=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
-        if not roll: roll=random.randint(1,6)
-        damage=0 if roll==1 else max(1,int(round((int(b['atk'])*mult*RPG_DICE_MULT[roll])-(eff['defense']*.35))))
+        dice_count=max(1,int(RPG_BOSSES.get(str(b.get('boss_key') or ''),{}).get('dice_count') or 1))
+        boss_rolls=[]
+        for _i in range(dice_count):
+            dr=send_dice(chat_id,'🎲')
+            rv=int((((dr or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+            boss_rolls.append(rv or random.randint(1,6))
+        roll=max(boss_rolls)
+        dice_mult=sum(RPG_DICE_MULT[r] for r in boss_rolls)/len(boss_rolls)
+        if dice_count>1: dice_mult*=1.25
+        damage=0 if (dice_count==1 and roll==1) else max(1,int(round((int(b['atk'])*mult*dice_mult)-(eff['defense']*.35))))
         key=str(b.get('boss_key') or '')
         # Identidad mecánica de los Bosses sin añadir estados frágiles a la BD.
         if phase==3 and key in ('fenrir','behemoth'): damage=max(0,int(round(damage*1.18)))
@@ -15966,7 +16063,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo'
+ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo /dnd /dndcrear /dndiniciar /dndunirme /dndcrearpersonaje /dndficha /dndgrupo /dndhistoria /dndestado /dndmundo /dndmanual /dndcomenzar /dndretrato /dndinventario /dndmisiones /dndrelaciones /dndsecretos /dndcementerio /dndtumbas /dnddescansar /dndpausa /dndreanudar /dndcampana /dndarcos /dndsecundarias /dndsidequests /dndreiniciar'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -16356,7 +16453,7 @@ def _enemy_threat(enemy):
     k=str(enemy.get('key') or '')
     for hint,lvl in RPG_ENEMY_THREAT_HINTS.items():
         if hint in k:return lvl
-    hp=int(enemy.get('hp') or 1); atk=int(enemy.get('atk') or 1); return max(1,min(60,int((hp/20+atk)/2)))
+    hp=int(enemy.get('hp') or 1); atk=int(enemy.get('atk') or 1); return max(1,min(RPG_MAX_LEVEL,int((hp/20+atk)/2)))
 
 def _select_enemy_for_level(level,rng=random):
     level=max(1,int(level)); candidates=[]; weights=[]
@@ -17166,6 +17263,10 @@ def process_command(
     message,
     text
 ):
+
+    # KiwD&D vive en su propio módulo y sus comandos no caen al RPG/IA.
+    if kiwdnd_engine.handle_command(message, text):
+        return True
 
     chat = message.get(
         "chat",
@@ -19573,6 +19674,8 @@ def process_update(
             callback_message = callback_query.get("message") or {}
             set_current_combat_user((callback_query.get("from") or {}).get("id"))
             set_current_message_thread_id(callback_message.get("message_thread_id"))
+            if kiwdnd_engine.handle_callback(callback_query):
+                return
             handle_rpg_callback(callback_query)
             return
 
@@ -19660,6 +19763,10 @@ def process_update(
             # Esto evita que Groq invente respuestas para comandos RPG mal escritos
             # (por ejemplo, /generarimagen) o comandos destinados a otros bots.
             logger.info("Comando no manejado ignorado: %s | chat=%s | user=%s", command_name(text), chat_id, user_id)
+            return
+
+        # KiwD&D solo consume mensajes/dados dentro del tema que tiene una campaña activa.
+        if kiwdnd_engine.handle_message(message, text):
             return
 
         if handle_reset_password_message(message, text):
@@ -20203,6 +20310,75 @@ def index():
 # =========================================================
 # CONFIGURAR WEBHOOK
 # =========================================================
+
+
+def send_kiwdnd_topic_message(chat_id, thread_id, text, reply_markup=None):
+    """Envía KiwD&D exclusivamente al tema al que pertenece la campaña."""
+    if not text:
+        return None
+    chunks=[str(text)[i:i+TELEGRAM_MAX_CHARS] for i in range(0,len(str(text)),TELEGRAM_MAX_CHARS)]
+    result=None
+    for index,chunk in enumerate(chunks):
+        data={"chat_id":int(chat_id),"text":chunk}
+        if int(thread_id or 0): data["message_thread_id"]=int(thread_id)
+        if reply_markup and index==0: data["reply_markup"]=reply_markup
+        result=telegram_api("sendMessage",data)
+    return result
+
+def generate_kiwdnd_character_portrait(chat_id, character, thread_id=0):
+    """Retrato D&D separado de los assets KiwRPG; reutiliza Workers AI y su cuota segura."""
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise RuntimeError("Falta configurar Cloudflare Workers AI.")
+    appearance=str(character.get('appearance') or '').strip()
+    if not appearance:
+        raise RuntimeError("Primero describe tu personaje con: Apariencia: ...")
+    prompt=(
+        "Premium dark fantasy tabletop RPG character concept art, full body, cinematic and emotionally expressive, "
+        f"character name {character.get('name')}, class {character.get('class_name')}. "
+        f"Canonical appearance: {appearance}. "
+        "Aeternus dark fantasy world, believable clothing and equipment, unique silhouette, dramatic natural lighting, "
+        "no text, no letters, no logo, no watermark, no UI, no border."
+    )
+    ok,used,limit,day=_rpg_ai_usage_reserve()
+    if not ok: raise RuntimeError(f"Límite diario de arte IA alcanzado ({used}/{limit}).")
+    url=f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    try:
+        r=TELEGRAM_SESSION.post(url,headers={"Authorization":f"Bearer {CLOUDFLARE_API_TOKEN}","Content-Type":"application/json"},json={"prompt":prompt},timeout=90)
+        if r.status_code!=200: raise RuntimeError(f"Cloudflare HTTP {r.status_code}: {(r.text or '')[:400]}")
+        ctype=str(r.headers.get('content-type') or '').lower(); raw=r.content
+        if 'application/json' in ctype:
+            payload=r.json(); result=payload.get('result') if isinstance(payload,dict) else None; b64=(result or {}).get('image') if isinstance(result,dict) else None
+            if not b64 and isinstance(result,dict): b64=result.get('data')
+            if not b64 and isinstance(payload,dict): b64=payload.get('image')
+            if not b64: raise RuntimeError("Cloudflare devolvió JSON sin imagen.")
+            import base64; raw=base64.b64decode(b64); ctype='image/png'
+        if len(raw)<1000: raise RuntimeError("Cloudflare devolvió una imagen vacía.")
+        return send_photo_bytes(chat_id,raw,caption=f"🎨 {character.get('name')} · {character.get('class_name')}",message_thread_id=(int(thread_id) if thread_id else None),content_type=(ctype.split(';',1)[0] or 'image/png'))
+    except Exception:
+        _rpg_ai_usage_release(day); raise
+
+def narrate_kiwdnd_action(campaign, character, action, result=None):
+    """Narrador improvisacional. El estado canónico permanece en PostgreSQL, no en la IA."""
+    if not groq_client:
+        return None
+    flags=str(campaign.get('flags') or '{}')[:5000]
+    result_text=(json.dumps(result,ensure_ascii=False) if result else 'sin tirada; decide si la acción simplemente avanza la escena')
+    prompt=(
+        "Eres el Dungeon Master de KiwD&D, una campaña oscura, emotiva, hermosa, emocionante y con humor cuando nace naturalmente. "
+        "El mundo es Aeternus y debe sentirse persistente. Eira, Brok, Elías, Orin, Erick, Mara y Nox son personajes reales del mundo, no cameos. "
+        "Narra 1 a 4 párrafos breves en español. No decidas acciones por otros jugadores. No reveles secretos que el personaje no conoce. "
+        "No conviertas cada acción en combate. El fracaso debe crear consecuencias e historia, no un GAME OVER automático. "
+        "No inventes resultados de dados: respeta exactamente el resultado suministrado. No escribas menús ni opciones; el motor pone los botones.\n\n"
+        f"Campaña: {campaign.get('name')} | arco {campaign.get('arc')} capítulo {campaign.get('chapter')} escena {campaign.get('scene')}\n"
+        f"Estado/banderas: {flags}\n"
+        f"Personaje: {character.get('telegram_name')} / {character.get('name')} / {character.get('class_name')} Nv.{character.get('level')}\n"
+        f"Acción: {action}\nResultado mecánico: {result_text}"
+    )
+    r=groq_client.chat.completions.create(model=MODEL_NAME,messages=[{"role":"system","content":prompt}],temperature=.92,max_tokens=420)
+    return str(r.choices[0].message.content or '').strip()[:2600]
+
+# KiwD&D recibe dependencias explícitas: no importa KiwRPG ni acopla sus tablas.
+kiwdnd_engine.configure(send_message=send_message, send_dice=send_dice, get_db=get_db, is_admin=is_admin, generate_portrait=generate_kiwdnd_character_portrait, narrate=narrate_kiwdnd_action, send_topic=send_kiwdnd_topic_message)
 
 def configure_webhook():
 

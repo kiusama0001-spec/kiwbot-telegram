@@ -1,7 +1,7 @@
 """KiwD&D — motor independiente de campaña persistente para Telegram.
 No importa ni modifica KiwRPG. main.py solo inyecta helpers de Telegram/DB.
 """
-import json, random, time, re
+import json, random, time, re, unicodedata
 
 _SEND=None; _SEND_TOPIC=None; _DICE=None; _DB=None; _ADMIN=None; _PHOTO=None; _NARRATE=None
 
@@ -147,6 +147,8 @@ def _schema():
     c=_db()
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_campaigns(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,thread_id BIGINT NOT NULL DEFAULT 0,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',arc BIGINT NOT NULL DEFAULT 1,chapter BIGINT NOT NULL DEFAULT 1,scene BIGINT NOT NULL DEFAULT 1,scene_key TEXT DEFAULT '',scene_text TEXT DEFAULT '',flags TEXT NOT NULL DEFAULT '{}',created_by BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE(chat_id,thread_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_characters(id BIGSERIAL PRIMARY KEY,campaign_id BIGINT NOT NULL,user_id BIGINT NOT NULL,telegram_name TEXT DEFAULT '',name TEXT NOT NULL,class_key TEXT NOT NULL,class_name TEXT NOT NULL,background TEXT DEFAULT '',appearance TEXT DEFAULT '',level BIGINT NOT NULL DEFAULT 1,xp BIGINT NOT NULL DEFAULT 0,hp BIGINT NOT NULL DEFAULT 20,max_hp BIGINT NOT NULL DEFAULT 20,str BIGINT NOT NULL DEFAULT 10,dex BIGINT NOT NULL DEFAULT 10,con BIGINT NOT NULL DEFAULT 10,intel BIGINT NOT NULL DEFAULT 10,wis BIGINT NOT NULL DEFAULT 10,cha BIGINT NOT NULL DEFAULT 10,status TEXT NOT NULL DEFAULT 'active',joined_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE(campaign_id,user_id))""")
+    c.execute("ALTER TABLE dnd_characters ADD COLUMN IF NOT EXISTS portrait_file_id TEXT DEFAULT '';")
+    c.execute("ALTER TABLE dnd_characters ADD COLUMN IF NOT EXISTS portrait_prompt TEXT DEFAULT '';")
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_memories(id BIGSERIAL PRIMARY KEY,campaign_id BIGINT NOT NULL,user_id BIGINT NOT NULL DEFAULT 0,npc_key TEXT DEFAULT '',kind TEXT NOT NULL,mem_key TEXT NOT NULL,value TEXT DEFAULT '',weight BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL,UNIQUE(campaign_id,user_id,npc_key,mem_key))""")
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_journal(id BIGSERIAL PRIMARY KEY,campaign_id BIGINT NOT NULL,chapter BIGINT NOT NULL,actor_id BIGINT NOT NULL DEFAULT 0,event_type TEXT NOT NULL,text TEXT NOT NULL,created_at BIGINT NOT NULL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_pending_rolls(campaign_id BIGINT PRIMARY KEY,user_id BIGINT NOT NULL,reason TEXT NOT NULL,stat TEXT DEFAULT '',needed BIGINT NOT NULL DEFAULT 1,current BIGINT NOT NULL DEFAULT 0,rolls TEXT NOT NULL DEFAULT '[]',difficulty BIGINT NOT NULL DEFAULT 10,created_at BIGINT NOT NULL)""")
@@ -187,7 +189,7 @@ def _menu():
       [{"text":"🪦 Cementerio","callback_data":"dnd:graveyard"}],
       [{"text":"🎒 Inventario","callback_data":"dnd:inventory"},{"text":"🗡️ Misiones","callback_data":"dnd:quests"}],
       [{"text":"🤝 Relaciones","callback_data":"dnd:relations"},{"text":"🔐 Secretos","callback_data":"dnd:secrets"}],
-      [{"text":"🎨 Retrato IA","callback_data":"dnd:portrait"},{"text":"🛏️ Descansar","callback_data":"dnd:rest"}],
+      [{"text":"🎨 Mi retrato","callback_data":"dnd:portrait"},{"text":"🛏️ Descansar","callback_data":"dnd:rest"}],
       [{"text":"📚 Manual","callback_data":"dnd:manual"},{"text":"⚙️ Controles","callback_data":"dnd:controls"}],
       [{"text":"🔄 Reiniciar prueba","callback_data":"dnd:reset"}]
     ]}
@@ -450,7 +452,7 @@ def handle_callback(query):
         choice=opts[idx]; consequence,flag=SCENE_BRANCHES.get(choice,("La decisión cambia el rumbo de la escena.","choice_"+str(idx)))
         flags=json.loads(camp.get('flags') or '{}'); flags[flag]={'by':uid,'at':int(time.time()),'choice':choice}
         now=int(time.time()); c=_db(); c.execute("UPDATE dnd_campaigns SET flags=?,scene=scene+1,updated_at=? WHERE id=?",(json.dumps(flags,ensure_ascii=False),now,int(camp['id']))); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'decision',f"{_mention(user)} decidió: {choice}.",now)); c.commit(); c.close()
-        _S(chat_id,thread,f"🕯️ {_mention(user)} — {choice}\n\n{consequence}\n\nLa campaña ha guardado esta decisión. Sus consecuencias no tienen por qué terminar en esta escena.\n\n✍️ Pueden escribir qué hacen ahora.",reply_markup=_menu()); return True
+        _S(chat_id,thread,_with_suggestions(camp,f"🕯️ {_mention(user)} — {choice}\n\n{consequence}\n\nLa campaña ha guardado esta decisión. Sus consecuencias no tienen por qué terminar en esta escena.",choice)); return True
     if action.startswith('react:'):
         parts=action.split(':'); reaction=parts[1] if len(parts)>1 else 'resist'; actor=int(parts[2]) if len(parts)>2 and parts[2].isdigit() else 0
         c=_db(); r=c.execute("SELECT * FROM dnd_reactions WHERE campaign_id=? AND actor_id=? AND target_id=? AND status='pending' ORDER BY id DESC LIMIT 1",(int(camp['id']),actor,uid)).fetchone()
@@ -503,9 +505,102 @@ def _campaign_plan():
     lines.append("\n\nCada capítulo tiene rutas alternativas y no todas vuelven al mismo punto. Además existen capítulos personales, secundarias, consecuencias diferidas y escenas generadas desde el estado persistente del mundo.")
     return ''.join(lines)
 
+def _norm(text):
+    text=unicodedata.normalize('NFKD', str(text or '').lower())
+    text=''.join(ch for ch in text if not unicodedata.combining(ch))
+    text=re.sub(r'[^a-z0-9@ñ ]+', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+def _flags(camp):
+    try: return json.loads(camp.get('flags') or '{}')
+    except Exception: return {}
+
+def _save_flag(camp,key,value=True):
+    flags=_flags(camp); flags[key]=value; now=int(time.time())
+    c=_db(); c.execute('UPDATE dnd_campaigns SET flags=?,updated_at=? WHERE id=?',(json.dumps(flags,ensure_ascii=False),now,int(camp['id']))); c.commit(); c.close()
+
+def _suggestions(camp, context='', mode='scene'):
+    """Pistas contextuales. Son ejemplos, nunca limitan la acción libre."""
+    low=_norm(context); flags=_flags(camp); opts=[]
+    def add(x):
+        if x and x not in opts: opts.append(x)
+    if mode=='roll':
+        add('🎲 Lanzar el dado de Telegram')
+        add('🤝 Pedir ayuda a un compañero')
+        add('✍️ Intentar otra estrategia')
+    elif mode=='agony':
+        add('🩹 Intentar estabilizar al caído')
+        add('🛡️ Protegerlo del peligro')
+        add('✍️ Hacer cualquier otra cosa')
+    elif any(w in low for w in ('nox','eira','mara','orin','brok','elias','habl','pregunt','dice','responde')):
+        add('🗣️ Seguir preguntando')
+        add('🔎 Observar si está ocultando algo')
+        add('🤝 Intentar ganarte su confianza')
+        add('✍️ Hacer cualquier otra cosa')
+    elif any(w in low for w in ('runa','inscripcion','simbolo','pluma','ceniza','pista','rastro','investig','exam')):
+        if not flags.get('runes_read'): add('🔎 Examinar las runas con más cuidado')
+        add('🗣️ Preguntarle a Nox qué sabe')
+        add('🧭 Seguir la pista que acabas de encontrar')
+        add('✍️ Hacer cualquier otra cosa')
+    elif any(w in low for w in ('ataco','golpe','enemigo','demon','bestia','combate','pelea')):
+        add('⚔️ Atacar')
+        add('🛡️ Defenderte o proteger a alguien')
+        add('🏃 Intentar retirarte')
+        add('✍️ Probar otra maniobra')
+    elif any(w in low for w in ('camino','caverna','bosque','pueblo','puerta','viaj','avan','rastro','huella')):
+        add('🧭 Avanzar con cuidado')
+        add('🔎 Buscar peligros o pistas')
+        add('↩️ Regresar y prepararte mejor')
+        add('✍️ Tomar otra ruta')
+    else:
+        add('🔎 Investigar el entorno')
+        add('🗣️ Hablar con alguien presente')
+        add('🧭 Avanzar')
+        add('✍️ Hacer cualquier otra cosa')
+    return '\n\n¿Qué quieres hacer?\n'+'\n'.join('• '+x for x in opts[:4])
+
+def _local_narration(camp,ch,text):
+    """Director local: interpreta acciones frecuentes sin IA y conserva pistas básicas."""
+    low=_norm(text); flags=_flags(camp)
+    burn=any(w in low for w in ('quemo','quemar','kemo','kemar','incendio','prendo fuego'))
+    runes=any(w in low for w in ('runa','runas','inscripcion','simbolo','simbolos'))
+    inspect=any(w in low for w in ('reviso','revisar','examino','examinar','miro','mirar','investigo','investigar','leo','leer','aver','veo'))
+    nox='nox' in low
+    tracks=any(w in low for w in ('rastro','rastros','huella','huellas','seguir','sigo','persigo'))
+    cave=any(w in low for w in ('caverna','cueva','luna','lunar'))
+    if burn and any(w in low for w in ('pluma','ceniza')):
+        if flags.get('feather_burned'):
+            return 'Las cenizas de la pluma ya están frías. Al removerlas notas que los trazos azulados no desaparecieron: quedaron marcados sobre la piedra como si el fuego hubiera revelado algo que estaba escondido.'
+        _save_flag(camp,'feather_burned',{'at':int(time.time()),'by':int(ch['user_id'])}); _save_flag(camp,'runes_revealed',True)
+        return 'La pluma prende con una llama azul demasiado fría para ser normal. Cuando se consume, el humo se pega a la piedra y deja una hilera de runas. Nox da un paso atrás al reconocerlas, pero no explica por qué.'
+    if runes and inspect:
+        _save_flag(camp,'runes_read',True); _save_flag(camp,'moon_cave_clue',True)
+        return 'Las runas brillan con un tenue resplandor. Al acercarte, la escritura parece acomodarse hasta que logras entenderla:\n\n> «El paso que buscas está sellado. Aquellos que se atreven a pasar se encuentran sin retorno.»\n> «Busca la luz de la luna en la caverna; entonces podrás avanzar.»\n\nNo parece una simple advertencia: también es una dirección.'
+    if nox and any(w in low for w in ('pregunto','preguntar','dime','sabe','sabes','hablo','interrogo','porque','por que')):
+        _save_flag(camp,'nox_questioned',True)
+        if flags.get('moon_cave_clue') or cave:
+            return 'Nox guarda silencio unos segundos. —Hay una caverna al norte, detrás del viejo camino de los mineros. De noche, la luna entra por una grieta del techo. No te lo dije porque la última persona que siguió esas runas no regresó. Si vamos, prefiero que sepamos primero qué estamos buscando.'
+        return 'Nox evita tu mirada. —Sé más de esa pluma de lo que quisiera. Puedo contarlo, pero primero necesito saber cuánto viste exactamente. Hay cosas que, una vez dichas, ya no pueden fingirse desconocidas.'
+    if tracks:
+        _save_flag(camp,'tracks_followed',True)
+        return 'Sigues las marcas fuera del camino. Entre la ceniza aparecen pisadas que no deberían estar allí: empiezan de golpe, como si quien las dejó hubiera caído del cielo. Más adelante el rastro se divide entre el bosque y una senda de piedra que asciende hacia las cavernas.'
+    if cave and (any(w in low for w in ('voy','vamos','ir','sigo','buscar','busco','avanzo','camino')) or flags.get('moon_cave_clue')):
+        _save_flag(camp,'heading_moon_cave',True)
+        return 'Tomas el camino hacia las cavernas. A medida que el pueblo queda atrás, la ceniza se vuelve más espesa y el aire más frío. En la ladera distingues dos entradas: una abierta y reciente; la otra, casi cubierta por símbolos antiguos.'
+    if inspect:
+        return 'Te detienes a revisar el lugar con calma. Nada salta a la vista de inmediato, pero encuentras señales de que alguien pasó por aquí antes que ustedes y trató deliberadamente de ocultar su rastro.'
+    if any(w in low for w in ('hablo','pregunto','digo','cuento','grito','llamo')):
+        return 'Tu voz rompe el silencio y la escena reacciona. Quien está frente a ti presta atención, aunque su respuesta dependerá de lo que decidas preguntar o revelar.'
+    if any(w in low for w in ('voy','vamos','camino','avanzo','entro','salgo','regreso','vuelvo')):
+        return 'Te pones en movimiento. El entorno cambia contigo: dejas atrás la seguridad de la posición anterior y aparecen nuevas rutas, sonidos y señales que antes no podías percibir.'
+    return 'Lo intentas y el mundo responde sin detener la partida. La acción es posible, pero necesitas concretar un poco el objetivo para resolver su consecuencia exacta: qué quieres afectar, a quién o hacia dónde.'
+
+def _with_suggestions(camp,text,context='',mode='scene'):
+    return str(text).rstrip()+_suggestions(camp, context or text, mode)
+
 def _request_roll(camp,user,reason,needed=1,difficulty=10,stat=''):
     c=_db(); c.execute("""INSERT INTO dnd_pending_rolls(campaign_id,user_id,reason,stat,needed,current,rolls,difficulty,created_at) VALUES(?,?,?,?,?,0,'[]',?,?) ON CONFLICT(campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id,reason=EXCLUDED.reason,stat=EXCLUDED.stat,needed=EXCLUDED.needed,current=0,rolls='[]',difficulty=EXCLUDED.difficulty,created_at=EXCLUDED.created_at""",(int(camp['id']),int(user['id']),reason,stat,int(needed),int(difficulty),int(time.time()))); c.commit(); c.close()
-    _S(int(camp['chat_id']),int(camp.get('thread_id') or 0),f"🎲 {_mention(user)} — {reason}\nNecesito {needed} dado{'s' if needed!=1 else ''}.\n\n🎲 DADO 1/{needed} — lánzalo en Telegram.")
+    _S(int(camp['chat_id']),int(camp.get('thread_id') or 0),_with_suggestions(camp,f"🎲 {_mention(user)} — {reason}\nNecesito {needed} dado{'s' if needed!=1 else ''}.\n\n🎲 DADO 1/{needed} — lánzalo en Telegram.",reason,'roll'))
 
 def handle_message(message,text):
     chat_id=int((message.get('chat') or {}).get('id') or 0); thread=_topic(message); user=message.get('from') or {}; uid=int(user.get('id') or 0); camp=_campaign(chat_id,thread)
@@ -524,15 +619,12 @@ def handle_message(message,text):
             c.execute("UPDATE dnd_pending_rolls SET current=?,rolls=? WHERE campaign_id=?",(cur,json.dumps(rolls),int(camp['id']))); c.commit(); c.close(); _S(chat_id,thread,f"🎲 DADO {cur}/{needed}: {val}\n\n🎲 DADO {cur+1}/{needed} — {_mention(user)}, lánzalo."); return True
         c.execute("DELETE FROM dnd_pending_rolls WHERE campaign_id=?",(int(camp['id']),)); c.commit(); c.close(); total=sum(rolls); target=int(p['difficulty'])*needed; success=total>=target
         outcome=("La situación se inclina a tu favor, pero el mundo registra cómo lo lograste." if success else "No sale como esperabas. No es un GAME OVER: la historia toma una ruta más peligrosa.")
-        if _NARRATE:
-            try: outcome=_NARRATE(camp,_char(camp['id'],uid),str(p.get('reason') or ''),{"success":success,"rolls":rolls,"total":total,"target":target}) or outcome
-            except Exception: pass
         now=int(time.time()); cj=_db(); cj.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'roll_result',f"{_mention(user)} intentó {str(p.get('reason') or '')[:350]} — {'éxito' if success else 'consecuencia'} ({total}/{target}).",now)); cj.commit(); cj.close()
         reason_low=str(p.get('reason') or '').lower(); lethal=any(w in reason_low for w in ('salto al vac','me sacrific','recibo el golpe','boss','lava','abismo','explos','caigo','caída','veneno mortal'))
         if (not success) and lethal and (all(v<=2 for v in rolls) or total<=needed*2):
             ch_now=_char(camp['id'],uid); _enter_agony(camp,ch_now,str(p.get('reason') or 'tirada letal'))
             _S(chat_id,thread,f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n\n💀 EL FALLO ES LETAL. {_mention(user)} cae a 0 HP y entra en AGONÍA.\n\n🎲 En tu siguiente dado harás una SALVACIÓN CONTRA LA MUERTE. Tres éxitos estabilizan; tres fallos significan muerte. El grupo puede intentar salvarte antes.",reply_markup=_menu()); return True
-        _S(chat_id,thread,f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n🎯 Umbral narrativo: {target}\n\n{'✨ ÉXITO' if success else '⚠️ CONSECUENCIA'}\n\n{outcome}",reply_markup=_menu()); return True
+        _S(chat_id,thread,_with_suggestions(camp,f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n🎯 Umbral narrativo: {target}\n\n{'✨ ÉXITO' if success else '⚠️ CONSECUENCIA'}\n\n{outcome}",str(p.get('reason') or ''))); return True
     t=(text or '').strip()
     if not t or t.startswith('/'): return False
     ch=_char(camp['id'],uid)
@@ -556,17 +648,9 @@ def handle_message(message,text):
     risky=any(w in low for w in ('ataco','golpeo','salto','trepo','robo','fuerzo','rompo','persigo','seduz','engaño','miento','intimido','convenzo','escapo','escondo','desarmo','aviento','abiento','empujo'))
     if risky:
         needed=2 if any(w in low for w in ('seduz','engaño','intimido','persigo','desarmo')) else 1
-        _S(chat_id,thread,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\nLa intención es válida y puede cambiar la escena.")
+        _S(chat_id,thread,_with_suggestions(camp,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\nLa intención es válida y puede cambiar la escena.",t,'roll'))
         _request_roll(camp,user,t[:500],needed=needed,difficulty=3 if needed==1 else 4,stat=''); return True
     now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'free_action',f"{_mention(user)}: {t[:700]}",now)); c.commit(); c.close()
-    narration=None
-    if _NARRATE:
-        try:
-            narration=_NARRATE(camp,ch,t[:1200],None)
-        except Exception:
-            narration=None
-    if not narration:
-        narration=("Tu acción queda clara, pero el narrador no pudo continuar la escena en este momento. "
-                   "Inténtalo otra vez; no se ha perdido ni cambiado tu personaje.")
-    # Conversación libre: NO adjuntar el panel. /dnd lo abre cuando el jugador lo quiera.
-    _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{narration}"); return True
+    narration=_local_narration(camp,ch,t[:1200])
+    # Conversación libre: sugerencias contextuales, nunca menú obligatorio.
+    _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{_with_suggestions(camp,narration,t)}"); return True

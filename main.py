@@ -20316,7 +20316,18 @@ def send_kiwdnd_topic_message(chat_id, thread_id, text, reply_markup=None):
     """Envía KiwD&D exclusivamente al tema al que pertenece la campaña."""
     if not text:
         return None
-    chunks=[str(text)[i:i+TELEGRAM_MAX_CHARS] for i in range(0,len(str(text)),TELEGRAM_MAX_CHARS)]
+    raw=str(text)
+    # Divide narraciones largas sin partir palabras/oraciones cuando sea posible.
+    limit=min(int(TELEGRAM_MAX_CHARS or 4096),3900)
+    chunks=[]
+    while len(raw)>limit:
+        cut=max(raw.rfind("\n\n",0,limit),raw.rfind("\n",0,limit),raw.rfind(". ",0,limit),raw.rfind(" ",0,limit))
+        if cut < int(limit*0.55): cut=limit
+        else:
+            if raw[cut:cut+2]==". ": cut+=1
+        chunks.append(raw[:cut].rstrip())
+        raw=raw[cut:].lstrip()
+    if raw: chunks.append(raw)
     result=None
     for index,chunk in enumerate(chunks):
         data={"chat_id":int(chat_id),"text":chunk}
@@ -20366,9 +20377,12 @@ def narrate_kiwdnd_action(campaign, character, action, result=None):
     prompt=(
         "Eres el Dungeon Master de KiwD&D, una campaña oscura, emotiva, hermosa, emocionante y con humor cuando nace naturalmente. "
         "El mundo es Aeternus y debe sentirse persistente. Eira, Brok, Elías, Orin, Erick, Mara y Nox son personajes reales del mundo, no cameos. "
-        "Narra 1 a 4 párrafos breves en español. No decidas acciones por otros jugadores. No reveles secretos que el personaje no conoce. "
-        "No conviertas cada acción en combate. El fracaso debe crear consecuencias e historia, no un GAME OVER automático. "
-        "No inventes resultados de dados: respeta exactamente el resultado suministrado. No escribas menús ni opciones; el motor pone los botones.\n\n"
+        "Habla como un Dungeon Master conversando con amigos por Telegram, no como una novela. Entiende español informal, abreviaciones, faltas de ortografía, risas y frases incompletas por intención y contexto. "
+        "Para una acción cotidiana responde normalmente en 1 a 3 párrafos cortos (aprox. 60-180 palabras); sé directo, vivo y natural. Reserva narración más extensa para revelaciones, bosses, muertes o cierres de capítulo. "
+        "Continúa exactamente desde la escena actual y reacciona a lo que el jugador intentó; no respondas con frases genéricas como 'la escena registra tu acción'. "
+        "No decidas acciones por otros jugadores. No reveles secretos que el personaje no conoce. No concedas acciones imposibles ni inventes objetos/habilidades que el personaje no tiene. "
+        "No conviertas cada acción en combate. Si no hace falta tirada, deja que la acción avance naturalmente. El fracaso debe crear consecuencias e historia, no un GAME OVER automático. "
+        "No inventes resultados de dados: respeta exactamente el resultado suministrado. No escribas menús, listas de opciones ni comandos. Termina la respuesta completa, sin dejar una frase a medias.\n\n"
         f"Campaña: {campaign.get('name')} | arco {campaign.get('arc')} capítulo {campaign.get('chapter')} escena {campaign.get('scene')}\n"
         f"Estado/banderas: {flags}\n"
         f"Personaje: {character.get('telegram_name')} / {character.get('name')} / {character.get('class_name')} Nv.{character.get('level')}\n"

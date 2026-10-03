@@ -20322,7 +20322,7 @@ def send_kiwdnd_topic_message(chat_id, thread_id, text, reply_markup=None):
         data={"chat_id":int(chat_id),"text":chunk}
         if int(thread_id or 0): data["message_thread_id"]=int(thread_id)
         if reply_markup and index==0: data["reply_markup"]=reply_markup
-        result=telegram_api("sendMessage",data)
+        result=telegram("sendMessage",data)
     return result
 
 def generate_kiwdnd_character_portrait(chat_id, character, thread_id=0):

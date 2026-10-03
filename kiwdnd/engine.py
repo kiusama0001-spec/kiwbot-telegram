@@ -559,8 +559,14 @@ def handle_message(message,text):
         _S(chat_id,thread,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\nLa intención es válida y puede cambiar la escena.")
         _request_roll(camp,user,t[:500],needed=needed,difficulty=3 if needed==1 else 4,stat=''); return True
     now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'free_action',f"{_mention(user)}: {t[:700]}",now)); c.commit(); c.close()
-    narration="La escena registra tu acción. Los demás pueden responder, tomar otra ruta o contradecirte; no están obligados a seguirla."
+    narration=None
     if _NARRATE:
-        try: narration=_NARRATE(camp,ch,t[:700],None) or narration
-        except Exception: pass
-    _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{narration}",reply_markup=_menu()); return True
+        try:
+            narration=_NARRATE(camp,ch,t[:1200],None)
+        except Exception:
+            narration=None
+    if not narration:
+        narration=("Tu acción queda clara, pero el narrador no pudo continuar la escena en este momento. "
+                   "Inténtalo otra vez; no se ha perdido ni cambiado tu personaje.")
+    # Conversación libre: NO adjuntar el panel. /dnd lo abre cuando el jugador lo quiera.
+    _S(chat_id,thread,f"🎭 {_mention(user)}\n\n{narration}"); return True

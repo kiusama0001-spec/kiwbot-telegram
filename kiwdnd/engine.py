@@ -548,72 +548,52 @@ def _save_flag(camp,key,value=True):
     flags=_flags(camp); flags[key]=value; now=int(time.time())
     c=_db(); c.execute('UPDATE dnd_campaigns SET flags=?,updated_at=? WHERE id=?',(json.dumps(flags,ensure_ascii=False),now,int(camp['id']))); c.commit(); c.close()
 
-def _suggestion_options(camp, context='', mode='scene'):
-    """Opciones concretas nacidas de la escena YA resuelta."""
-    low=_norm(context); flags=_flags(camp); opts=[]; authored=_campaign_scene_options(camp)
-    def add(label,action):
-        if action and all(x[1]!=action for x in opts): opts.append((label,action))
-    if mode=='roll':
-        add('🎲 Lanzar el dado de Telegram','__roll__')
-        add('🤝 Pedir ayuda a un compañero','pido ayuda a un compañero')
-        add('✍️ Intentar otra estrategia','__free__')
-        return opts[:4]
-    if 'rastro se divide' in low or ('bosque' in low and ('caverna' in low or 'cavernas' in low)):
-        add('🌲 Seguir el rastro hacia el bosque','sigo el rastro hacia el bosque')
-        add('🌙 Subir por la senda hacia las cavernas','subo por la senda de piedra hacia las cavernas')
-        add('🔎 Examinar dónde se divide el rastro','examino donde se divide el rastro')
-        add('✍️ Hacer cualquier otra cosa','__free__')
-    elif 'dos entradas' in low or ('abertura reciente' in low and 'simbol' in low):
-        add('🕳️ Entrar por la abertura reciente','entro por la abertura reciente de la caverna')
-        add('🔮 Examinar la entrada con símbolos','examino los simbolos antiguos de la otra entrada')
-        add('👂 Escuchar antes de entrar','escucho con cuidado antes de entrar a la caverna')
-        add('✍️ Hacer cualquier otra cosa','__free__')
-    elif 'nox' in low and any(x in low for x in ('caverna','no te lo dije','no regreso','no regres','ocult')):
-        add('🗣️ Preguntar quién no regresó','le pregunto a Nox quien fue la persona que no regreso')
-        add('🔎 Preguntar qué busca realmente','le pregunto a Nox que cree que estamos buscando realmente')
-        add('🌙 Pedirle que venga a la caverna','le digo a Nox que venga conmigo hacia la caverna')
-        add('✍️ Hacer cualquier otra cosa','__free__')
-    elif any(x in low for x in ('runa','runas','inscripcion','simbolo')) or flags.get('runes_revealed'):
-        if not flags.get('runes_read'): add('🔎 Leer las runas','examino y leo las runas')
-        if flags.get('moon_cave_clue') or 'caverna' in low: add('🌙 Buscar la caverna de la luna','voy a buscar la caverna donde entra la luz de la luna')
-        add('🗣️ Preguntarle a Nox por las runas','le pregunto a Nox que sabe de estas runas')
-        add('🔬 Buscar algo que haya pasado por alto','examino las runas buscando algo que no haya visto')
-        add('✍️ Hacer cualquier otra cosa','__free__')
-    elif any(x in low for x in ('pluma','ceniza')):
-        add('🔎 Examinar los restos','examino los restos de la pluma y la ceniza')
-        add('🗣️ Preguntarle a Nox','le pregunto a Nox que sabe de la pluma')
-        add('🧭 Buscar de dónde vino','busco rastros para saber de donde vino la pluma')
-        add('✍️ Hacer cualquier otra cosa','__free__')
-    elif any(x in low for x in ('enemigo','demon','bestia','combate','pelea')):
-        add('⚔️ Atacar','ataco al enemigo')
-        add('🛡️ Defender a alguien','me preparo para defender a mis compañeros')
-        add('🏃 Buscar una salida','busco una forma segura de retirarnos')
-        add('✍️ Probar otra maniobra','__free__')
-    elif any(x in low for x in ('camino','caverna','bosque','pueblo','puerta','sendero','huella')):
-        add('🧭 Avanzar con cuidado','avanzo con cuidado por el camino')
-        add('🔎 Buscar peligros o pistas','reviso el camino buscando peligros o pistas')
-        add('↩️ Regresar a prepararme','regreso para prepararme mejor')
-        add('✍️ Tomar otra ruta','__free__')
-    else:
-        for label,action in authored: add(label,action)
-    return opts[:4]
+DND_FAST_ACTIONS=[
+ ('⚔️ Atacar','attack'),('🔎 Investigar','investigate'),('🗣️ Hablar','talk'),
+ ('😏 Seducir','seduce'),('🤝 Ayudar','help'),('🏃 Huir','flee'),('🎯 Acción a alguien','target')
+]
+def _suggestion_options(camp,context='',mode='scene'):
+    if mode=='roll': return [('🎲 Lanzar dado','__roll__')]
+    return DND_FAST_ACTIONS
 
 def _suggestions(camp,context='',mode='scene'):
-    return '\n\n¿Qué quieres hacer?\n'+'\n'.join('• '+x[0] for x in _suggestion_options(camp,context,mode))
+    return ''
 
 def _suggestion_keyboard(camp,context='',mode='scene'):
+    if mode=='roll': return {'inline_keyboard':[[{'text':'🎲 Lanzar dado','callback_data':'dnd:rollhint'}]]}
     rows=[]
-    for i,(label,action) in enumerate(_suggestion_options(camp,context,mode)):
-        cb='dnd:free' if action=='__free__' else ('dnd:rollhint' if action=='__roll__' else f'dnd:sceneopt:{i}')
-        rows.append([{'text':label[:60],'callback_data':cb}])
+    for i in range(0,len(DND_FAST_ACTIONS),2):
+        row=[]
+        for label,key in DND_FAST_ACTIONS[i:i+2]: row.append({'text':label,'callback_data':f'dnd:fast:{key}'})
+        rows.append(row)
     return {'inline_keyboard':rows}
+
+def _dnd_target_keyboard(camp,action):
+    c=_db(); chars=c.execute("SELECT user_id,telegram_name,name FROM dnd_characters WHERE campaign_id=? AND status='active' ORDER BY joined_at",(int(camp['id']),)).fetchall(); c.close()
+    rows=[]
+    for r in chars[:20]:
+        label=str(r.get('telegram_name') or r.get('name') or r['user_id'])[:42]
+        rows.append([{'text':label,'callback_data':f"dnd:fasttarget:{action}:{int(r['user_id'])}"}])
+    rows.append([{'text':'🎭 NPC de la escena','callback_data':f'dnd:fasttarget:{action}:0'}])
+    return {'inline_keyboard':rows}
+
+def _dnd_fast_result(camp,ch,user,action,target_name=''):
+    who=(f" a {target_name}" if target_name else "")
+    variants={
+      'attack':[f"Te lanzas al ataque{who}. La escena responde de inmediato y cualquier amenaza cercana cambia su atención hacia ti.",f"Atacas{who} sin perder tiempo. Tu movimiento rompe la calma y obliga al entorno a reaccionar."],
+      'investigate':["Te detienes a investigar. Encuentras marcas recientes, un detalle fuera de lugar y una pista que antes pasaba desapercibida.","Revisas la zona con cuidado. Algo no encaja con la versión más obvia de lo ocurrido y aparece una nueva pista."],
+      'talk':[f"Intentas hablar{who}. La conversación abre una posibilidad que la fuerza no habría conseguido.",f"Hablas{who}. La respuesta no entrega toda la verdad, pero sí cambia el tono de la escena."],
+      'seduce':[f"Intentas seducir{who}. La otra parte nota claramente tu intención; su reacción dependerá de la tirada y de la relación que exista.",f"Usas encanto y cercanía{who}. La tensión social cambia y ahora toca ver si funciona."],
+      'help':[f"Decides ayudar{who}. Tu intervención mejora su posición y reduce el riesgo inmediato.",f"Te mueves para ayudar{who}. La acción crea una ventaja para el siguiente movimiento."],
+      'flee':["Buscas una salida y te retiras de la zona de peligro. No todo queda resuelto, pero sobrevives para decidir qué hacer después.","Retrocedes antes de quedar atrapado. El peligro permanece atrás y la escena cambia de posición."],
+      'target':[f"Diriges tu acción{who}. El objetivo queda claro y la escena puede resolverla sin tener que adivinar a quién te referías.",f"Actúas directamente{who}. Ya no hay ambigüedad sobre quién recibe la acción."]
+    }
+    arr=variants.get(action,variants['target'])
+    return arr[(int(time.time())+int(ch['user_id']))%len(arr)]
 
 def _store_scene_options(camp,uid,context,mode='scene'):
     opts=_suggestion_options(camp,context,mode); c=_db(); now=int(time.time())
     c.execute("DELETE FROM dnd_scene_options WHERE campaign_id=? AND user_id=?",(int(camp['id']),int(uid)))
-    for i,(label,action) in enumerate(opts):
-        if action not in ('__free__','__roll__'):
-            c.execute("INSERT INTO dnd_scene_options(campaign_id,user_id,slot,label,action_text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(uid),i,label,action,now))
     c.commit(); c.close()
 
 def _send_with_choices(chat_id,thread,camp,uid,text,context='',mode='scene'):
@@ -730,19 +710,7 @@ def handle_message(message,text):
     if not ch: return False
     if low.startswith('apariencia:'):
         appearance=t.split(':',1)[1].strip()[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close(); _S(chat_id,thread,"🎨 Apariencia guardada. Será la referencia canónica para el retrato de tu personaje."); return True
-    # @menciones: entendemos acciones sociales incluso con ortografía imperfecta, pero un jugador nunca decide por otro.
-    mentioned=_find_mentioned_characters(camp,t,uid)
-    if mentioned and _is_interactive_action(t):
-        target=mentioned[0]; now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_reactions(campaign_id,actor_id,target_id,action_text,status,created_at) VALUES(?,?,?,?, 'pending',?)",(int(camp['id']),uid,int(target['user_id']),t[:700],now)); c.commit(); c.close()
-        kb={"inline_keyboard":[[{"text":"🤼 Resistirme","callback_data":f"dnd:react:resist:{uid}"},{"text":"🤝 Aceptar","callback_data":f"dnd:react:accept:{uid}"}],[{"text":"🏃 Apartarme","callback_data":f"dnd:react:avoid:{uid}"},{"text":"✍️ Otra reacción","callback_data":"dnd:free"}]]}
-        _S(chat_id,thread,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\n🎯 {target['telegram_name']} está involucrado. Nadie controla automáticamente a otro personaje: le toca reaccionar.",reply_markup=kb); return True
-    # Acción libre: heurística tolerante. Errores comunes como abiento/aviento no invalidan la intención.
-    risky=any(w in low for w in ('ataco','golpeo','salto','trepo','robo','fuerzo','rompo','persigo','seduz','engaño','miento','intimido','convenzo','escapo','escondo','desarmo','aviento','abiento','empujo'))
-    if risky:
-        needed=2 if any(w in low for w in ('seduz','engaño','intimido','persigo','desarmo')) else 1
-        _S(chat_id,thread,_with_suggestions(camp,f"🎭 {_mention(user)} intenta: «{t[:350]}»\n\nLa intención es válida y puede cambiar la escena.",t,'roll'))
-        _request_roll(camp,user,t[:500],needed=needed,difficulty=3 if needed==1 else 4,stat=''); return True
-    now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'free_action',f"{_mention(user)}: {t[:700]}",now)); c.commit(); c.close()
-    narration=_local_narration(camp,ch,t[:1200])
-    # Conversación libre: sugerencias contextuales, nunca menú obligatorio.
-    _send_with_choices(chat_id,thread,camp,uid,f"🎭 {_mention(user)}\n\n{narration}",narration); return True
+    # Juego rápido: el texto libre ya no intenta adivinar acciones.
+    # Se conserva para charla/rol; las acciones mecánicas salen de los 7 botones.
+    _S(chat_id,thread,f"💬 {_mention(user)}: {t[:700]}",reply_markup=_suggestion_keyboard(camp,t)); return True
+

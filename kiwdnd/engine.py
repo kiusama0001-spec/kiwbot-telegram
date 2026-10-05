@@ -348,6 +348,26 @@ def handle_command(message,text):
     cmd=(text.split()[0].split('@')[0].lower() if text else '')
     if not cmd.startswith('/dnd'): return False
     chat=message.get('chat') or {}; uid=int((message.get('from') or {}).get('id') or 0); chat_id=int(chat.get('id') or 0); thread=_topic(message); user=message.get('from') or {}
+    if cmd in ('/dndaqui','/dndtema'):
+        if chat.get('type')=='private':
+            _S(chat_id,thread,"🐉 Usa /dndaqui dentro del topic que será la mesa de D&D."); return True
+        if _ADMIN and not _ADMIN(message):
+            _S(chat_id,thread,"⚙️ Solo un admin puede mover la mesa de D&D."); return True
+        _schema(); c=_db()
+        rows=c.execute("SELECT * FROM dnd_campaigns WHERE chat_id=? ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, updated_at DESC, id DESC",(chat_id,)).fetchall()
+        if not rows:
+            c.close(); _S(chat_id,thread,"🐉 Este topic quedó elegido para D&D. Ahora usa /dndcrear aquí para crear la campaña."); return True
+        camp0=rows[0]
+        if int(camp0.get('thread_id') or 0)==thread:
+            c.close(); _S(chat_id,thread,"🐉 D&D ya está vinculado a este topic. Usa /dnd para continuar.",reply_markup=_menu()); return True
+        # Si quedó una fila vacía/inactiva en el topic destino, se retira solo ese vínculo para evitar el UNIQUE.
+        target=c.execute("SELECT id FROM dnd_campaigns WHERE chat_id=? AND thread_id=?",(chat_id,thread)).fetchone()
+        if target and int(target['id'])!=int(camp0['id']):
+            c.execute("DELETE FROM dnd_campaigns WHERE id=?",(int(target['id']),))
+        c.execute("UPDATE dnd_campaigns SET thread_id=?,updated_at=? WHERE id=?",(thread,int(time.time()),int(camp0['id'])))
+        c.commit(); c.close()
+        _S(chat_id,thread,f"🐉 Mesa D&D movida a ESTE topic. La campaña {camp0['name']} conserva personajes, historia y progreso. Usa /dnd para continuar.",reply_markup=_menu()); return True
+
     if cmd in ('/dndcrear','/dndiniciar'):
         if chat.get('type')=='private': _S(chat_id,thread,"🐉 Crea la campaña dentro del tema del grupo donde quieran jugar."); return True
         _schema(); now=int(time.time()); c=_db()

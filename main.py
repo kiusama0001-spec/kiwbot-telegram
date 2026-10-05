@@ -6321,8 +6321,9 @@ def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, h
          {"text":label(a[1],special_cd),"callback_data":f"rpg_attack:{a[1]['key']}"}],
         [{"text":label(a[2],ultimate_cd),"callback_data":f"rpg_attack:{a[2]['key']}"}],
         [{"text":"🛡️ Defender","callback_data":"rpg_defend"},
-         {"text":"🎒 Inventario","url":f"https://t.me/{get_bot_identity().get('username','')}?start=inventory"},
-         {"text":"🏃 Huir","callback_data":"rpg_flee"}]
+         {"text":"🧪 Pociones","callback_data":"rpg_potions"},
+         {"text":"🏃 Huir","callback_data":"rpg_flee"}],
+        [{"text":"🎒 Inventario","url":f"https://t.me/{get_bot_identity().get('username','')}?start=inventory"}]
     ]}
     kb=_append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
     kb=_append_gacha_weapon_skill_button(kb,user_id,"rpg_attack",context_id=context_id,cd_scope="pve")
@@ -6462,6 +6463,17 @@ def start_rpg_encounter(chat_id, user_id, forced_enemy_key=None, auto_spawn_id=0
         "Elige una habilidad. KiwBot lanzará el 🎲 real de Telegram automáticamente."
     )
 
+
+def _rpg_pve_potions_keyboard(user_id):
+    world=current_rpg_world()
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT i.id,i.quantity,x.name,x.heal_percent,x.item_key FROM rpg_inventory i
+          JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? AND i.quantity>0
+          AND (x.heal_percent>0 OR i.item_key IN ('pocion_fuerza','pocion_hierro','pocion_vitalidad','pocion_fuerza_mayor','pocion_hierro_mayor','pocion_vitalidad_mayor'))
+          ORDER BY x.heal_percent DESC,x.name LIMIT 12""",(int(user_id),world)).fetchall(); c.close()
+    kb=[[{"text":f"🧪 {r['name']} ×{r['quantity']}","callback_data":f"rpg_potion:{r['id']}"}] for r in rows]
+    kb.append([{"text":"⬅️ Volver al combate","callback_data":"rpg_potion_back"}])
+    return rows,{"inline_keyboard":kb}
 
 def cancel_rpg_encounter(chat_id, user_id):
     with db_lock:
@@ -12541,11 +12553,33 @@ def _tower_start_or_get(uid):
     return prog,dict(fight),char
 
 def _tower_keyboard(uid):
-    return {"inline_keyboard":[
-      [{"text":"⚔️ Atacar","callback_data":"tower:attack"},{"text":"🛡️ Defender","callback_data":"tower:defend"}],
-      [{"text":"🧪 Pociones","callback_data":"tower:potions"},{"text":"📊 Progreso","callback_data":"tower:progress"}],
-      [{"text":"🔄 Continuar / Actualizar","callback_data":"tower:refresh"}]
-    ]}
+    """La Torre usa las habilidades REALES del personaje KiwRPG, no un ataque genérico aparte."""
+    char=get_active_character(uid)
+    rows=[]
+    if char:
+        abilities=list(rpg_abilities_for(char.get('class_name')))
+        # Las tres técnicas propias de la clase.
+        for i in range(0,len(abilities),2):
+            row=[]
+            for a in abilities[i:i+2]:
+                aa=_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a
+                row.append({"text":f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}","callback_data":f"tower:skill:{aa['key']}"})
+            if row: rows.append(row)
+        # Técnicas especiales que realmente tenga equipadas/desbloqueadas.
+        extras=[]
+        if has_special_technique(uid,'hidden_blade'):
+            extras.append(_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade'))
+        extras += list(_equipped_gacha_weapon_abilities(uid,int(char['id'])) or [])
+        extras += list(_equipped_recuerdo_abilities(uid,int(char['id'])) or [])
+        for a in [x for x in extras if x]:
+            rows.append([{"text":f"{a.get('emoji','✨')} {a.get('name','Habilidad')}","callback_data":f"tower:skill:{a['key']}"}])
+    if not rows:
+        rows.append([{"text":"⚔️ Atacar","callback_data":"tower:attack"}])
+    rows += [
+      [{"text":"🛡️ Defender","callback_data":"tower:defend"},{"text":"🧪 Pociones","callback_data":"tower:potions"}],
+      [{"text":"📊 Progreso","callback_data":"tower:progress"},{"text":"🔄 Actualizar","callback_data":"tower:refresh"}]
+    ]
+    return {"inline_keyboard":rows}
 
 def _tower_card(uid):
     prog,f,char=_tower_start_or_get(uid)
@@ -12610,7 +12644,7 @@ def _tower_roll(chat_id,uid,double=False):
     finally: set_current_combat_user(None)
     return vals
 
-def _tower_action(chat_id,thread_id,uid,defend=False):
+def _tower_action(chat_id,thread_id,uid,defend=False,ability_key=None):
     prog,f,char=_tower_start_or_get(uid)
     if not prog: return "Necesitas un personaje."
     eff=effective_character_stats(char); buff=_tower_buff(uid); now=int(time.time())
@@ -12619,12 +12653,21 @@ def _tower_action(chat_id,thread_id,uid,defend=False):
     double=bool(int(prog.get('double_dice') or 0))
     rolls=_tower_roll(chat_id,uid,double); roll=sum(rolls)
     if double: roll=max(2,roll) # habilidad final: ambos dados suman.
-    mult=0.65+roll*0.12
-    dmg=max(1,int(atk*mult)-int(f['enemy_def'])//2)
+    ability=None
+    if ability_key and char:
+        ability=_rpg_get_ability_for_user(uid,char.get('class_name'),ability_key)
+    if ability:
+        # Misma potencia/penetración de la técnica real de KiwRPG.
+        mult=float(ability.get('power') or 1.0)*(0.72+roll*0.08)
+        penetration=max(0.0,min(.90,float(ability.get('pen') or 0.0)))
+        enemy_def=int(round(int(f['enemy_def'])*(1.0-penetration)))
+    else:
+        mult=0.65+roll*0.12; enemy_def=int(f['enemy_def'])
+    dmg=max(1,int(atk*mult)-enemy_def//2)
     enemy_hp=max(0,int(f['enemy_hp'])-dmg)
     rolltxt="+".join(map(str,rolls))+f"={roll}" if len(rolls)>1 else str(roll)
     if enemy_hp<=0:
-        floor=int(f['floor']); reward=350+floor*85+(floor*250 if floor%10==0 else 0); exp=80+floor*30
+        floor=int(f['floor']); reward=350+floor*85+(floor*250 if floor%10==0 else 0); exp=250+floor*65+(floor*180 if floor%10==0 else 0)
         duration=max(5*60,(15-(floor//10))*60); bonus=min(30,5+(floor//10)*2)
         nextfloor=min(100,floor+1); completed=1 if floor>=100 else int(prog.get('completed') or 0)
         double_new=1 if floor>=100 else int(prog.get('double_dice') or 0)
@@ -14810,6 +14853,24 @@ def handle_rpg_callback(query):
         except Exception:
             pass
 
+    if data=='rpg_potions':
+        battle=get_rpg_battle(chat_id,uid)
+        if not battle: send_message(chat_id,'⚔️ No tienes un combate PvE activo.'); return True
+        rows,kb=_rpg_pve_potions_keyboard(uid)
+        send_message(chat_id,'🧪 POCIONES\n\nElige qué quieres usar.' if rows else '🧪 No tienes pociones disponibles.',reply_markup=kb); return True
+    if data.startswith('rpg_potion:'):
+        try: iid=int(data.split(':',1)[1])
+        except Exception: return True
+        use_inventory_item(chat_id,uid,iid)
+        battle=get_rpg_battle(chat_id,uid); char=get_active_character(uid)
+        if battle and char:
+            send_message(chat_id,'⚔️ Continúa el combate.',reply_markup=rpg_battle_keyboard(char['class_name'],int(battle.get('ultimate_cd') or 0),int(battle.get('special_cd') or 0),uid,int(battle.get('hidden_blade_cd') or 0),chat_id))
+        return True
+    if data=='rpg_potion_back':
+        battle=get_rpg_battle(chat_id,uid); char=get_active_character(uid)
+        if battle and char: send_message(chat_id,'⚔️ Continúa el combate.',reply_markup=rpg_battle_keyboard(char['class_name'],int(battle.get('ultimate_cd') or 0),int(battle.get('special_cd') or 0),uid,int(battle.get('hidden_blade_cd') or 0),chat_id))
+        return True
+
     if data.startswith('tower:'):
         if not _tower_route_ok(chat_id,thread_id if thread_id else None):
             send_message(chat_id,"🏰 Este botón pertenece al topic oficial de la Torre."); return True
@@ -14821,6 +14882,11 @@ def handle_rpg_callback(query):
             try: iid=int(action.split(':',1)[1])
             except Exception: return True
             ok,txt=_tower_use_potion(uid,iid); card,kb,key=_tower_card(uid); send_message(chat_id,txt+"\n\n"+card,reply_markup=kb); return True
+        if action.startswith('skill:'):
+            ability_key=action.split(':',1)[1]
+            result=_tower_action(chat_id,thread_id,uid,ability_key=ability_key)
+            card,kb,key=_tower_card(uid)
+            send_message(chat_id,result+"\n\n"+card,reply_markup=kb); return True
         if action in ('attack','defend'):
             result=_tower_action(chat_id,thread_id,uid,defend=(action=='defend'))
             card,kb,key=_tower_card(uid)
@@ -15120,8 +15186,9 @@ def handle_rpg_callback(query):
             send_message(chat_id,"⚠️ No pude reiniciar la Gran Apertura. No vuelvas a pulsar hasta revisar el log.")
         return True
     if data=="event_boss_enter":
-        if not is_active_rpg_chat(chat_id,thread_id):
-            send_message(chat_id,"📍 Este World Boss pertenece al chat/topic RPG activo. Usa /rpgaqui en el lugar correcto."); return True
+        _dc,_dt=get_rpg_chat_route('worldboss',None,None,realm_id=chat_id)
+        if not (_dc and int(_dc)==int(chat_id) and ((_dt is None and not thread_id) or (_dt is not None and int(_dt)==int(thread_id)))):
+            send_message(chat_id,"📍 Este botón pertenece al topic oficial del Jefe de Evento. Usa /jefeeventoaqui allí."); return True
         txt,kb=event_boss_combat_panel(chat_id,uid)
         cfg=_event_cfg_from_state(_event_auto_sync(chat_id))
         sent=send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),txt,reply_markup=kb) if cfg else None
@@ -15140,10 +15207,14 @@ def handle_rpg_callback(query):
             logger.exception("No pude refrescar el panel del World Boss después del golpe")
         return True
     if data=="event_shop":
-        if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 La tienda del evento solo funciona en el chat elegido con /rpgaqui."); return True
+        _dc,_dt=get_rpg_chat_route('worldboss',None,None,realm_id=chat_id)
+        if not (_dc and int(_dc)==int(chat_id) and ((_dt is None and not thread_id) or (_dt is not None and int(_dt)==int(thread_id)))):
+            send_message(chat_id,"📍 La tienda del evento pertenece al topic oficial del Jefe de Evento."); return True
         txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
     if data.startswith("event_buy:"):
-        if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Esa tienda ya no pertenece al chat RPG activo."); return True
+        _dc,_dt=get_rpg_chat_route('worldboss',None,None,realm_id=chat_id)
+        if not (_dc and int(_dc)==int(chat_id) and ((_dt is None and not thread_id) or (_dt is not None and int(_dt)==int(thread_id)))):
+            send_message(chat_id,"📍 Esa tienda pertenece al topic oficial del Jefe de Evento."); return True
         kind=data.split(":",1)[1]; ok,msg2=event_buy(chat_id,uid,kind); send_message(chat_id,msg2); return True
     if data.startswith("rpg_dungeon_enter:"):
         _dt0=time.monotonic()

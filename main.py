@@ -12459,6 +12459,208 @@ RPG_AUTO_STORIES = [
     "⚔️ Los exploradores encontraron un monstruo antes de llegar a la puerta.",
 ]
 
+
+# =========================================================
+# KIWRPG — TORRE DE LOS 100 PISOS (sistema independiente)
+# =========================================================
+TOWER_MAX_FLOOR=100
+TOWER_ENEMIES=[('tower_enemy_01', 'Rata de Cristal'), ('tower_enemy_02', 'Duende del Hollín'), ('tower_enemy_03', 'Limo de Mercurio'), ('tower_enemy_04', 'Escarabajo de Bronce'), ('tower_enemy_05', 'Murciélago de Aguja'), ('tower_enemy_06', 'Sabueso de Vidrio'), ('tower_enemy_07', 'Monje Hueco'), ('tower_enemy_08', 'Avispa de Hierro'), ('tower_enemy_09', 'Reptador de Musgo'), ('tower_enemy_10', 'Centinela de Sal'), ('tower_enemy_11', 'Lobo de Ónice'), ('tower_enemy_12', 'Arpía de Bruma'), ('tower_enemy_13', 'Autómata Roto'), ('tower_enemy_14', 'Ciempiés Carmesí'), ('tower_enemy_15', 'Espectro de Tiza'), ('tower_enemy_16', 'Minotauro Joven'), ('tower_enemy_17', 'Brujo de Cobre'), ('tower_enemy_18', 'Gárgola de Humo'), ('tower_enemy_19', 'Caballero de Musgo'), ('tower_enemy_20', 'Devoraluz'), ('tower_enemy_21', 'Quimera Menor'), ('tower_enemy_22', 'Danzante de Espinas'), ('tower_enemy_23', 'Ogro de Ceniza Azul'), ('tower_enemy_24', 'Vigía de Obsidiana'), ('tower_enemy_25', 'Mantis de Acero'), ('tower_enemy_26', 'Sirena de Pozo'), ('tower_enemy_27', 'Heraldo Sin Voz'), ('tower_enemy_28', 'Carcelero de Marfil'), ('tower_enemy_29', 'Serpiente del Vacío'), ('tower_enemy_30', 'Coloso de Arcilla'), ('tower_enemy_31', 'Vampiro de Escarcha'), ('tower_enemy_32', 'Bestia de Runas'), ('tower_enemy_33', 'Titán de Espinas'), ('tower_enemy_34', 'Oráculo Corrupto'), ('tower_enemy_35', 'Caballero del Eclipse'), ('tower_enemy_36', 'Draco de Tormenta'), ('tower_enemy_37', 'Segador Astral'), ('tower_enemy_38', 'Gólem de Sangre'), ('tower_enemy_39', 'Custodio del Tiempo'), ('tower_enemy_40', 'Ángel de Hierro'), ('tower_enemy_41', 'Leviatán Menor'), ('tower_enemy_42', 'Demonio del Espejo'), ('tower_enemy_43', 'Hidra de Ceniza'), ('tower_enemy_44', 'Rey Espectral'), ('tower_enemy_45', 'Dragón de Cristal'), ('tower_enemy_46', 'Verdugo Celeste'), ('tower_enemy_47', 'Titán del Abismo'), ('tower_enemy_48', 'Serafín Caído'), ('tower_enemy_49', 'Devorador de Mundos'), ('tower_enemy_50', 'Guardián del Piso Eterno')]
+TOWER_BOSSES=[('tower_boss_010', 'Gorath, Señor del Umbral'), ('tower_boss_020', 'Velka, Reina de Espinas'), ('tower_boss_030', 'Kharon, Carcelero Carmesí'), ('tower_boss_040', 'Nymbra, Bruja del Vacío'), ('tower_boss_050', 'Asterion, Titán de Hierro'), ('tower_boss_060', 'Mordrake, Dragón de Ceniza'), ('tower_boss_070', 'Seraphiel, Ángel Quebrado'), ('tower_boss_080', 'Thalassar, Leviatán Astral'), ('tower_boss_090', 'Chronos, Guardián del Último Reloj'), ('tower_boss_100', 'AION, Rey de los Cien Pisos')]
+_TOWER_ENEMY_MAP=dict(TOWER_ENEMIES); _TOWER_BOSS_MAP=dict(TOWER_BOSSES)
+_tower_schema_ready=False
+_tower_schema_lock=threading.Lock()
+
+def _ensure_tower_db():
+    global _tower_schema_ready
+    if _tower_schema_ready: return
+    with _tower_schema_lock:
+        if _tower_schema_ready: return
+        with db_lock:
+            c=get_db()
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_tower_progress(
+                user_id BIGINT PRIMARY KEY, floor BIGINT NOT NULL DEFAULT 1, max_floor BIGINT NOT NULL DEFAULT 1,
+                clears BIGINT NOT NULL DEFAULT 0, deaths BIGINT NOT NULL DEFAULT 0, completed BIGINT NOT NULL DEFAULT 0,
+                double_dice BIGINT NOT NULL DEFAULT 0, updated_at BIGINT NOT NULL DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_tower_fights(
+                user_id BIGINT PRIMARY KEY, floor BIGINT NOT NULL, enemy_key TEXT NOT NULL, enemy_name TEXT NOT NULL,
+                enemy_hp BIGINT NOT NULL, enemy_max_hp BIGINT NOT NULL, enemy_atk BIGINT NOT NULL, enemy_def BIGINT NOT NULL,
+                player_hp BIGINT NOT NULL, player_max_hp BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                updated_at BIGINT NOT NULL DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS rpg_tower_buffs(
+                user_id BIGINT PRIMARY KEY, atk_pct BIGINT NOT NULL DEFAULT 0, def_pct BIGINT NOT NULL DEFAULT 0,
+                expires_at BIGINT NOT NULL DEFAULT 0, source_floor BIGINT NOT NULL DEFAULT 0)""")
+            c.commit(); c.close()
+        _tower_schema_ready=True
+
+def _tower_progress(uid):
+    _ensure_tower_db(); now=int(time.time())
+    with db_lock:
+        c=get_db(); c.execute("""INSERT INTO rpg_tower_progress(user_id,floor,max_floor,updated_at)
+            VALUES(?,1,1,?) ON CONFLICT(user_id) DO NOTHING""",(int(uid),now))
+        r=c.execute("SELECT * FROM rpg_tower_progress WHERE user_id=?",(int(uid),)).fetchone(); c.commit(); c.close()
+    return dict(r)
+
+def _tower_enemy(floor):
+    floor=max(1,min(TOWER_MAX_FLOOR,int(floor))); band=(floor-1)//10
+    if floor%10==0:
+        key,name=TOWER_BOSSES[band]; boss=True
+    else:
+        local=(floor-1)%10; key,name=TOWER_ENEMIES[band*5+(local%5)]; boss=False
+    scale=1.0+(floor-1)*0.105
+    if boss: scale*=1.65
+    return {"key":key,"name":name,"boss":boss,"hp":int((95+floor*7)*scale),"atk":int((13+floor*0.9)*scale),"defense":int((5+floor*0.45)*scale)}
+
+def _tower_route_ok(chat_id,thread_id):
+    dest,tid=get_rpg_chat_route('torre',None,None,realm_id=chat_id)
+    if not dest: return False
+    cur=int(thread_id) if thread_id is not None else None
+    return int(dest)==int(chat_id) and ((tid is None and cur is None) or (tid is not None and cur is not None and int(tid)==cur))
+
+def _tower_buff(uid):
+    _ensure_tower_db(); now=int(time.time())
+    with db_lock:
+        c=get_db(); r=c.execute("SELECT * FROM rpg_tower_buffs WHERE user_id=? AND expires_at>?",(int(uid),now)).fetchone(); c.close()
+    return dict(r) if r else {}
+
+def _tower_start_or_get(uid):
+    prog=_tower_progress(uid); char=get_active_character(uid)
+    if not char: return None,None,None
+    eff=effective_character_stats(char); floor=int(prog['floor']); now=int(time.time())
+    with db_lock:
+        c=get_db(); fight=c.execute("SELECT * FROM rpg_tower_fights WHERE user_id=? AND status='active'",(int(uid),)).fetchone()
+        if not fight:
+            e=_tower_enemy(floor)
+            c.execute("""INSERT INTO rpg_tower_fights(user_id,floor,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,player_hp,player_max_hp,status,updated_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?, 'active',?)
+              ON CONFLICT(user_id) DO UPDATE SET floor=EXCLUDED.floor,enemy_key=EXCLUDED.enemy_key,enemy_name=EXCLUDED.enemy_name,
+              enemy_hp=EXCLUDED.enemy_hp,enemy_max_hp=EXCLUDED.enemy_max_hp,enemy_atk=EXCLUDED.enemy_atk,enemy_def=EXCLUDED.enemy_def,
+              player_hp=EXCLUDED.player_hp,player_max_hp=EXCLUDED.player_max_hp,status='active',updated_at=EXCLUDED.updated_at""",
+              (int(uid),floor,e['key'],e['name'],e['hp'],e['hp'],e['atk'],e['defense'],int(eff['max_hp']),int(eff['max_hp']),now))
+            c.commit(); fight=c.execute("SELECT * FROM rpg_tower_fights WHERE user_id=?",(int(uid),)).fetchone()
+        c.close()
+    return prog,dict(fight),char
+
+def _tower_keyboard(uid):
+    return {"inline_keyboard":[
+      [{"text":"⚔️ Atacar","callback_data":"tower:attack"},{"text":"🛡️ Defender","callback_data":"tower:defend"}],
+      [{"text":"🧪 Pociones","callback_data":"tower:potions"},{"text":"📊 Progreso","callback_data":"tower:progress"}],
+      [{"text":"🔄 Continuar / Actualizar","callback_data":"tower:refresh"}]
+    ]}
+
+def _tower_card(uid):
+    prog,f,char=_tower_start_or_get(uid)
+    if not prog: return "🏰 Necesitas crear un personaje KiwRPG primero.",None,None
+    floor=int(f['floor']); e=_tower_enemy(floor); buff=_tower_buff(uid)
+    btxt=""
+    if buff:
+        left=max(0,int(buff['expires_at'])-int(time.time()))
+        btxt=f"\n🔥 Bonus piso: +{int(buff['atk_pct'])}% ATK · +{int(buff['def_pct'])}% DEF · {left//60}m {left%60:02d}s"
+    skill="🎲🎲 Doble dado PERMANENTE" if int(prog.get('double_dice') or 0) else "🎲 Un dado"
+    txt=(f"🏰 TORRE DE LOS 100 PISOS\n\n📍 Piso {floor}/100"+(" · 👑 BOSS" if e['boss'] else "")+
+         f"\n👹 {f['enemy_name']}\n❤️ {f['enemy_hp']}/{f['enemy_max_hp']} · ⚔️ {f['enemy_atk']} · 🛡️ {f['enemy_def']}"
+         f"\n\n🧙 Tu vida: {f['player_hp']}/{f['player_max_hp']}\n{skill}{btxt}")
+    return txt,_tower_keyboard(uid),f['enemy_key']
+
+def _tower_potions_keyboard(uid):
+    world=current_rpg_world()
+    with db_lock:
+        c=get_db(); rows=c.execute("""SELECT i.id,i.quantity,i.item_key,x.name,x.heal_percent FROM rpg_inventory i
+          JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.world_id=? AND i.quantity>0
+          AND (x.heal_percent>0 OR i.item_key IN ('pocion_fuerza','pocion_hierro','pocion_vitalidad','pocion_fuerza_mayor','pocion_hierro_mayor','pocion_vitalidad_mayor'))
+          ORDER BY x.heal_percent DESC,x.name LIMIT 12""",(int(uid),world)).fetchall(); c.close()
+    kb=[[{"text":f"🧪 {r['name']} ×{r['quantity']}","callback_data":f"tower:potion:{r['id']}"}] for r in rows]
+    kb.append([{"text":"⬅️ Volver","callback_data":"tower:refresh"}])
+    return {"inline_keyboard":kb}
+
+def _tower_use_potion(uid,inventory_id):
+    row=inventory_item_row(uid,inventory_id)
+    if not row: return False,"Esa poción ya no está."
+    _ensure_tower_db()
+    if str(row.get('item_key') or '') in COMBAT_POTION_KEYS:
+        ok,msg=activate_combat_potion(uid,row['item_key'])
+        if not ok: return False,"No pude activar esa poción."
+        with db_lock:
+            c=get_db()
+            if int(row.get('quantity') or 1)>1: c.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=? AND user_id=?",(int(inventory_id),int(uid)))
+            else: c.execute("DELETE FROM rpg_inventory WHERE id=? AND user_id=?",(int(inventory_id),int(uid)))
+            c.commit(); c.close()
+        return True,msg
+    heal=int(row.get('heal_percent') or 0)
+    if heal<=0: return False,"Esa poción no funciona aquí."
+    with db_lock:
+        c=get_db(); f=c.execute("SELECT * FROM rpg_tower_fights WHERE user_id=? AND status='active' FOR UPDATE",(int(uid),)).fetchone()
+        if not f: c.rollback(); c.close(); return False,"No tienes combate de Torre activo."
+        cur=int(f['player_hp']); mx=int(f['player_max_hp'])
+        if cur>=mx: c.rollback(); c.close(); return False,"Ya tienes la vida completa."
+        amount=max(1,round(mx*heal/100)); new=min(mx,cur+amount)
+        if int(row.get('quantity') or 1)>1: c.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),))
+        else: c.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),))
+        c.execute("UPDATE rpg_tower_fights SET player_hp=?,updated_at=? WHERE user_id=?",(new,int(time.time()),int(uid))); c.commit(); c.close()
+    return True,f"🧪 +{new-cur} HP → {new}/{mx}"
+
+def _tower_roll(chat_id,uid,double=False):
+    vals=[]
+    set_current_combat_user(uid)
+    try:
+        for _ in range(2 if double else 1):
+            r=send_dice(chat_id,'🎲')
+            try: v=int((((r or {}).get('result') or {}).get('dice') or {}).get('value') or 0)
+            except Exception: v=0
+            vals.append(v if 1<=v<=6 else random.randint(1,6))
+    finally: set_current_combat_user(None)
+    return vals
+
+def _tower_action(chat_id,thread_id,uid,defend=False):
+    prog,f,char=_tower_start_or_get(uid)
+    if not prog: return "Necesitas un personaje."
+    eff=effective_character_stats(char); buff=_tower_buff(uid); now=int(time.time())
+    atk=int(eff['atk']); defense=int(eff['defense'])
+    if buff: atk+=round(atk*int(buff.get('atk_pct') or 0)/100); defense+=round(defense*int(buff.get('def_pct') or 0)/100)
+    double=bool(int(prog.get('double_dice') or 0))
+    rolls=_tower_roll(chat_id,uid,double); roll=sum(rolls)
+    if double: roll=max(2,roll) # habilidad final: ambos dados suman.
+    mult=0.65+roll*0.12
+    dmg=max(1,int(atk*mult)-int(f['enemy_def'])//2)
+    enemy_hp=max(0,int(f['enemy_hp'])-dmg)
+    rolltxt="+".join(map(str,rolls))+f"={roll}" if len(rolls)>1 else str(roll)
+    if enemy_hp<=0:
+        floor=int(f['floor']); reward=350+floor*85+(floor*250 if floor%10==0 else 0); exp=80+floor*30
+        duration=max(5*60,(15-(floor//10))*60); bonus=min(30,5+(floor//10)*2)
+        nextfloor=min(100,floor+1); completed=1 if floor>=100 else int(prog.get('completed') or 0)
+        double_new=1 if floor>=100 else int(prog.get('double_dice') or 0)
+        with db_lock:
+            c=get_db(); c.execute("UPDATE rpg_tower_fights SET status='won',enemy_hp=0,updated_at=? WHERE user_id=?",(now,int(uid)))
+            c.execute("""UPDATE rpg_tower_progress SET floor=?,max_floor=GREATEST(max_floor,?),clears=clears+1,completed=?,double_dice=?,updated_at=? WHERE user_id=?""",
+                      (nextfloor,nextfloor,completed,double_new,now,int(uid)))
+            c.execute("""INSERT INTO rpg_tower_buffs(user_id,atk_pct,def_pct,expires_at,source_floor) VALUES(?,?,?,?,?)
+              ON CONFLICT(user_id) DO UPDATE SET atk_pct=EXCLUDED.atk_pct,def_pct=EXCLUDED.def_pct,expires_at=EXCLUDED.expires_at,source_floor=EXCLUDED.source_floor""",
+                      (int(uid),bonus,max(2,bonus//2),now+duration,floor))
+            c.commit(); c.close()
+        change_kiwons(uid,reward,'tower_floor',chat_id=chat_id,note=f'Piso {floor}')
+        try:
+            with db_lock:
+                _ec=get_db(); _ec.execute("UPDATE characters SET exp=exp+?,updated_at=? WHERE user_id=? AND is_active=1",(int(exp),int(time.time()),int(uid))); _ec.commit(); _ec.close()
+        except Exception: pass
+        final="\n\n🏆 COMPLETASTE LOS 100 PISOS. Desde ahora tus ataques de Torre lanzan DOS dados permanentemente. 🎲🎲" if floor>=100 else ""
+        return (f"💥 Dado: {rolltxt} · {dmg} daño\n🏆 Piso {floor} superado.\n🪙 +{reward:,} KW · ✨ +{exp} EXP"
+                f"\n🔥 Bonus por {duration//60} min: +{bonus}% ATK · +{max(2,bonus//2)}% DEF.{final}\n\nUsa /torre o pulsa Continuar para el piso {nextfloor}.")
+    # enemy retaliates; defend halves incoming.
+    incoming=max(1,int(f['enemy_atk'])-defense//2); incoming=max(1,incoming//2) if defend else incoming
+    php=max(0,int(f['player_hp'])-incoming)
+    if php<=0:
+        with db_lock:
+            c=get_db(); c.execute("UPDATE rpg_tower_fights SET status='lost',player_hp=0,updated_at=? WHERE user_id=?",(now,int(uid)))
+            c.execute("UPDATE rpg_tower_progress SET deaths=deaths+1,updated_at=? WHERE user_id=?",(now,int(uid))); c.commit(); c.close()
+        return f"💥 Dado: {rolltxt} · {dmg} daño.\n☠️ {f['enemy_name']} te derrotó.\n\nNo pierdes pisos: sigues en el piso {f['floor']}. La próxima vez empiezas ESE piso desde cero."
+    with db_lock:
+        c=get_db(); c.execute("UPDATE rpg_tower_fights SET enemy_hp=?,player_hp=?,updated_at=? WHERE user_id=?",(enemy_hp,php,now,int(uid))); c.commit(); c.close()
+    return f"🎲 {rolltxt} · 💥 {dmg} daño.\n👹 Contraataque: -{incoming} HP.\n❤️ Tú: {php}/{f['player_max_hp']} · 👹 {enemy_hp}/{f['enemy_max_hp']}"
+
+def _tower_progress_text(uid):
+    p=_tower_progress(uid)
+    return (f"📊 TORRE — {_player_name_by_id(uid)}\n\n📍 Piso actual: {p['floor']}/100\n🏁 Máximo: {p['max_floor']}"
+            f"\n✅ Pisos superados: {p['clears']}\n☠️ Derrotas: {p['deaths']}\n🎲🎲 Doble dado: {'DESBLOQUEADO' if int(p.get('double_dice') or 0) else 'bloqueado hasta completar el piso 100'}")
+
 RPG_CHAT_ROUTE_CATEGORIES = {
     "rpg": "RPG general + rumores/asesinatos",
     "carreras": "Carreras de caballos",
@@ -12470,6 +12672,7 @@ RPG_CHAT_ROUTE_CATEGORIES = {
     "mercader": "Mercader/Malkor",
     "pvp": "PvP y duelos",
     "taberna": "Taberna",
+    "torre": "Torre de los 100 Pisos",
 }
 RPG_CHAT_ROUTE_ALIASES = {
     "general":"rpg","rumores":"rpg","asesinatos":"rpg","asesinato":"rpg",
@@ -12481,6 +12684,7 @@ RPG_CHAT_ROUTE_ALIASES = {
     "mision":"misiones","misionrapida":"misiones","minijuego":"misiones",
     "malkor":"mercader","merchant":"mercader","tiendaespecial":"mercader",
     "duelo":"pvp","duelos":"pvp","tavern":"taberna",
+    "pisos":"torre","piso":"torre","tower":"torre","torre100":"torre",
 }
 
 def _rpg_route_key(value):
@@ -12588,6 +12792,7 @@ RPG_COMMAND_ROUTE_CATEGORY = {
     '/mercader':'mercader','/malkor':'mercader','/quitarmercader':'mercader',
     '/pvp':'pvp','/duelo':'pvp','/duelopvp':'pvp','/duelodados':'pvp','/peleadados':'pvp',
     '/taberna':'taberna','/tavern':'taberna',
+    '/torre':'torre','/pisos':'torre','/torreprogreso':'torre',
 }
 
 def _rpg_routes_at_place(chat_id,message_thread_id=None):
@@ -14605,6 +14810,25 @@ def handle_rpg_callback(query):
         except Exception:
             pass
 
+    if data.startswith('tower:'):
+        if not _tower_route_ok(chat_id,thread_id if thread_id else None):
+            send_message(chat_id,"🏰 Este botón pertenece al topic oficial de la Torre."); return True
+        action=data.split(':',1)[1]
+        if action=='progress': send_message(chat_id,_tower_progress_text(uid)); return True
+        if action=='potions':
+            send_message(chat_id,"🧪 POCIONES DE LA TORRE\nElige una de las que realmente tienes.",reply_markup=_tower_potions_keyboard(uid)); return True
+        if action.startswith('potion:'):
+            try: iid=int(action.split(':',1)[1])
+            except Exception: return True
+            ok,txt=_tower_use_potion(uid,iid); card,kb,key=_tower_card(uid); send_message(chat_id,txt+"\n\n"+card,reply_markup=kb); return True
+        if action in ('attack','defend'):
+            result=_tower_action(chat_id,thread_id,uid,defend=(action=='defend'))
+            card,kb,key=_tower_card(uid)
+            send_message(chat_id,result+"\n\n"+card,reply_markup=kb); return True
+        if action=='refresh':
+            card,kb,key=_tower_card(uid); send_message(chat_id,card,reply_markup=kb); return True
+        return True
+
     if data=='crime:rumor':
         _crime_private_or_start(query,"🍺 RUMOR DE LA TABERNA\n\n“"+random.choice(TAVERN_RUMORS)+"”",reply_markup=_crime_rumors_keyboard()); return True
     if data=='crime:info':
@@ -14671,13 +14895,13 @@ def handle_rpg_callback(query):
             (_busy_state=='pve' and data.startswith(('rpg_attack:','rpg_use:','rpg_item:','rpg_show_inventory:','rpg_locked:'))) or
             (_busy_state=='pvp' and data.startswith(('pvp_atk:','pvp_def:','pvp_wait:','pvp_surrender:','pvp_cancel:','pvp_reject:','pvp_accept:'))) or
             (_busy_state=='dice' and data.startswith(('dicefight_accept:','dicefight_reject:','dicefight_roll:'))) or
-            data.startswith(('chron:','welcome:'))
+            data.startswith(('chron:','welcome:','tower:'))
         )
         _other_gameplay_prefixes=('tavern:','qm:','micro:','wnpc:','limitedbuy:','mission_select:','exclusive_accept:',
                                   'forge_make:','forge_upgrade:','rpg_buy:','rpg_shop_item:','rpg_dungeon_enter:',
                                   'boss_join:','boss_atk:','boss_def:','boss_potion:','boss_potions:','omega_join:','omega_atk:',
                                   'event_buy:','weapon_gacha_open','salvage_','bank_','pawn_','pet_gacha_open','pet_equip:','pet_level:','pet_public_level:','tech_up:','trade_accept:','trade_pick:',
-                                  'marry_accept:','clan_join:','story_choice:')
+                                  'marry_accept:','clan_join:','story_choice:','tower:')
         if (not _allowed) and data.startswith(_other_gameplay_prefixes):
             send_message(chat_id,_combat_lock_message(_busy_state))
             return True
@@ -14904,7 +15128,8 @@ def handle_rpg_callback(query):
         if not sent: send_message(chat_id,txt,reply_markup=kb)
         return True
     if data=="event_boss_attack":
-        if not is_active_rpg_chat(chat_id,thread_id): send_message(chat_id,"📍 Este botón pertenece a un chat RPG antiguo. Usa /rpgaqui en el chat correcto y abre /bossevento allí."); return True
+        _dc,_dt=get_rpg_chat_route('worldboss',None,None,realm_id=chat_id)
+        if not (_dc and int(_dc)==int(chat_id) and ((_dt is None and not thread_id) or (_dt is not None and int(_dt)==int(thread_id)))): send_message(chat_id,"📍 Este botón pertenece al topic oficial del Jefe de Evento."); return True
         ok,msg2=event_boss_attack(chat_id,uid)
         # El resultado del golpe es prioritario: se envía siempre antes de reconstruir el panel.
         send_message(chat_id,msg2)
@@ -16063,7 +16288,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo /dnd /dndcrear /dndiniciar /dndunirme /dndcrearpersonaje /dndficha /dndgrupo /dndhistoria /dndestado /dndmundo /dndmanual /dndcomenzar /dndretrato /dndinventario /dndmisiones /dndrelaciones /dndsecretos /dndcementerio /dndtumbas /dnddescansar /dndpausa /dndreanudar /dndcampana /dndarcos /dndsecundarias /dndsidequests /dndreiniciar'
+ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /torreaqui /torre /torreprogreso /jefeeventoaqui /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo /dnd /dndcrear /dndiniciar /dndunirme /dndcrearpersonaje /dndficha /dndgrupo /dndhistoria /dndestado /dndmundo /dndmanual /dndcomenzar /dndretrato /dndinventario /dndmisiones /dndrelaciones /dndsecretos /dndcementerio /dndtumbas /dnddescansar /dndpausa /dndreanudar /dndcampana /dndarcos /dndsecundarias /dndsidequests /dndreiniciar'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -16923,6 +17148,9 @@ def _rpg_ai_lock(asset_key):
         return lock
 
 def _rpg_enemy_info(enemy_key):
+
+    if str(enemy_key or '').startswith('tower_enemy_') and str(enemy_key) in globals().get('_TOWER_ENEMY_MAP',{}): return {'key':str(enemy_key),'name':_TOWER_ENEMY_MAP[str(enemy_key)]}
+    if str(enemy_key or '').startswith('tower_boss_') and str(enemy_key) in globals().get('_TOWER_BOSS_MAP',{}): return {'key':str(enemy_key),'name':_TOWER_BOSS_MAP[str(enemy_key)]}
     key=str(enemy_key or "").strip().lower()
     for enemy in RPG_ENEMIES:
         if str(enemy.get("key") or "").strip().lower()==key:
@@ -17000,6 +17228,12 @@ def _rpg_ai_asset_info(asset_key):
         visual=_RPG_ENEMY_VISUALS.get(key, f"a hostile fantasy creature named {cfg.get('name',key)}")
         camera,lighting,scene=_rpg_art_variant("enemy_"+key)
         return {"canonical":f"enemy:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":scene,"camera":camera,"lighting":lighting}
+    if kind=="tower":
+        cfg=_rpg_enemy_info(key)
+        if not cfg: return None
+        camera,lighting,scene=_rpg_art_variant("tower_"+key)
+        visual=f"unique dark fantasy tower creature named {cfg.get('name',key)}, original monster design, clearly distinct silhouette, floor-themed armor and anatomy"
+        return {"canonical":f"tower:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":"inside the legendary one hundred floor tower, monumental dungeon architecture","camera":camera,"lighting":lighting}
     if kind=="class":
         aliases={"picaro":"picaro","pícaro":"picaro","paladin":"paladin","paladín":"paladin","the cleaner":"the_cleaner","the_cleaner":"the_cleaner"}
         key=aliases.get(key,key)
@@ -17300,6 +17534,17 @@ def process_command(
             send_message(chat_id,"Este chat/topic no tenía ninguna categoría asignada.")
         return True
 
+    if command in ('/torreaqui','/pisosaqui'):
+        if chat.get("type")=="private": send_message(chat_id,"Usa este comando dentro del topic de la Torre."); return True
+        if not is_admin(message): send_message(chat_id,"Solo un admin puede fijar el tema de la Torre."); return True
+        set_rpg_chat_route('torre',chat_id,message.get('message_thread_id'),user_id,realm_id=chat_id)
+        send_message(chat_id,"🏰 Este topic quedó como hogar exclusivo de la Torre de los 100 Pisos.\nUsen /torre para entrar o continuar."); return True
+    if command in ('/jefeeventoaqui','/worldbossaqui'):
+        if chat.get("type")=="private": send_message(chat_id,"Usa este comando dentro del topic del Jefe de Evento."); return True
+        if not is_admin(message): send_message(chat_id,"Solo un admin puede fijar el tema del Jefe de Evento."); return True
+        set_rpg_chat_route('worldboss',chat_id,message.get('message_thread_id'),user_id,realm_id=chat_id)
+        send_message(chat_id,"👑 Este topic quedó reservado para el Jefe de Evento y sus controles."); return True
+
     # Los chats/topics especializados son exclusivos: una carrera no comparte
     # lugar con encuentros, Boss, PvP, etc.
     if chat.get("type")!="private":
@@ -17428,6 +17673,16 @@ def process_command(
         if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede cambiar el estado de Crónicas."); return True
         enabled=command in ("/cronicas_on","/cronicason")
         chronicles_set_enabled(enabled); send_message(chat_id,"📜 Crónicas activado." if enabled else "📕 Crónicas desactivado. El RPG normal sigue funcionando."); return True
+
+    if command in ('/torre','/pisos'):
+        if not _tower_route_ok(chat_id,message.get('message_thread_id')):
+            send_message(chat_id,"🏰 La Torre tiene su propio topic. Un admin debe usar /torreaqui allí."); return True
+        txt,kb,key=_tower_card(user_id)
+        sent=send_rpg_image(chat_id,f"tower:{key}",txt,reply_markup=kb) if key else None
+        if not sent: send_message(chat_id,txt,reply_markup=kb)
+        return True
+    if command=='/torreprogreso':
+        send_message(chat_id,_tower_progress_text(user_id)); return True
 
     if command in ("/taberna", "/tavern"):
         ensure_player(message.get("from",{}))
@@ -18143,6 +18398,13 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not sent: send_message(chat_id,f"❌ No hay imagen registrada ni archivo local para {key}.")
         return True
 
+    if command in ("/imagenestorrefaltantes","/imagenesfaltantestorre"):
+        if not is_owner(user_id): send_message(chat_id,"Solo Kiu puede revisar las imágenes pendientes de la Torre."); return True
+        keys=[f"tower:{k}" for k,_ in TOWER_ENEMIES]+[f"tower:{k}" for k,_ in TOWER_BOSSES]
+        missing=[k for k in keys if not _rpg_asset_get(f"img:{k}") and not rpg_asset_path(k)]
+        lines=["🏰 IMÁGENES PENDIENTES — TORRE","",f"Faltan {len(missing)}/{len(keys)}.","","Registra cada una respondiendo a su imagen con:"]+[f"/registrarimagen {k}" for k in missing]
+        send_message(chat_id,"\n".join(lines)); return True
+
     if command in ("/imagenesrpg","/arterpg","/bestiarioadmin"):
         if not is_owner(message.get("from",{}).get("id")):
             send_message(chat_id,"Solo Kiu puede revisar el registro visual completo."); return True
@@ -18154,6 +18416,8 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
             "🧑 NPC":[f"npc:{k}" for k in WORLD_NPCS.keys()],
             "🎊 Eventos":["event:opening_2026"]+[f"event:event_{y}_{m:02d}" for y in (2026,2027,2028) for m in range(1,13)],
             "👑 Bosses de evento":["eventboss:opening_2026"]+[f"eventboss:event_{y}_{m:02d}" for y in (2026,2027,2028) for m in range(1,13)],
+            "🏰 Torre — monstruos":[f"tower:{k}" for k,_ in TOWER_ENEMIES],
+            "🏰 Torre — bosses":[f"tower:{k}" for k,_ in TOWER_BOSSES],
         }
         all_keys=[k for arr in catalogs.values() for k in arr]
         registered=set()
@@ -18194,7 +18458,10 @@ Equipo: arcos y equipo de cazador. Precisión y daño consistente.
         if not sent: send_message(chat_id,txt)
         return True
     if command=="/bossevento":
-        if not is_active_rpg_chat(chat_id): send_message(chat_id,"📍 El World Boss solo existe en el chat elegido con /rpgaqui."); return True
+        _wb_chat,_wb_thread=get_rpg_chat_route('worldboss',None,None,realm_id=chat_id)
+        _cur_thread=message.get("message_thread_id")
+        _wb_here=bool(_wb_chat and int(_wb_chat)==int(chat_id) and ((_wb_thread is None and _cur_thread is None) or (_wb_thread is not None and _cur_thread is not None and int(_wb_thread)==int(_cur_thread))))
+        if not _wb_here: send_message(chat_id,"📍 El World Boss tiene su propio topic. Un admin debe usar /jefeeventoaqui allí."); return True
         st=_event_auto_sync(chat_id); cfg=_event_cfg_from_state(st); txt,kb=event_boss_card(chat_id,user_id)
         sent=send_rpg_image(chat_id,rpg_event_boss_asset_key(cfg['key']),txt,reply_markup=kb) if cfg else None
         if not sent: send_message(chat_id,txt,reply_markup=kb)

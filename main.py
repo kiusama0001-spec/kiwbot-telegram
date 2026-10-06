@@ -6309,25 +6309,34 @@ def rpg_abilities_for(class_name):
 
 
 def rpg_battle_keyboard(class_name, ultimate_cd=0, special_cd=0, user_id=None, hidden_cd=0, context_id=0):
-    a = rpg_abilities_for(class_name)
-    levels=technique_levels_for_user(user_id) if user_id else {}
-    def label(ab, cd=0):
-        lvl=levels.get(str(ab['key']),1)
-        power=float(ab['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
-        base=f"{ab['emoji']} {ab['name']} · Nv.{lvl} · DMG ×{power:.2f}"
-        return base if int(cd)<=0 else f"⏳ {ab['name']} ({cd}) · Nv.{lvl}"
-    kb={"inline_keyboard":[
-        [{"text":label(a[0]),"callback_data":f"rpg_attack:{a[0]['key']}"},
-         {"text":label(a[1],special_cd),"callback_data":f"rpg_attack:{a[1]['key']}"}],
-        [{"text":label(a[2],ultimate_cd),"callback_data":f"rpg_attack:{a[2]['key']}"}],
-        [{"text":"🛡️ Defender","callback_data":"rpg_defend"},
-         {"text":"🧪 Pociones","callback_data":"rpg_potions"},
-         {"text":"🏃 Huir","callback_data":"rpg_flee"}],
-        [{"text":"🎒 Inventario","url":f"https://t.me/{get_bot_identity().get('username','')}?start=inventory"}]
+    a=rpg_abilities_for(class_name); levels=technique_levels_for_user(user_id) if user_id else {}
+    def label(ab,cd=0):
+        lvl=levels.get(str(ab['key']),1); power=float(ab['power'])*(1.0+RPG_TECHNIQUE_POWER_PER_LEVEL*(lvl-1))
+        return (f"{ab['emoji']} {ab['name']} · N{lvl} ×{power:.2f}" if int(cd)<=0 else f"⏳ {ab['name']} ({cd}) · N{lvl}")
+    rows=[]
+    base=[(a[0],0),(a[1],special_cd),(a[2],ultimate_cd)]
+    for i in range(0,len(base),2): rows.append([{"text":label(ab,cd),"callback_data":f"rpg_attack:{ab['key']}"} for ab,cd in base[i:i+2]])
+    kb={"inline_keyboard":rows+[
+        [{"text":"🛡️ Defender","callback_data":"rpg_defend"},{"text":"🧪 Pociones","callback_data":"rpg_potions"}],
+        [{"text":"🎒 Inventario","url":f"https://t.me/{get_bot_identity().get('username','')}?start=inventory"},{"text":"🏃 Huir","callback_data":"rpg_flee"}]
     ]}
     kb=_append_hidden_blade_button(kb,user_id,"rpg_attack",hidden_cd,levels=levels)
     kb=_append_gacha_weapon_skill_button(kb,user_id,"rpg_attack",context_id=context_id,cd_scope="pve")
-    return _append_recuerdo_skill_button(kb,user_id,"rpg_attack",context_id=context_id,cd_scope="pve")
+    return _compact_pve_keyboard(_append_recuerdo_skill_button(kb,user_id,"rpg_attack",context_id=context_id,cd_scope="pve"))
+
+def _compact_pve_keyboard(kb):
+    """Reacomoda habilidades largas en dos columnas y deja utilidades al final."""
+    rows=list((kb or {}).get("inline_keyboard") or [])
+    skills=[]; utilities=[]
+    for row in rows:
+        for b in row:
+            cb=str(b.get('callback_data') or '')
+            if cb.startswith('rpg_attack:'): skills.append(b)
+            else: utilities.append(b)
+    packed=[skills[i:i+2] for i in range(0,len(skills),2)]
+    # Las utilidades se vuelven a agrupar sin mezclar PvP (esta función solo se usa en PvE).
+    packed += [utilities[i:i+2] for i in range(0,len(utilities),2)]
+    return {"inline_keyboard":[r for r in packed if r]}
 
 def _rpg_get_ability(class_name, key):
     for a in rpg_abilities_for(class_name):
@@ -12498,6 +12507,12 @@ def _ensure_tower_db():
                 enemy_hp BIGINT NOT NULL, enemy_max_hp BIGINT NOT NULL, enemy_atk BIGINT NOT NULL, enemy_def BIGINT NOT NULL,
                 player_hp BIGINT NOT NULL, player_max_hp BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
                 updated_at BIGINT NOT NULL DEFAULT 0)""")
+            # Migración compatible con la Torre anterior: cada piso ahora tiene varios encuentros + boss final.
+            for _sql in (
+                "ALTER TABLE rpg_tower_fights ADD COLUMN IF NOT EXISTS encounter_no BIGINT NOT NULL DEFAULT 1",
+                "ALTER TABLE rpg_tower_fights ADD COLUMN IF NOT EXISTS encounter_total BIGINT NOT NULL DEFAULT 3",
+                "ALTER TABLE rpg_tower_fights ADD COLUMN IF NOT EXISTS is_boss BIGINT NOT NULL DEFAULT 0"):
+                c.execute(_sql)
             c.execute("""CREATE TABLE IF NOT EXISTS rpg_tower_buffs(
                 user_id BIGINT PRIMARY KEY, atk_pct BIGINT NOT NULL DEFAULT 0, def_pct BIGINT NOT NULL DEFAULT 0,
                 expires_at BIGINT NOT NULL DEFAULT 0, source_floor BIGINT NOT NULL DEFAULT 0)""")
@@ -12512,15 +12527,20 @@ def _tower_progress(uid):
         r=c.execute("SELECT * FROM rpg_tower_progress WHERE user_id=?",(int(uid),)).fetchone(); c.commit(); c.close()
     return dict(r)
 
-def _tower_enemy(floor):
-    floor=max(1,min(TOWER_MAX_FLOOR,int(floor))); band=(floor-1)//10
-    if floor%10==0:
-        key,name=TOWER_BOSSES[band]; boss=True
-    else:
-        local=(floor-1)%10; key,name=TOWER_ENEMIES[band*5+(local%5)]; boss=False
+def _tower_encounters_for_floor(floor):
+    floor=int(floor)
+    return 3 if floor<=25 else (4 if floor<=60 else 5)
+
+def _tower_enemy(floor, encounter_no=1, boss=False):
+    floor=max(1,min(TOWER_MAX_FLOOR,int(floor))); encounter_no=max(1,int(encounter_no)); band=min(9,(floor-1)//10)
     scale=1.0+(floor-1)*0.105
-    if boss: scale*=1.65
-    return {"key":key,"name":name,"boss":boss,"hp":int((95+floor*7)*scale),"atk":int((13+floor*0.9)*scale),"defense":int((5+floor*0.45)*scale)}
+    if boss:
+        key,base=TOWER_BOSSES[band]; name=f"{base} · Guardián del Piso {floor}"; scale*=1.55+(floor/500.0)
+    else:
+        # Varía los encuentros dentro del mismo piso usando el catálogo nuevo de la Torre.
+        idx=((floor-1)*3+(encounter_no-1))%len(TOWER_ENEMIES); key,name=TOWER_ENEMIES[idx]
+        scale*=1.0+(encounter_no-1)*0.06
+    return {"key":key,"name":name,"boss":bool(boss),"hp":int((95+floor*7)*scale),"atk":int((13+floor*0.9)*scale),"defense":int((5+floor*0.45)*scale)}
 
 def _tower_route_ok(chat_id,thread_id):
     dest,tid=get_rpg_chat_route('torre',None,None,realm_id=chat_id)
@@ -12534,63 +12554,58 @@ def _tower_buff(uid):
         c=get_db(); r=c.execute("SELECT * FROM rpg_tower_buffs WHERE user_id=? AND expires_at>?",(int(uid),now)).fetchone(); c.close()
     return dict(r) if r else {}
 
+def _tower_spawn(c,uid,floor,encounter_no,player_hp,player_max_hp,boss=False):
+    total=_tower_encounters_for_floor(floor); e=_tower_enemy(floor,encounter_no,boss)
+    c.execute("""INSERT INTO rpg_tower_fights(user_id,floor,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,player_hp,player_max_hp,status,updated_at,encounter_no,encounter_total,is_boss)
+      VALUES(?,?,?,?,?,?,?,?,?,?, 'active',?,?,?,?,?)
+      ON CONFLICT(user_id) DO UPDATE SET floor=EXCLUDED.floor,enemy_key=EXCLUDED.enemy_key,enemy_name=EXCLUDED.enemy_name,
+      enemy_hp=EXCLUDED.enemy_hp,enemy_max_hp=EXCLUDED.enemy_max_hp,enemy_atk=EXCLUDED.enemy_atk,enemy_def=EXCLUDED.enemy_def,
+      player_hp=EXCLUDED.player_hp,player_max_hp=EXCLUDED.player_max_hp,status='active',updated_at=EXCLUDED.updated_at,
+      encounter_no=EXCLUDED.encounter_no,encounter_total=EXCLUDED.encounter_total,is_boss=EXCLUDED.is_boss""",
+      (int(uid),int(floor),e['key'],e['name'],e['hp'],e['hp'],e['atk'],e['defense'],int(player_hp),int(player_max_hp),int(time.time()),int(encounter_no),int(total),1 if boss else 0))
+
 def _tower_start_or_get(uid):
     prog=_tower_progress(uid); char=get_active_character(uid)
     if not char: return None,None,None
-    eff=effective_character_stats(char); floor=int(prog['floor']); now=int(time.time())
+    floor=int(prog['floor'])
     with db_lock:
         c=get_db(); fight=c.execute("SELECT * FROM rpg_tower_fights WHERE user_id=? AND status='active'",(int(uid),)).fetchone()
-        if not fight:
-            e=_tower_enemy(floor)
-            c.execute("""INSERT INTO rpg_tower_fights(user_id,floor,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,player_hp,player_max_hp,status,updated_at)
-              VALUES(?,?,?,?,?,?,?,?,?,?, 'active',?)
-              ON CONFLICT(user_id) DO UPDATE SET floor=EXCLUDED.floor,enemy_key=EXCLUDED.enemy_key,enemy_name=EXCLUDED.enemy_name,
-              enemy_hp=EXCLUDED.enemy_hp,enemy_max_hp=EXCLUDED.enemy_max_hp,enemy_atk=EXCLUDED.enemy_atk,enemy_def=EXCLUDED.enemy_def,
-              player_hp=EXCLUDED.player_hp,player_max_hp=EXCLUDED.player_max_hp,status='active',updated_at=EXCLUDED.updated_at""",
-              (int(uid),floor,e['key'],e['name'],e['hp'],e['hp'],e['atk'],e['defense'],int(eff['max_hp']),int(eff['max_hp']),now))
-            c.commit(); fight=c.execute("SELECT * FROM rpg_tower_fights WHERE user_id=?",(int(uid),)).fetchone()
-        c.close()
+        if not fight or int(fight.get('floor') or 0)!=floor:
+            c.close()
+            eff=effective_character_stats(char)
+            with db_lock:
+                c=get_db(); _tower_spawn(c,uid,floor,1,int(eff['max_hp']),int(eff['max_hp']),False); c.commit()
+                fight=c.execute("SELECT * FROM rpg_tower_fights WHERE user_id=?",(int(uid),)).fetchone(); c.close()
+        else:
+            c.close()
     return prog,dict(fight),char
 
 def _tower_keyboard(uid):
-    """La Torre usa las habilidades REALES del personaje KiwRPG, no un ataque genérico aparte."""
-    char=get_active_character(uid)
-    rows=[]
+    char=get_active_character(uid); skills=[]
     if char:
-        abilities=list(rpg_abilities_for(char.get('class_name')))
-        # Las tres técnicas propias de la clase.
-        for i in range(0,len(abilities),2):
-            row=[]
-            for a in abilities[i:i+2]:
-                aa=_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a
-                row.append({"text":f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}","callback_data":f"tower:skill:{aa['key']}"})
-            if row: rows.append(row)
-        # Técnicas especiales que realmente tenga equipadas/desbloqueadas.
+        for a in rpg_abilities_for(char.get('class_name')):
+            aa=_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a
+            skills.append({"text":f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}","callback_data":f"tower:skill:{aa['key']}"})
         extras=[]
-        if has_special_technique(uid,'hidden_blade'):
-            extras.append(_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade'))
+        if has_special_technique(uid,'hidden_blade'): extras.append(_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade'))
         extras += list(_equipped_gacha_weapon_abilities(uid,int(char['id'])) or [])
         extras += list(_equipped_recuerdo_abilities(uid,int(char['id'])) or [])
-        for a in [x for x in extras if x]:
-            rows.append([{"text":f"{a.get('emoji','✨')} {a.get('name','Habilidad')}","callback_data":f"tower:skill:{a['key']}"}])
-    if not rows:
-        rows.append([{"text":"⚔️ Atacar","callback_data":"tower:attack"}])
-    rows += [
-      [{"text":"🛡️ Defender","callback_data":"tower:defend"},{"text":"🧪 Pociones","callback_data":"tower:potions"}],
-      [{"text":"📊 Progreso","callback_data":"tower:progress"},{"text":"🔄 Actualizar","callback_data":"tower:refresh"}]
-    ]
+        for a in [x for x in extras if x]: skills.append({"text":f"{a.get('emoji','✨')} {a.get('name','Habilidad')}","callback_data":f"tower:skill:{a['key']}"})
+    rows=[skills[i:i+2] for i in range(0,len(skills),2)] if skills else [[{"text":"⚔️ Atacar","callback_data":"tower:attack"}]]
+    rows += [[{"text":"🛡️ Defender","callback_data":"tower:defend"},{"text":"🧪 Pociones","callback_data":"tower:potions"}],
+             [{"text":"📊 Progreso","callback_data":"tower:progress"},{"text":"🔄 Actualizar","callback_data":"tower:refresh"}]]
     return {"inline_keyboard":rows}
 
 def _tower_card(uid):
     prog,f,char=_tower_start_or_get(uid)
     if not prog: return "🏰 Necesitas crear un personaje KiwRPG primero.",None,None
-    floor=int(f['floor']); e=_tower_enemy(floor); buff=_tower_buff(uid)
+    floor=int(f['floor']); total=int(f.get('encounter_total') or _tower_encounters_for_floor(floor)); no=int(f.get('encounter_no') or 1); boss=bool(int(f.get('is_boss') or 0)); buff=_tower_buff(uid)
     btxt=""
     if buff:
-        left=max(0,int(buff['expires_at'])-int(time.time()))
-        btxt=f"\n🔥 Bonus piso: +{int(buff['atk_pct'])}% ATK · +{int(buff['def_pct'])}% DEF · {left//60}m {left%60:02d}s"
+        left=max(0,int(buff['expires_at'])-int(time.time())); btxt=f"\n🔥 Bonus piso: +{int(buff['atk_pct'])}% ATK · +{int(buff['def_pct'])}% DEF · {left//60}m {left%60:02d}s"
     skill="🎲🎲 Doble dado PERMANENTE" if int(prog.get('double_dice') or 0) else "🎲 Un dado"
-    txt=(f"🏰 TORRE DE LOS 100 PISOS\n\n📍 Piso {floor}/100"+(" · 👑 BOSS" if e['boss'] else "")+
+    stage=("👑 BOSS FINAL DEL PISO" if boss else f"⚔️ Encuentro {no}/{total}")
+    txt=(f"🏰 TORRE DE LOS 100 PISOS\n\n📍 Piso {floor}/100 · {stage}"
          f"\n👹 {f['enemy_name']}\n❤️ {f['enemy_hp']}/{f['enemy_max_hp']} · ⚔️ {f['enemy_atk']} · 🛡️ {f['enemy_def']}"
          f"\n\n🧙 Tu vida: {f['player_hp']}/{f['player_max_hp']}\n{skill}{btxt}")
     return txt,_tower_keyboard(uid),f['enemy_key']
@@ -12603,8 +12618,7 @@ def _tower_potions_keyboard(uid):
           AND (x.heal_percent>0 OR i.item_key IN ('pocion_fuerza','pocion_hierro','pocion_vitalidad','pocion_fuerza_mayor','pocion_hierro_mayor','pocion_vitalidad_mayor'))
           ORDER BY x.heal_percent DESC,x.name LIMIT 12""",(int(uid),world)).fetchall(); c.close()
     kb=[[{"text":f"🧪 {r['name']} ×{r['quantity']}","callback_data":f"tower:potion:{r['id']}"}] for r in rows]
-    kb.append([{"text":"⬅️ Volver","callback_data":"tower:refresh"}])
-    return {"inline_keyboard":kb}
+    kb.append([{"text":"⬅️ Volver","callback_data":"tower:refresh"}]); return {"inline_keyboard":kb}
 
 def _tower_use_potion(uid,inventory_id):
     row=inventory_item_row(uid,inventory_id)
@@ -12614,10 +12628,8 @@ def _tower_use_potion(uid,inventory_id):
         ok,msg=activate_combat_potion(uid,row['item_key'])
         if not ok: return False,"No pude activar esa poción."
         with db_lock:
-            c=get_db()
-            if int(row.get('quantity') or 1)>1: c.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=? AND user_id=?",(int(inventory_id),int(uid)))
-            else: c.execute("DELETE FROM rpg_inventory WHERE id=? AND user_id=?",(int(inventory_id),int(uid)))
-            c.commit(); c.close()
+            c=get_db(); q=int(row.get('quantity') or 1)
+            c.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),)) if q>1 else c.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),)); c.commit(); c.close()
         return True,msg
     heal=int(row.get('heal_percent') or 0)
     if heal<=0: return False,"Esa poción no funciona aquí."
@@ -12626,15 +12638,13 @@ def _tower_use_potion(uid,inventory_id):
         if not f: c.rollback(); c.close(); return False,"No tienes combate de Torre activo."
         cur=int(f['player_hp']); mx=int(f['player_max_hp'])
         if cur>=mx: c.rollback(); c.close(); return False,"Ya tienes la vida completa."
-        amount=max(1,round(mx*heal/100)); new=min(mx,cur+amount)
-        if int(row.get('quantity') or 1)>1: c.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),))
-        else: c.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),))
+        amount=max(1,round(mx*heal/100)); new=min(mx,cur+amount); q=int(row.get('quantity') or 1)
+        c.execute("UPDATE rpg_inventory SET quantity=quantity-1 WHERE id=?",(int(inventory_id),)) if q>1 else c.execute("DELETE FROM rpg_inventory WHERE id=?",(int(inventory_id),))
         c.execute("UPDATE rpg_tower_fights SET player_hp=?,updated_at=? WHERE user_id=?",(new,int(time.time()),int(uid))); c.commit(); c.close()
     return True,f"🧪 +{new-cur} HP → {new}/{mx}"
 
 def _tower_roll(chat_id,uid,double=False):
-    vals=[]
-    set_current_combat_user(uid)
+    vals=[]; set_current_combat_user(uid)
     try:
         for _ in range(2 if double else 1):
             r=send_dice(chat_id,'🎲')
@@ -12647,54 +12657,48 @@ def _tower_roll(chat_id,uid,double=False):
 def _tower_action(chat_id,thread_id,uid,defend=False,ability_key=None):
     prog,f,char=_tower_start_or_get(uid)
     if not prog: return "Necesitas un personaje."
-    eff=effective_character_stats(char); buff=_tower_buff(uid); now=int(time.time())
-    atk=int(eff['atk']); defense=int(eff['defense'])
+    eff=effective_character_stats(char); buff=_tower_buff(uid); now=int(time.time()); atk=int(eff['atk']); defense=int(eff['defense'])
     if buff: atk+=round(atk*int(buff.get('atk_pct') or 0)/100); defense+=round(defense*int(buff.get('def_pct') or 0)/100)
-    double=bool(int(prog.get('double_dice') or 0))
-    rolls=_tower_roll(chat_id,uid,double); roll=sum(rolls)
-    if double: roll=max(2,roll) # habilidad final: ambos dados suman.
-    ability=None
-    if ability_key and char:
-        ability=_rpg_get_ability_for_user(uid,char.get('class_name'),ability_key)
+    rolls=_tower_roll(chat_id,uid,bool(int(prog.get('double_dice') or 0))); roll=sum(rolls)
+    ability=_rpg_get_ability_for_user(uid,char.get('class_name'),ability_key) if ability_key and char else None
     if ability:
-        # Misma potencia/penetración de la técnica real de KiwRPG.
-        mult=float(ability.get('power') or 1.0)*(0.72+roll*0.08)
-        penetration=max(0.0,min(.90,float(ability.get('pen') or 0.0)))
-        enemy_def=int(round(int(f['enemy_def'])*(1.0-penetration)))
-    else:
-        mult=0.65+roll*0.12; enemy_def=int(f['enemy_def'])
-    dmg=max(1,int(atk*mult)-enemy_def//2)
-    enemy_hp=max(0,int(f['enemy_hp'])-dmg)
-    rolltxt="+".join(map(str,rolls))+f"={roll}" if len(rolls)>1 else str(roll)
+        mult=float(ability.get('power') or 1.0)*(0.72+roll*0.08); penetration=max(0.0,min(.90,float(ability.get('pen') or 0.0))); enemy_def=int(round(int(f['enemy_def'])*(1.0-penetration)))
+    else: mult=0.65+roll*0.12; enemy_def=int(f['enemy_def'])
+    dmg=max(1,int(atk*mult)-enemy_def//2); enemy_hp=max(0,int(f['enemy_hp'])-dmg); rolltxt="+".join(map(str,rolls))+f"={roll}" if len(rolls)>1 else str(roll)
     if enemy_hp<=0:
-        floor=int(f['floor']); reward=350+floor*85+(floor*250 if floor%10==0 else 0); exp=250+floor*65+(floor*180 if floor%10==0 else 0)
-        duration=max(5*60,(15-(floor//10))*60); bonus=min(30,5+(floor//10)*2)
-        nextfloor=min(100,floor+1); completed=1 if floor>=100 else int(prog.get('completed') or 0)
-        double_new=1 if floor>=100 else int(prog.get('double_dice') or 0)
+        floor=int(f['floor']); no=int(f.get('encounter_no') or 1); total=int(f.get('encounter_total') or _tower_encounters_for_floor(floor)); boss=bool(int(f.get('is_boss') or 0))
+        if not boss:
+            # Los encuentros normales dan EXP superior al PvE normal, pero el premio grande llega con el boss.
+            exp=120+floor*35+no*20; kw=100+floor*25
+            change_kiwons(uid,kw,'tower_encounter',chat_id=chat_id,note=f'Piso {floor} encuentro {no}')
+            try:
+                with db_lock:
+                    ec=get_db(); ec.execute("UPDATE characters SET exp=exp+? WHERE user_id=? AND is_active=1",(int(exp),int(uid))); ec.commit(); ec.close()
+            except Exception: pass
+            with db_lock:
+                c=get_db()
+                if no<total: _tower_spawn(c,uid,floor,no+1,int(f['player_hp']),int(f['player_max_hp']),False); nxt=f"Encuentro {no+1}/{total}"
+                else: _tower_spawn(c,uid,floor,total,int(f['player_hp']),int(f['player_max_hp']),True); nxt="BOSS FINAL"
+                c.commit(); c.close()
+            return f"💥 Dado: {rolltxt} · {dmg} daño\n✅ Encuentro {no}/{total} superado.\n🪙 +{kw:,} KW · ✨ +{exp} EXP\n\n➡️ Siguiente: {nxt}."
+        reward=800+floor*140; exp=700+floor*120; duration=max(5*60,(15-(floor//10))*60); bonus=min(30,5+(floor//10)*2); nextfloor=min(100,floor+1); completed=1 if floor>=100 else int(prog.get('completed') or 0); double_new=1 if floor>=100 else int(prog.get('double_dice') or 0)
         with db_lock:
             c=get_db(); c.execute("UPDATE rpg_tower_fights SET status='won',enemy_hp=0,updated_at=? WHERE user_id=?",(now,int(uid)))
-            c.execute("""UPDATE rpg_tower_progress SET floor=?,max_floor=GREATEST(max_floor,?),clears=clears+1,completed=?,double_dice=?,updated_at=? WHERE user_id=?""",
-                      (nextfloor,nextfloor,completed,double_new,now,int(uid)))
-            c.execute("""INSERT INTO rpg_tower_buffs(user_id,atk_pct,def_pct,expires_at,source_floor) VALUES(?,?,?,?,?)
-              ON CONFLICT(user_id) DO UPDATE SET atk_pct=EXCLUDED.atk_pct,def_pct=EXCLUDED.def_pct,expires_at=EXCLUDED.expires_at,source_floor=EXCLUDED.source_floor""",
-                      (int(uid),bonus,max(2,bonus//2),now+duration,floor))
-            c.commit(); c.close()
-        change_kiwons(uid,reward,'tower_floor',chat_id=chat_id,note=f'Piso {floor}')
+            c.execute("UPDATE rpg_tower_progress SET floor=?,max_floor=GREATEST(max_floor,?),clears=clears+1,completed=?,double_dice=?,updated_at=? WHERE user_id=?",(nextfloor,nextfloor,completed,double_new,now,int(uid)))
+            c.execute("""INSERT INTO rpg_tower_buffs(user_id,atk_pct,def_pct,expires_at,source_floor) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET atk_pct=EXCLUDED.atk_pct,def_pct=EXCLUDED.def_pct,expires_at=EXCLUDED.expires_at,source_floor=EXCLUDED.source_floor""",(int(uid),bonus,max(2,bonus//2),now+duration,floor)); c.commit(); c.close()
+        change_kiwons(uid,reward,'tower_floor',chat_id=chat_id,note=f'Boss piso {floor}')
         try:
             with db_lock:
-                _ec=get_db(); _ec.execute("UPDATE characters SET exp=exp+?,updated_at=? WHERE user_id=? AND is_active=1",(int(exp),int(time.time()),int(uid))); _ec.commit(); _ec.close()
+                ec=get_db(); ec.execute("UPDATE characters SET exp=exp+? WHERE user_id=? AND is_active=1",(int(exp),int(uid))); ec.commit(); ec.close()
         except Exception: pass
-        final="\n\n🏆 COMPLETASTE LOS 100 PISOS. Desde ahora tus ataques de Torre lanzan DOS dados permanentemente. 🎲🎲" if floor>=100 else ""
-        return (f"💥 Dado: {rolltxt} · {dmg} daño\n🏆 Piso {floor} superado.\n🪙 +{reward:,} KW · ✨ +{exp} EXP"
-                f"\n🔥 Bonus por {duration//60} min: +{bonus}% ATK · +{max(2,bonus//2)}% DEF.{final}\n\nUsa /torre o pulsa Continuar para el piso {nextfloor}.")
-    # enemy retaliates; defend halves incoming.
-    incoming=max(1,int(f['enemy_atk'])-defense//2); incoming=max(1,incoming//2) if defend else incoming
-    php=max(0,int(f['player_hp'])-incoming)
+        final="\n\n🏆 COMPLETASTE LOS 100 PISOS. Doble dado permanente desbloqueado. 🎲🎲" if floor>=100 else ""
+        return f"👑 BOSS DEL PISO {floor} DERROTADO.\n💥 {dmg} daño final.\n🪙 +{reward:,} KW · ✨ +{exp} EXP\n🔥 Bonus {duration//60} min: +{bonus}% ATK · +{max(2,bonus//2)}% DEF.{final}\n\n➡️ Piso {nextfloor}."
+    incoming=max(1,int(f['enemy_atk'])-defense//2); incoming=max(1,incoming//2) if defend else incoming; php=max(0,int(f['player_hp'])-incoming)
     if php<=0:
+        floor=int(f['floor'])
         with db_lock:
-            c=get_db(); c.execute("UPDATE rpg_tower_fights SET status='lost',player_hp=0,updated_at=? WHERE user_id=?",(now,int(uid)))
-            c.execute("UPDATE rpg_tower_progress SET deaths=deaths+1,updated_at=? WHERE user_id=?",(now,int(uid))); c.commit(); c.close()
-        return f"💥 Dado: {rolltxt} · {dmg} daño.\n☠️ {f['enemy_name']} te derrotó.\n\nNo pierdes pisos: sigues en el piso {f['floor']}. La próxima vez empiezas ESE piso desde cero."
+            c=get_db(); c.execute("UPDATE rpg_tower_fights SET status='lost',player_hp=0,updated_at=? WHERE user_id=?",(now,int(uid))); c.execute("UPDATE rpg_tower_progress SET deaths=deaths+1,updated_at=? WHERE user_id=?",(now,int(uid))); c.commit(); c.close()
+        return f"💥 Dado: {rolltxt} · {dmg} daño.\n☠️ {f['enemy_name']} te derrotó.\n\nSigues en el piso {floor}, pero al volver repetirás sus encuentros desde el primero."
     with db_lock:
         c=get_db(); c.execute("UPDATE rpg_tower_fights SET enemy_hp=?,player_hp=?,updated_at=? WHERE user_id=?",(enemy_hp,php,now,int(uid))); c.commit(); c.close()
     return f"🎲 {rolltxt} · 💥 {dmg} daño.\n👹 Contraataque: -{incoming} HP.\n❤️ Tú: {php}/{f['player_max_hp']} · 👹 {enemy_hp}/{f['enemy_max_hp']}"
@@ -12779,6 +12783,9 @@ def _touch_rpg_realm(user_id,realm_id):
             ON CONFLICT(user_id,realm_id) DO UPDATE SET touched_at=EXCLUDED.touched_at""",
             (int(user_id),int(realm_id),int(time.time()))); c.commit(); c.close()
 
+_RPG_ROUTE_CACHE={}
+_RPG_ROUTE_CACHE_TTL=15
+
 def set_rpg_chat_route(category,chat_id,message_thread_id=None,updated_by=0,realm_id=None):
     category=_rpg_route_key(category)
     if category not in RPG_CHAT_ROUTE_CATEGORIES: return False
@@ -12790,6 +12797,7 @@ def set_rpg_chat_route(category,chat_id,message_thread_id=None,updated_by=0,real
           message_thread_id=EXCLUDED.message_thread_id,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at""",
           (realm_id,category,int(chat_id),int(message_thread_id) if message_thread_id is not None else None,int(updated_by or 0),int(time.time())))
         c.commit(); c.close()
+    _RPG_ROUTE_CACHE.pop((realm_id,category),None)
     if updated_by: _touch_rpg_realm(updated_by,realm_id)
     return True
 
@@ -12797,6 +12805,7 @@ def delete_rpg_chat_route(category,realm_id):
     category=_rpg_route_key(category); _ensure_rpg_chat_routes()
     with db_lock:
         c=get_db(); cur=c.execute("DELETE FROM rpg_chat_routes_v2 WHERE realm_id=? AND category=?",(int(realm_id),category)); changed=int(cur.rowcount or 0); c.commit(); c.close()
+    _RPG_ROUTE_CACHE.pop((int(realm_id),category),None)
     return changed>0
 
 def get_rpg_chat_route(category,fallback_chat_id=None,fallback_thread_id=None,realm_id=None):
@@ -12806,10 +12815,15 @@ def get_rpg_chat_route(category,fallback_chat_id=None,fallback_thread_id=None,re
     rid=realm_id if realm_id is not None else fallback_chat_id
     row=None
     if rid is not None:
+        ck=(int(rid),category); now=time.time(); cached=_RPG_ROUTE_CACHE.get(ck)
+        if cached and now-cached[0]<_RPG_ROUTE_CACHE_TTL:
+            return cached[1]
         with db_lock:
             c=get_db(); row=c.execute("SELECT chat_id,message_thread_id FROM rpg_chat_routes_v2 WHERE realm_id=? AND category=?",(int(rid),category)).fetchone(); c.close()
-    if row:
-        return int(row['chat_id']), (int(row['message_thread_id']) if row.get('message_thread_id') is not None else None)
+        if row:
+            value=(int(row['chat_id']), (int(row['message_thread_id']) if row.get('message_thread_id') is not None else None))
+            _RPG_ROUTE_CACHE[ck]=(now,value)
+            return value
     return (int(fallback_chat_id) if fallback_chat_id is not None else 0,
             int(fallback_thread_id) if fallback_thread_id is not None else None)
 

@@ -506,7 +506,8 @@ def handle_callback(query):
         ch=_char(camp['id'],uid)
         if not ch:
             _S(chat_id,thread,'🎭 Primero crea tu personaje con /dndunirme.'); return True
-        target_name='NPC de la escena'
+        cd,phase,_=_dnd_scene_context(camp)
+        target_name=str(cd.get('npc') or 'NPC de la escena')
         if target_id:
             c=_db(); tr=c.execute("SELECT telegram_name,name FROM dnd_characters WHERE campaign_id=? AND user_id=? AND status='active'",(int(camp['id']),target_id)).fetchone(); c.close()
             if tr: target_name=str(tr.get('telegram_name') or tr.get('name') or target_id)
@@ -633,28 +634,61 @@ def _suggestion_keyboard(camp,context='',mode='scene'):
         rows.append(row)
     return {'inline_keyboard':rows}
 
+def _dnd_scene_context(camp):
+    """Contexto estructurado del capítulo actual para que TODAS las acciones rápidas narren la escena real."""
+    try:
+        cd,phase,phase_idx=_phase_def(camp)
+        return cd,phase,phase_idx
+    except Exception:
+        return ({'place':'el lugar','npc':'alguien','object':'una pista','goal':'seguir avanzando','conflict':'algo no encaja','reveal':'hay más de lo que parece','threat':'el peligro cercano','title':'Capítulo actual'}, {'title':'Escena','text':''}, 0)
+
 def _dnd_target_keyboard(camp,action):
     c=_db(); chars=c.execute("SELECT user_id,telegram_name,name FROM dnd_characters WHERE campaign_id=? AND status='active' ORDER BY joined_at",(int(camp['id']),)).fetchall(); c.close()
     rows=[]
     for r in chars[:20]:
         label=str(r.get('telegram_name') or r.get('name') or r['user_id'])[:42]
         rows.append([{'text':label,'callback_data':f"dnd:fasttarget:{action}:{int(r['user_id'])}"}])
-    rows.append([{'text':'🎭 NPC de la escena','callback_data':f'dnd:fasttarget:{action}:0'}])
+    cd,phase,_=_dnd_scene_context(camp)
+    npc=str(cd.get('npc') or 'NPC de la escena')
+    rows.append([{'text':f'🎭 {npc}'[:48],'callback_data':f'dnd:fasttarget:{action}:0'}])
     return {'inline_keyboard':rows}
 
 def _dnd_fast_result(camp,ch,user,action,target_name=''):
-    who=(f" a {target_name}" if target_name else "")
-    variants={
-      'attack':[f"Te lanzas al ataque{who}. La escena responde de inmediato y cualquier amenaza cercana cambia su atención hacia ti.",f"Atacas{who} sin perder tiempo. Tu movimiento rompe la calma y obliga al entorno a reaccionar."],
-      'investigate':["Te detienes a investigar. Encuentras marcas recientes, un detalle fuera de lugar y una pista que antes pasaba desapercibida.","Revisas la zona con cuidado. Algo no encaja con la versión más obvia de lo ocurrido y aparece una nueva pista."],
-      'talk':[f"Intentas hablar{who}. La conversación abre una posibilidad que la fuerza no habría conseguido.",f"Hablas{who}. La respuesta no entrega toda la verdad, pero sí cambia el tono de la escena."],
-      'seduce':[f"Intentas seducir{who}. La otra parte nota claramente tu intención; su reacción dependerá de la tirada y de la relación que exista.",f"Usas encanto y cercanía{who}. La tensión social cambia y ahora toca ver si funciona."],
-      'help':[f"Decides ayudar{who}. Tu intervención mejora su posición y reduce el riesgo inmediato.",f"Te mueves para ayudar{who}. La acción crea una ventaja para el siguiente movimiento."],
-      'flee':["Buscas una salida y te retiras de la zona de peligro. No todo queda resuelto, pero sobrevives para decidir qué hacer después.","Retrocedes antes de quedar atrapado. El peligro permanece atrás y la escena cambia de posición."],
-      'target':[f"Diriges tu acción{who}. El objetivo queda claro y la escena puede resolverla sin tener que adivinar a quién te referías.",f"Actúas directamente{who}. Ya no hay ambigüedad sobre quién recibe la acción."]
-    }
-    arr=variants.get(action,variants['target'])
-    return arr[(int(time.time())+int(ch['user_id']))%len(arr)]
+    """Director local contextual. No usa IA: combina capítulo, fase, lugar, NPC, amenaza, objetivo y revelación."""
+    cd,phase,phase_idx=_dnd_scene_context(camp)
+    place=str(cd.get('place') or 'el lugar'); npc=str(cd.get('npc') or 'alguien')
+    obj=str(cd.get('object') or 'la pista'); goal=str(cd.get('goal') or 'seguir avanzando')
+    conflict=str(cd.get('conflict') or 'algo no encaja'); reveal=str(cd.get('reveal') or 'hay algo oculto')
+    threat=str(cd.get('threat') or 'el peligro cercano'); phase_title=str(phase.get('title') or 'Escena')
+    target=target_name or npc
+    seed=(int(camp.get('arc') or 1)*97+int(camp.get('chapter') or 1)*31+int(camp.get('scene') or 1)*11+int(ch['user_id'])+sum(map(ord,action)))
+    atmos=[
+      f"En {place}, el ambiente cambia apenas tomas la iniciativa. {conflict.capitalize()}.",
+      f"{place} no permanece indiferente. Hay una tensión rara alrededor de {obj}, como si la escena estuviera esperando una decisión.",
+      f"Durante «{phase_title}», hasta los detalles pequeños parecen importantes: {threat} sigue demasiado cerca para olvidarlo."
+    ][seed%3]
+    if action=='investigate':
+        body=[f"Te apartas del ruido y revisas {obj} con paciencia. Encuentras una señal que conecta con {reveal}; no resuelve el misterio, pero descarta la explicación más fácil.",f"Sigues marcas, posiciones y pequeñas contradicciones. Algo relacionado con {obj} fue manipulado a propósito. La pista apunta hacia {threat}, aunque todavía no sabes si es causa o consecuencia."][seed%2]
+        hook=f"Ahora puedes presionar a {npc} con lo descubierto o seguir la pista antes de que cambie."
+    elif action=='talk':
+        body=f"Buscas a {target} y llevas la conversación hacia {goal}. Al mencionar {obj}, su reacción llega antes que sus palabras: una pausa, una mirada fuera de sitio. No te entrega toda la verdad, pero deja escapar que {reveal}."
+        hook=f"{target} parece dispuesto a seguir hablando, aunque hacerlo puede obligarte a revelar cuánto sabes."
+    elif action=='seduce':
+        body=f"Te acercas a {target} sin convertirlo en una frase automática: observas su reacción, bajas la tensión y juegas con la cercanía. Cuando mencionas {obj}, notas que su seguridad vacila. Si consigues atravesar sus defensas, podrías obtener algo útil sobre {reveal}."
+        hook="La intención está clara; ahora la tirada decidirá si consigues confianza, una pista… o una situación bastante incómoda."
+    elif action=='attack':
+        body=f"Te mueves contra {target}. El choque rompe el equilibrio de {place}; {threat} deja de ser parte del fondo y la escena entra en peligro real. Tu ataque puede abrir el camino hacia {goal}, pero también hará que alguien recuerde exactamente quién inició la violencia."
+        hook="La tirada decidirá cuánto control conservas cuando empiece el caos."
+    elif action=='help':
+        body=f"Te colocas del lado de {target} y conviertes tu acción en una ventaja concreta: cubres un punto débil, compartes lo que descubriste sobre {obj} y reduces el riesgo que representa {threat}."
+        hook=f"Ayudar aquí crea confianza, pero también te vincula a lo que {target} decida hacer después."
+    elif action=='flee':
+        body=f"Decides que sobrevivir también es una decisión. Buscas una salida de {place} antes de que {threat} cierre el paso. No solucionas {goal}, pero te llevas contigo lo aprendido sobre {obj}."
+        hook="Retirarte cambia la posición de la historia; el problema seguirá existiendo cuando vuelvas."
+    else:
+        body=f"Diriges tu acción hacia {target}. Lo que hagas queda ligado a {obj}, al conflicto actual y a la posibilidad de que {reveal}. La escena ya sabe quién recibe tu decisión y puede reaccionar sin adivinar tu intención."
+        hook=f"El siguiente movimiento puede acercarte a {goal} o abrir una consecuencia nueva."
+    return f"{atmos}\n\n{body}\n\n{hook}"
 
 def _store_scene_options(camp,uid,context,mode='scene'):
     opts=_suggestion_options(camp,context,mode); c=_db(); now=int(time.time())

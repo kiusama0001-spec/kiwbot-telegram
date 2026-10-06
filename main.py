@@ -12713,6 +12713,9 @@ def _tower_progress_text(uid):
     return (f"📊 TORRE — {_player_name_by_id(uid)}\n\n📍 Piso actual: {p['floor']}/100\n🏁 Máximo: {p['max_floor']}"
             f"\n✅ Pisos superados: {p['clears']}\n☠️ Derrotas: {p['deaths']}\n🎲🎲 Doble dado: {'DESBLOQUEADO' if int(p.get('double_dice') or 0) else 'bloqueado hasta completar el piso 100'}")
 
+def _tower_continue_keyboard(floor):
+    return {'inline_keyboard':[[{'text':f'🏰 CONTINUAR TORRE — PISO {int(floor)}','callback_data':'tower:refresh'}],[{'text':'📊 Mi progreso','callback_data':'tower:progress'}]]}
+
 RPG_CHAT_ROUTE_CATEGORIES = {
     "rpg": "RPG general + rumores/asesinatos",
     "carreras": "Carreras de caballos",
@@ -14905,8 +14908,11 @@ def handle_rpg_callback(query):
             ability_key=action.split(':',1)[1]
             try:
                 result=_tower_action(chat_id,thread_id,uid,ability_key=ability_key)
-                card,kb,key=_tower_card(uid)
-                send_message(chat_id,result+"\n\n"+card,reply_markup=kb)
+                if result.startswith('👑 BOSS DEL PISO'):
+                    pnow=_tower_progress(uid); nf=int(pnow.get('floor') or 1)
+                    send_message(chat_id,result+f"\n\n📍 Tu progreso actual: Piso {nf}/100",reply_markup=_tower_continue_keyboard(nf))
+                else:
+                    card,kb,key=_tower_card(uid); send_message(chat_id,result+"\n\n"+card,reply_markup=kb)
             except Exception as exc:
                 logger.exception("Error resolviendo habilidad de Torre uid=%s action=%s",uid,ability_key)
                 send_message(chat_id,"🏰 La tirada salió, pero hubo un error al resolver el turno. Tu progreso no se reinició; pulsa 🔄 Actualizar e inténtalo otra vez.")
@@ -14914,8 +14920,11 @@ def handle_rpg_callback(query):
         if action in ('attack','defend'):
             try:
                 result=_tower_action(chat_id,thread_id,uid,defend=(action=='defend'))
-                card,kb,key=_tower_card(uid)
-                send_message(chat_id,result+"\n\n"+card,reply_markup=kb)
+                if result.startswith('👑 BOSS DEL PISO'):
+                    pnow=_tower_progress(uid); nf=int(pnow.get('floor') or 1)
+                    send_message(chat_id,result+f"\n\n📍 Tu progreso actual: Piso {nf}/100",reply_markup=_tower_continue_keyboard(nf))
+                else:
+                    card,kb,key=_tower_card(uid); send_message(chat_id,result+"\n\n"+card,reply_markup=kb)
             except Exception as exc:
                 logger.exception("Error resolviendo turno de Torre uid=%s action=%s",uid,action)
                 send_message(chat_id,"🏰 La tirada salió, pero hubo un error al resolver el turno. Tu progreso no se reinició; pulsa 🔄 Actualizar e inténtalo otra vez.")
@@ -17313,6 +17322,19 @@ def _rpg_ai_usage_release(day):
     except Exception:
         logger.exception("No pude devolver una reserva de generación IA")
 
+def _rpg_unique_monster_visual(key,name,kind='enemy'):
+    """Descripción visual determinista por criatura para evitar que FLUX reciba el mismo diseño genérico."""
+    import hashlib
+    h=int(hashlib.sha256((str(kind)+'|'+str(key)+'|'+str(name)).encode('utf-8')).hexdigest()[:12],16)
+    bodies=['quadrupedal predator','towering humanoid brute','serpentine aberration','insectoid hunter','winged nightmare','skeletal revenant','armored beast','many-limbed eldritch creature','lean demonic stalker','massive golem-like creature']
+    mats=['black obsidian plates','translucent crystal growths','weathered bone armor','smoldering volcanic stone','tarnished bronze and iron','ashen hide with glowing cracks','frost-covered pale scales','dark chitin with razor edges','ancient rune-carved stone','smoky spectral flesh']
+    features=['asymmetric crown of horns','one oversized claw and a scarred face','floating shards orbiting its spine','a split mask-like face','long needle-like limbs','a luminous core visible through its chest','broken ceremonial armor','multiple dim predatory eyes','chains fused into its body','a ragged mantle formed from smoke']
+    auras=['cold blue witchfire','deep crimson embers','sickly green mist','violet void sparks','golden runic dust','silver moonlit vapor','black ash swirling upward','electric storm arcs','red crystal motes','pale ghost-light']
+    habitats=['narrow ruined stairwell','vast circular tower chamber','collapsed gothic hall','crystal-lined dungeon vault','ancient forge floor','flooded stone gallery','wind-torn battlement','forgotten chapel inside the tower','underground bridge over a void','monumental sealed gate']
+    b=bodies[h%len(bodies)]; m=mats[(h//11)%len(mats)]; f=features[(h//101)%len(features)]; a=auras[(h//1009)%len(auras)]; hab=habitats[(h//7919)%len(habitats)]
+    scale='colossal floor guardian boss' if 'boss' in str(kind) else 'dangerous dungeon monster'
+    return f"{scale}, {b}, body made of {m}, distinctive feature: {f}, surrounded by {a}; native to a {hab}; unmistakable silhouette unique to {name}; no generic human knight template"
+
 def _rpg_ai_asset_info(asset_key):
     """Valida una clave visual del RPG y devuelve metadatos para generar su arte."""
     raw=str(asset_key or "").strip().lower()
@@ -17325,7 +17347,7 @@ def _rpg_ai_asset_info(asset_key):
     if kind=="enemy":
         cfg=_rpg_enemy_info(key)
         if not cfg: return None
-        visual=_RPG_ENEMY_VISUALS.get(key, f"a hostile fantasy creature named {cfg.get('name',key)}")
+        visual=_RPG_ENEMY_VISUALS.get(key) or _rpg_unique_monster_visual(key,cfg.get('name',key),'enemy')
         camera,lighting,scene=_rpg_art_variant("enemy_"+key)
         return {"canonical":f"enemy:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="tower":
@@ -17333,7 +17355,7 @@ def _rpg_ai_asset_info(asset_key):
         tname=(globals().get('_TOWER_ENEMY_MAP',{}).get(key) or globals().get('_TOWER_BOSS_MAP',{}).get(key))
         if not tname: return None
         camera,lighting,scene=_rpg_art_variant("tower_"+key)
-        visual=f"unique dark fantasy tower creature named {tname}, original monster design, clearly distinct silhouette, floor-themed armor and anatomy"
+        visual=_rpg_unique_monster_visual(key,tname,'tower_boss' if key.startswith('tower_boss_') else 'tower_enemy')
         return {"canonical":f"tower:{key}","kind":kind,"key":key,"name":str(tname),"visual":visual,"scene":"inside the legendary one hundred floor tower, monumental dungeon architecture","camera":camera,"lighting":lighting}
     if kind=="class":
         aliases={"picaro":"picaro","pícaro":"picaro","paladin":"paladin","paladín":"paladin","the cleaner":"the_cleaner","the_cleaner":"the_cleaner"}
@@ -17346,7 +17368,7 @@ def _rpg_ai_asset_info(asset_key):
         cfg=RPG_BOSSES.get(key)
         if not cfg: return None
         camera,lighting,scene=_rpg_art_variant("boss_"+key)
-        return {"canonical":f"boss:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":_RPG_BOSS_VISUALS.get(key,f"a colossal unique raid boss named {cfg.get('name',key)}"),"scene":scene,"camera":camera,"lighting":lighting}
+        return {"canonical":f"boss:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":(_RPG_BOSS_VISUALS.get(key) or _rpg_unique_monster_visual(key,cfg.get('name',key),'boss')),"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="pet":
         cfg=RPG_PETS.get(key)
         if not cfg: return None

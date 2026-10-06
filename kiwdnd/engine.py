@@ -500,7 +500,7 @@ def handle_callback(query):
         checks={'investigate':('INT',2),'perception':('SAB',2),'deduce':('INT',3),'persuade':('CAR',2),'deceive':('CAR',3),'intimidate':('CAR',2),'seduce':('CAR',2),'insight':('SAB',2),'stealth':('DES',3),'confront':('FUE',3),'advance':('DES',2)}
         if key in checks:
             stat,dice=checks[key]; mod=_stat_mod(ch,stat); _S(chat_id,thread,f"{label}\n🎯 Prueba {stat} ({mod:+d}) · {dice}d6\nTira los dados.")
-            _request_roll(camp,user,f"{label} sobre {npc}",needed=dice,difficulty=4,stat=stat); return True
+            _request_roll(camp,user,label,needed=dice,difficulty=4,stat=stat); return True
         if key=='defend':
             _S(chat_id,thread,'🛡️ Adoptas una postura defensiva. Tu siguiente riesgo físico tendrá ventaja narrativa.',reply_markup=_suggestion_keyboard(camp,'defensa',uid=uid)); return True
         if key=='talk':
@@ -683,25 +683,39 @@ DND_FAST_ACTIONS=[
 ]
 
 def _scene_action_options(camp,context='',ch=None):
-    """Acciones cortas y cambiantes. En combate muestra técnicas reales de la clase."""
+    """Menú D&D contextual: cada resolución abre decisiones nuevas, no recicla siempre el mismo panel."""
     cd,phase,_=_dnd_scene_context(camp); npc=str(cd.get('npc') or 'alguien'); obj=str(cd.get('object') or 'la pista')
     threat=str(cd.get('threat') or 'el peligro'); goal=str(cd.get('goal') or 'seguir adelante'); ctx=_norm(context or camp.get('scene_text') or '')
     flags=_flags(camp); dead=bool(flags.get('dead_npc_'+_norm(npc).replace(' ','_')))
+    last=flags.get('dnd2_last_resolution') or {}
+    if isinstance(last,dict) and int(last.get('chapter') or 0)==int(camp.get('chapter') or 0):
+        kind=str(last.get('kind') or ''); grade=str(last.get('grade') or ''); tgt=str(last.get('target') or npc)
+        good=grade in ('exceptional','success','cost')
+        if kind in ('investigate','perception','deduce') and good:
+            return [(f'🧠 Interpretar {obj}'[:48],'deduce'),(f'🗣️ Mostrarlo a {npc}'[:48],'persuade'),(f'👣 Seguir la pista','advance'),(f'🎭 Ocultar lo descubierto','deceive'),(f'⚠️ Presionar a {npc}'[:48],'intimidate'),(f'⚔️ Confrontar a {npc}'[:48],'confront'),('🎯 Otra acción','target')]
+        if kind in ('persuade','talk','seduce','insight','deceive','intimidate'):
+            return [(f'❓ Exigir una respuesta a {tgt}'[:48],'intimidate'),(f'🤝 Proponer un trato','persuade'),(f'🎭 Mentir sobre {obj}'[:48],'deceive'),(f'👁️ Leer su reacción','insight'),(f'🔎 Usar la pista','investigate'),(f'⚔️ Atacar a {tgt}'[:48],'confront'),('🎯 Otra acción','target')]
+        if kind in ('attack','confront'):
+            if grade in ('exceptional','success'):
+                return [(f'☠️ Rematar a {tgt}'[:48],f'attack|DES|3'),(f'⛓️ Inmovilizar a {tgt}'[:48],'confront'),(f'🗣️ Interrogar a {tgt}'[:48],'intimidate'),(f'🛑 Perdonar a {tgt}'[:48],'persuade'),(f'🔎 Aprovechar para revisar {obj}'[:48],'investigate'),('🏃 Romper el combate','flee'),('🎯 Otra acción','target')]
+            return [('🛡️ Recuperar posición','defend'),(f'⚔️ Contraatacar a {tgt}'[:48],f'attack|DES|2'),('🏃 Buscar cobertura','flee'),(f'⚠️ Intimidar a {tgt}'[:48],'intimidate'),('👁️ Buscar una apertura','perception'),('🎯 Otra acción','target')]
+        if kind in ('advance','stealth','flee'):
+            return [(f'👁️ Observar el nuevo lugar','perception'),(f'🔎 Buscar señales de {obj}'[:48],'investigate'),(f'👣 Seguir hacia el objetivo','advance'),(f'🕵️ Avanzar en silencio','stealth'),(f'🗣️ Consultar a {npc}'[:48],'talk'),(f'⚔️ Prepararse contra {threat}'[:48],'confront'),('🎯 Otra acción','target')]
     combat=any(w in ctx for w in ('ataque','golpe','retrocede','desventaja','pelea','violencia','hostil','combate','iniciativa'))
     if combat and not dead:
-        attacks=_attack_set(ch)[:4] if ch else [("⚔️ Atacar",'DES',3)]
+        attacks=_attack_set(ch)[:4] if ch else [('⚔️ Atacar','DES',2)]
         out=[(label,f'attack|{stat}|{dice}') for label,stat,dice in attacks]
-        out += [(f'🛡️ Defender','defend'),(f'🏃 Retirarse','flee'),(f'🗣️ Negociar con {npc}'[:48],'talk'),('🎯 Otra acción','target')]
+        out += [('🛡️ Defender','defend'),('🏃 Retirarse','flee'),(f'🗣️ Negociar con {npc}'[:48],'talk'),('🎯 Otra acción','target')]
         return out[:8]
     if dead:
-        return [(f'🔎 Registrar a {npc}'[:48],'investigate'),(f'👣 Seguir hacia {goal}'[:48],'advance'),(f'👁️ Examinar {obj}'[:48],'investigate'),('💬 Hablar con el grupo','talk'),('🎯 Otra acción','target')]
+        return [(f'🔎 Registrar a {npc}'[:48],'investigate'),('👣 Seguir adelante','advance'),(f'👁️ Examinar {obj}'[:48],'investigate'),('💬 Hablar con el grupo','talk'),('🎯 Otra acción','target')]
     clue=any(w in ctx for w in ('pista','descub','revela','runa','huella','señal','llave','misterio'))
     social=any(w in ctx for w in ('confianza','hablar','convers','verdad','sospecha','relacion','reaccion'))
     if clue:
-        return [(f'🔎 Examinar {obj}'[:48],'investigate'),(f'👁️ Percepción','perception'),(f'🗣️ Preguntar a {npc}'[:48],'talk'),('🧠 Deducir','deduce'),(f'👣 Seguir pista','advance'),(f'⚔️ Confrontar a {npc}'[:48],'confront'),('🎯 Otra acción','target')]
+        return [(f'🔎 Examinar {obj}'[:48],'investigate'),('👁️ Percepción','perception'),(f'🗣️ Preguntar a {npc}'[:48],'talk'),('🧠 Deducir','deduce'),('👣 Seguir pista','advance'),(f'⚔️ Confrontar a {npc}'[:48],'confront'),('🎯 Otra acción','target')]
     if social:
         return [(f'🗣️ Persuadir a {npc}'[:48],'persuade'),('🎭 Engañar','deceive'),('⚠️ Intimidar','intimidate'),(f'😏 Seducir a {npc}'[:48],'seduce'),('👁️ Leer reacción','insight'),(f'⚔️ Atacar a {npc}'[:48],'confront'),('🎯 Otra acción','target')]
-    return [(f'🔎 Investigar {obj}'[:48],'investigate'),('👁️ Percepción','perception'),(f'🗣️ Hablar con {npc}'[:48],'talk'),(f'👣 Avanzar','advance'),(f'⚔️ Enfrentar {threat}'[:48],'confront'),('🕵️ Sigilo','stealth'),('🎯 Otra acción','target')]
+    return [(f'🔎 Investigar {obj}'[:48],'investigate'),('👁️ Percepción','perception'),(f'🗣️ Hablar con {npc}'[:48],'talk'),('👣 Avanzar','advance'),(f'⚔️ Enfrentar {threat}'[:48],'confront'),('🕵️ Sigilo','stealth'),('🎯 Otra acción','target')]
 
 def _suggestion_options(camp,context='',mode='scene'):
     if mode=='roll': return [('🎲 Lanzar dado','__roll__')]
@@ -858,75 +872,62 @@ def _with_suggestions(camp,text,context='',mode='scene'):
     return str(text).rstrip()+_suggestions(camp, context or text, mode)
 
 def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
-    """Resuelve una tirada como continuación real de la escena, no como texto genérico."""
+    """D&D 2: resultado corto, concreto y persistente. La consecuencia determina el siguiente menú."""
     total=sum(int(x) for x in rolls); needed=max(1,len(rolls)); margin=total-int(target)
-    low=str(reason or '').strip(); low_norm=_norm(low)
-    cd,phase,_=_dnd_scene_context(camp)
-    place=str(cd.get('place') or 'el lugar'); npc=str(cd.get('npc') or 'alguien')
-    obj=str(cd.get('object') or 'la pista'); goal=str(cd.get('goal') or 'seguir avanzando')
-    threat=str(cd.get('threat') or 'el peligro cercano'); reveal=str(cd.get('reveal') or 'algo oculto')
+    raw=str(reason or '').strip(); low=_norm(raw)
+    cd,phase,_=_dnd_scene_context(camp); place=str(cd.get('place') or 'el lugar'); npc=str(cd.get('npc') or 'alguien')
+    obj=str(cd.get('object') or 'la pista'); goal=str(cd.get('goal') or 'seguir adelante'); threat=str(cd.get('threat') or 'el peligro')
+    reveal=str(cd.get('reveal') or 'algo estaba oculto')
     target_name=npc
-    m=re.search(r'(?i)^(?:atacar|seducir)\s+a\s+(.+)$', low)
+    m=re.search(r'(?i)(?:contra|a)\s+([^·]+)$',raw)
     if m: target_name=m.group(1).strip()
-    if margin >= max(2,needed*2): grade='exceptional'
-    elif margin >= 0: grade='success'
-    elif margin >= -max(1,needed): grade='cost'
+    if margin>=max(2,needed*2): grade='exceptional'
+    elif margin>=0: grade='success'
+    elif margin>=-max(1,needed): grade='cost'
     else: grade='failure'
     labels={'exceptional':'🌟 ÉXITO EXCEPCIONAL','success':'✨ ÉXITO','cost':'⚠️ ÉXITO CON CONSECUENCIA','failure':'💥 FALLO'}
-    # Incluye historial + entropía local: el mismo número nunca obliga a repetir la misma escena.
-    try:
-        qc=_db(); qr=qc.execute("SELECT COUNT(*) AS n FROM dnd_journal WHERE campaign_id=? AND actor_id=? AND event_type='roll_result'",(int(camp['id']),int(ch.get('user_id') or 0))).fetchone(); qc.close(); turn_no=int((qr or {}).get('n') or 0)
-    except Exception: turn_no=int(time.time()*1000)%997
-    seed=(int(camp.get('arc') or 1)*101+int(camp.get('chapter') or 1)*37+int(camp.get('scene') or 1)*13+int(ch.get('user_id') or 0)+total+turn_no*53+random.SystemRandom().randint(0,1000003))
-    if low_norm.startswith(('atacar','rematar')):
-        if grade=='exceptional':
-            body=f"Tu ataque entra limpio antes de que {target_name} pueda recomponerse. Lo obligas a retroceder y tomas el control inmediato de la escena. En {place}, el ruido también revela un detalle alrededor de {obj}: {reveal}."
-            consequence=f"{target_name} queda en clara desventaja. Ahora puedes presionarlo, detener la pelea o aprovechar la apertura para {goal}."
-        elif grade=='success':
-            attack_success=[
-                (f"Tu golpe obliga a {target_name} a ceder terreno. El ruido rebota por {place} y, durante un instante, deja al descubierto algo relacionado con {obj}.", f"{target_name} aún puede responder, pero perdió la posición y tú decides si presionas o cambias de objetivo."),
-                (f"Engañas la guardia de {target_name} y conectas antes de que pueda cerrarla. El movimiento agita {place}; {threat} reacciona al conflicto y deja de permanecer al margen.", f"Tienes la iniciativa, aunque continuar la pelea puede atraer una consecuencia mayor."),
-                (f"El ataque encuentra un hueco y {target_name} retrocede para recuperar el equilibrio. Cerca de {obj} ocurre algo que antes había pasado inadvertido: {reveal}.", f"La ventaja es tuya por ahora. Puedes aprovecharla para {goal} o mantener la presión sobre {target_name}."),
-                (f"Cruzas la defensa de {target_name} con un impacto preciso. No lo sacas de la escena, pero cambias por completo el ritmo del enfrentamiento en {place}.", f"{target_name} queda obligado a reaccionar a ti, mientras {threat} se vuelve más difícil de ignorar.")
-            ]
-            body,consequence=attack_success[seed%len(attack_success)]
-        elif grade=='cost':
-            body=f"Consigues golpear a {target_name}, pero te expones al hacerlo. El impacto funciona; la respuesta también. Algo cerca de {obj} se desplaza y {threat} encuentra una oportunidad para acercarse."
-            consequence="Lograste lo que intentabas, aunque ahora tendrás que resolver la consecuencia que abriste."
-        else:
-            body=f"{target_name} lee tu movimiento y evita el golpe. Tu impulso te deja mal colocado y el equilibrio de {place} cambia en tu contra."
-            consequence=f"No es el final de la partida: {target_name} tiene ahora la iniciativa y {threat} se vuelve más urgente."
-    elif low_norm.startswith('seducir'):
-        if grade=='exceptional':
-            body=f"La resistencia de {target_name} se rompe justo donde querías. La cercanía deja de ser un juego unilateral y, al hablar de {obj}, obtienes una reacción demasiado sincera para fingirla: {reveal}."
-            consequence=f"Has creado confianza y una apertura real. Puedes usarla para acercarte a {goal}, pero lo que hagas con esa confianza también tendrá memoria."
-        elif grade=='success':
-            body=f"{target_name} responde a tu acercamiento. No consigues control absoluto, pero sí suficiente confianza para que baje la guardia y deje escapar algo relacionado con {obj}."
-            consequence=f"La relación cambia a tu favor y aparece una vía nueva hacia {goal}."
-        elif grade=='cost':
-            body=f"{target_name} acepta parte del juego, aunque nota que buscas algo. Consigues cercanía, pero también despiertas sospecha cuando aparece el tema de {obj}."
-            consequence="Obtienes una oportunidad, a cambio de que tus intenciones ya no sean invisibles."
-        else:
-            body=f"{target_name} detecta la intención antes de que puedas conducir la situación. La tensión cambia de tono y tu intento queda demasiado claro."
-            consequence=f"No bloquea la historia, pero tendrás que reconstruir confianza o buscar otra ruta hacia {goal}."
+    if any(w in low for w in ('examinar','investigar','percepcion','percepción','deducir','revisar')): kind='investigate'
+    elif any(w in low for w in ('persuadir','preguntar','hablar','negociar')): kind='persuade'
+    elif 'seduc' in low: kind='seduce'
+    elif 'engañ' in low or 'mentir' in low: kind='deceive'
+    elif 'intimid' in low or 'interrogar' in low: kind='intimidate'
+    elif any(w in low for w in ('atacar','contraatacar','rematar','corte','disparo','marca','cadena','golpe','enfrentar','confrontar')): kind='attack'
+    elif any(w in low for w in ('seguir','avanzar','sigilo','retirarse','huir','cobertura')): kind='advance'
+    else: kind='investigate'
+    variants=[]
+    if kind=='investigate':
+        if grade=='exceptional': variants=[f"Descifras {obj}: {reveal}. Además encuentras una segunda marca que apunta directamente a {npc}.",f"{obj.capitalize()} encaja con las señales del lugar: {reveal}. Descubres también por dónde continuó quien la manipuló."]
+        elif grade=='success': variants=[f"Encuentras la pista útil en {obj}: {reveal}.",f"La revisión funciona: {obj} confirma que {reveal}."]
+        elif grade=='cost': variants=[f"Descubres que {reveal}, pero al manipular {obj} alertas a {npc}.",f"Obtienes la pista —{reveal}—, pero {threat} reacciona antes de que puedas ocultar lo encontrado."]
+        else: variants=[f"No logras leer {obj} y dejas una señal evidente de que lo intentaste.",f"La pista se te escapa; peor aún, {threat} gana tiempo mientras investigas."]
+    elif kind in ('persuade','seduce','deceive','intimidate'):
+        verb={'persuade':'hablar','seduce':'acercarte','deceive':'engañar','intimidate':'presionar'}[kind]
+        if grade=='exceptional': variants=[f"Consigues {verb} con {target_name} y baja completamente la guardia: admite que {reveal}.",f"{target_name} cede más de lo esperado y revela que {reveal}."]
+        elif grade=='success': variants=[f"{target_name} cede lo suficiente para confirmar que {reveal}.",f"Tu intento funciona: {target_name} te da una pista real sobre {obj}."]
+        elif grade=='cost': variants=[f"{target_name} te da una pista sobre {obj}, pero ahora sabe que sospechas de él.",f"Obtienes una respuesta útil, aunque {target_name} exige algo a cambio antes de seguir hablando."]
+        else: variants=[f"{target_name} se cierra y deja de cooperar por ahora.",f"Tu intento falla; {target_name} desconfía más y cambia el tono de la conversación."]
+    elif kind=='attack':
+        if grade=='exceptional': variants=[f"Superas la defensa de {target_name} y lo dejas a tu merced.",f"El ataque rompe la guardia de {target_name}; tienes una oportunidad clara para rematar, capturar o detenerte."]
+        elif grade=='success': variants=[f"Impactas a {target_name} y lo obligas a retroceder.",f"Tu ataque conecta; {target_name} pierde la iniciativa."]
+        elif grade=='cost': variants=[f"Golpeas a {target_name}, pero quedas expuesto a su respuesta.",f"El ataque entra, aunque el intercambio te deja en mala posición."]
+        else: variants=[f"{target_name} evita el golpe y toma la iniciativa.",f"Fallaste el ataque; {target_name} aprovecha tu apertura."]
     else:
-        if grade=='exceptional': body=f"La acción sale mejor de lo previsto. En {place}, además de conseguir lo que buscabas, descubres una conexión con {obj}: {reveal}."; consequence=f"Obtienes una ventaja clara para {goal}."
-        elif grade=='success':
-            generic_success=[
-                (f"La acción funciona y cambia la disposición de {place}. Un detalle de {obj} cobra sentido mientras {threat} queda contenido por el momento.",f"Se abre una ruta concreta hacia {goal}."),
-                (f"Consigues exactamente la apertura que buscabas. La reacción del entorno confirma que {reveal}.",f"Puedes usar esta ventaja para acercarte a {goal} antes de que cambie la situación."),
-                (f"Tu decisión da resultado, pero también mueve otras piezas de la escena. {threat.capitalize()} sigue presente, aunque ahora tienes margen para actuar.",f"El siguiente movimiento puede convertir esta ventaja en progreso real hacia {goal}.")
-            ]; body,consequence=generic_success[seed%len(generic_success)]
-        elif grade=='cost': body=f"Lo consigues, pero no gratis. Mientras avanzas, {threat} obliga a aceptar una complicación nueva."; consequence="La historia continúa con una ventaja y un problema al mismo tiempo."
-        else: body=f"El intento falla y {place} responde de la peor manera útil: no te detiene la partida, pero {threat} gana terreno."; consequence=f"Necesitas cambiar de enfoque para acercarte a {goal}."
-    # Una intención explícita de rematar puede cambiar permanentemente el elenco de la escena.
-    if low_norm.startswith('rematar') and grade in ('exceptional','success'):
+        if grade=='exceptional': variants=[f"Avanzas sin perder tiempo y encuentras una ruta segura hacia {goal}.",f"La maniobra sale perfecta: dejas atrás {threat} y ganas posición."]
+        elif grade=='success': variants=[f"Avanzas hacia {goal} sin perder la pista.",f"Consigues moverte y mantienes la ventaja sobre {threat}."]
+        elif grade=='cost': variants=[f"Avanzas, pero {threat} te sigue de cerca.",f"Llegas más lejos, aunque dejas algo atrás y tendrás que decidir si volver."]
+        else: variants=[f"La ruta se complica y {threat} te corta el paso.",f"No consigues avanzar; quedas obligado a buscar otra salida."]
+    try:
+        c=_db(); rr=c.execute("SELECT COUNT(*) AS n FROM dnd_journal WHERE campaign_id=? AND actor_id=? AND event_type='roll_result'",(int(camp['id']),int(ch.get('user_id') or 0))).fetchone(); c.close(); turn=int((rr or {}).get('n') or 0)
+    except Exception: turn=int(time.time())
+    body=variants[(turn+sum(rolls)+len(raw))%len(variants)]
+    # Rematar exitosamente sí cambia el elenco.
+    if 'rematar' in low and grade in ('exceptional','success'):
         _save_flag(camp,'dead_npc_'+_norm(target_name).replace(' ','_'),{'at':int(time.time()),'by':int(ch.get('user_id') or 0)})
-        body += f"\n\n{target_name} ya no puede continuar el enfrentamiento. La historia registra su muerte y las personas presentes recordarán quién tomó esa decisión."
-        consequence=f"{target_name} queda fuera de la historia activa. Ahora tendrás que afrontar lo que provoque esta muerte y decidir cómo seguir hacia {goal}."
-    text=f"{labels[grade]}\n{body.split('.')[0].strip()}.\n➡️ {consequence.split('.')[0].strip()}."
-    # La nueva consecuencia pasa a ser la escena persistida que /dnd recuperará.
-    now=int(time.time()); c=_db(); c.execute("UPDATE dnd_campaigns SET scene_text=?,updated_at=? WHERE id=?",(text,now,int(camp['id']))); c.commit(); c.close()
+        body=f"{target_name} cae y queda fuera de la historia activa. Su muerte tendrá consecuencias."
+    state={'kind':kind,'grade':grade,'target':target_name,'reason':raw[:120],'chapter':int(camp.get('chapter') or 1),'at':int(time.time())}
+    _save_flag(camp,'dnd2_last_resolution',state)
+    text=f"{labels[grade]}\n{body}"
+    c=_db(); c.execute("UPDATE dnd_campaigns SET scene_text=?,updated_at=? WHERE id=?",(text,int(time.time()),int(camp['id']))); c.commit(); c.close()
     return grade,text
 
 def _request_roll(camp,user,reason,needed=1,difficulty=10,stat=''):

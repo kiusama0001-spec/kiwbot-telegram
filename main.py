@@ -21900,12 +21900,13 @@ _NPC_LIVE_CASES = [
 ]
 
 def _build_npc_hundred(npc_key):
-    out=[]; offset=sum(ord(x) for x in str(npc_key))%len(_NPC_NAMES)
+    names=('Aren','Lio','Cira','Darek','Mina','Ravel','Sena','Toren','Vika','Eron','Nara','Jorek','Talia','Bren','Iria','Karel','Maren','Dain','Yara','Sorel','Neris','Vael','Rina','Olek','Sian')
+    out=[]; offset=sum(ord(x) for x in str(npc_key))%len(names)
     twists=[('', ''),(' — Sin testigos',' No hay un testigo fiable.'),(' — La prueba tardía',' Una prueba apareció después.'),(' — Alguien miente',' Una de las versiones tiene una contradicción.')]
     for i in range(100):
         base=_NPC_LIVE_CASES[(i+offset)%len(_NPC_LIVE_CASES)]; title,role,hook,truth,moral,actions=base
         suffix,extra=twists[(i//len(_NPC_LIVE_CASES))%len(twists)]
-        name=_NPC_NAMES[(offset+i*3)%len(_NPC_NAMES)]
+        name=names[(offset+i*3)%len(names)]
         out.append({'title':title+suffix,'target':f'{name}, {role}','hook':hook.format(n=name)+extra,'truth':truth.format(n=name),
                     'pleas':['—Espera.','—No conoces toda la historia.','—Decide cuando tengas claro qué pasó.'],
                     'kind':'livecase','moral':moral,'actions':actions})
@@ -21924,7 +21925,7 @@ def _npc_job_actions(row):
 def _npc_listen_story(row,p):
     target=str(row['target_name']); truth=str(p.get('truth') or '').strip()
     line=(p.get('pleas') or ['—Espera.'])[min(int(row.get('attacks') or 0),len(p.get('pleas') or ['x'])-1)]
-    return f"{line}\n\n{target} da su versión, pero no tienes forma de saber todavía si está diciendo la verdad.\n\nSi quieres pruebas, investiga. Si decides ahora, tendrás que asumir el riesgo."
+    return f"{line}\n\nEsa es su versión. Puede ser verdad... o no."
 
 # Más misiones públicas sin depender casi siempre de voz/dibujo.
 # Reutilizan mecánicas ligeras que ya existen: puntería, azar, número y carrera.

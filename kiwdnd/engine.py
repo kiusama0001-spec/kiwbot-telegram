@@ -485,6 +485,40 @@ def handle_callback(query):
     if action=='controls': _S(chat_id,thread,"⚙️ CONTROLES\n\n▶️ /dndcomenzar\n🎭 /dndficha\n👥 /dndgrupo\n📖 /dndhistoria\n🪦 /dndcementerio\n🌍 /dndestado\n🎒 /dndinventario\n🗡️ /dndmisiones\n🤝 /dndrelaciones\n🔐 /dndsecretos\n🛏️ /dnddescansar\n📚 /dndmanual\n🗺️ /dndcampana\n⏸️ /dndpausa\n▶️ /dndreanudar\n🧭 /dndsecundarias\n🔄 /dndreiniciar\n\nTodo funciona únicamente en este tema. El reinicio requiere confirmación y solo borra esta campaña D&D.",reply_markup=_menu()); return True
     if action=='rollhint':
         _S(chat_id,thread,"🎲 Lanza el dado de Telegram si tienes una tirada pendiente."); return True
+    # Acciones rápidas del panel D&D. Estas ramas deben resolverse aquí porque
+    # callback_data llega como dnd:fast:* / dnd:fasttarget:*.
+    if action.startswith('fast:'):
+        fast=action.split(':',1)[1]
+        ch=_char(camp['id'],uid)
+        if not ch:
+            _S(chat_id,thread,'🎭 Primero crea tu personaje con /dndunirme.'); return True
+        if fast in ('attack','seduce','talk','help','target'):
+            labels={'attack':'⚔️ ¿A quién atacas?','seduce':'😏 ¿A quién intentas seducir?','talk':'🗣️ ¿Con quién quieres hablar?','help':'🤝 ¿A quién quieres ayudar?','target':'🎯 ¿Sobre quién quieres realizar la acción?'}
+            _S(chat_id,thread,labels.get(fast,'🎯 Elige objetivo:'),reply_markup=_dnd_target_keyboard(camp,fast)); return True
+        result=_dnd_fast_result(camp,ch,user,fast)
+        now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'fast_action',f"{_mention(user)}: {fast}",now)); c.commit(); c.close()
+        _send_with_choices(chat_id,thread,camp,uid,f"🎭 {_mention(user)}\n\n{result}",result); return True
+    if action.startswith('fasttarget:'):
+        parts=action.split(':')
+        fast=parts[1] if len(parts)>1 else 'target'
+        try: target_id=int(parts[2]) if len(parts)>2 else 0
+        except Exception: target_id=0
+        ch=_char(camp['id'],uid)
+        if not ch:
+            _S(chat_id,thread,'🎭 Primero crea tu personaje con /dndunirme.'); return True
+        target_name='NPC de la escena'
+        if target_id:
+            c=_db(); tr=c.execute("SELECT telegram_name,name FROM dnd_characters WHERE campaign_id=? AND user_id=? AND status='active'",(int(camp['id']),target_id)).fetchone(); c.close()
+            if tr: target_name=str(tr.get('telegram_name') or tr.get('name') or target_id)
+        result=_dnd_fast_result(camp,ch,user,fast,target_name)
+        now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'fast_action',f"{_mention(user)}: {fast} -> {target_name}",now)); c.commit(); c.close()
+        if fast=='attack':
+            _S(chat_id,thread,f"⚔️ {_mention(user)} apunta a {target_name}.\n\n{result}")
+            _request_roll(camp,user,f"Atacar a {target_name}",needed=1,difficulty=4,stat='attack'); return True
+        if fast=='seduce':
+            _S(chat_id,thread,f"😏 {_mention(user)} intenta seducir a {target_name}.\n\n{result}")
+            _request_roll(camp,user,f"Seducir a {target_name}",needed=2,difficulty=4,stat='charisma'); return True
+        _send_with_choices(chat_id,thread,camp,uid,f"🎭 {_mention(user)}\n\n{result}",result); return True
     if action.startswith('sceneopt:'):
         try: slot=int(action.split(':',1)[1])
         except Exception: slot=-1

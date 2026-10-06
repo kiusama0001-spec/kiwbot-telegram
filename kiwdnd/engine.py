@@ -485,6 +485,29 @@ def handle_callback(query):
     if action=='controls': _S(chat_id,thread,"⚙️ CONTROLES\n\n▶️ /dndcomenzar\n🎭 /dndficha\n👥 /dndgrupo\n📖 /dndhistoria\n🪦 /dndcementerio\n🌍 /dndestado\n🎒 /dndinventario\n🗡️ /dndmisiones\n🤝 /dndrelaciones\n🔐 /dndsecretos\n🛏️ /dnddescansar\n📚 /dndmanual\n🗺️ /dndcampana\n⏸️ /dndpausa\n▶️ /dndreanudar\n🧭 /dndsecundarias\n🔄 /dndreiniciar\n\nTodo funciona únicamente en este tema. El reinicio requiere confirmación y solo borra esta campaña D&D.",reply_markup=_menu()); return True
     if action=='rollhint':
         _S(chat_id,thread,"🎲 Lanza el dado de Telegram si tienes una tirada pendiente."); return True
+    if action.startswith('dyn:'):
+        try: idx=int(action.split(':',1)[1])
+        except Exception: idx=-1
+        ch=_char(camp['id'],uid)
+        if not ch: _S(chat_id,thread,'🎭 Primero crea tu personaje.'); return True
+        opts=_scene_action_options(camp,str(camp.get('scene_text') or ''),ch)
+        if idx<0 or idx>=len(opts): _S(chat_id,thread,'🎲 Esa decisión ya cambió. Abre /dnd para ver la escena actual.'); return True
+        label,key=opts[idx]; cd,phase,_=_dnd_scene_context(camp); npc=str(cd.get('npc') or 'el objetivo')
+        # Acciones que requieren tirada: más dados, menos novela.
+        if key.startswith('attack|'):
+            _,stat,dice=key.split('|'); mod=_stat_mod(ch,stat); _S(chat_id,thread,f"⚔️ {label} → {npc}\n🎯 Prueba de ataque {stat} ({mod:+d}) · {dice}d6\nTira los dados.")
+            _request_roll(camp,user,f"{label} contra {npc}",needed=int(dice),difficulty=4,stat=stat); return True
+        checks={'investigate':('INT',2),'perception':('SAB',2),'deduce':('INT',3),'persuade':('CAR',2),'deceive':('CAR',3),'intimidate':('CAR',2),'seduce':('CAR',2),'insight':('SAB',2),'stealth':('DES',3),'confront':('FUE',3),'advance':('DES',2)}
+        if key in checks:
+            stat,dice=checks[key]; mod=_stat_mod(ch,stat); _S(chat_id,thread,f"{label}\n🎯 Prueba {stat} ({mod:+d}) · {dice}d6\nTira los dados.")
+            _request_roll(camp,user,f"{label} sobre {npc}",needed=dice,difficulty=4,stat=stat); return True
+        if key=='defend':
+            _S(chat_id,thread,'🛡️ Adoptas una postura defensiva. Tu siguiente riesgo físico tendrá ventaja narrativa.',reply_markup=_suggestion_keyboard(camp,'defensa',uid=uid)); return True
+        if key=='talk':
+            _S(chat_id,thread,f'💬 ¿Qué quieres decirle a {npc}? Usa 🎯 Otra acción para escribirlo.',reply_markup=_suggestion_keyboard(camp,'conversación',uid=uid)); return True
+        if key=='flee':
+            _request_roll(camp,user,'Retirarse del combate',needed=2,difficulty=4,stat='DES'); return True
+        _S(chat_id,thread,'🎯 Escribe exactamente qué intenta hacer tu personaje.'); return True
     # Acciones rápidas del panel D&D. Estas ramas deben resolverse aquí porque
     # callback_data llega como dnd:fast:* / dnd:fasttarget:*.
     if action.startswith('fast:'):
@@ -617,46 +640,68 @@ def _save_flag(camp,key,value=True):
     flags=_flags(camp); flags[key]=value; now=int(time.time())
     c=_db(); c.execute('UPDATE dnd_campaigns SET flags=?,updated_at=? WHERE id=?',(json.dumps(flags,ensure_ascii=False),now,int(camp['id']))); c.commit(); c.close()
 
+
+# D&D 2 — combate y pruebas orientadas a dados. Telegram solo ofrece d6 animado,
+# por eso las pruebas importantes usan pools de 2d6/3d6 y los ataques toman
+# técnicas propias de la clase. La campaña ya contiene 223 capítulos base.
+CLASS_ATTACKS = {
+ "guerrero":[("⚔️ Golpe poderoso","FUE",3),("🛡️ Embestida de escudo","FUE",2),("🗡️ Contraataque","DES",2)],
+ "mago":[("🔥 Proyectil arcano","INT",3),("❄️ Rayo de escarcha","INT",2),("⚡ Descarga rúnica","INT",3)],
+ "picaro":[("🗡️ Ataque furtivo","DES",3),("🎯 Estocada precisa","DES",2),("🌑 Golpe desde sombra","DES",3)],
+ "paladin":[("✨ Castigo sagrado","FUE",3),("🛡️ Golpe del juramento","CAR",2),("☀️ Filo radiante","FUE",3)],
+ "bardo":[("🎵 Nota cortante","CAR",2),("🗡️ Estocada danzante","DES",2),("🔊 Palabra discordante","CAR",3)],
+ "druida":[("🌿 Látigo espinoso","SAB",2),("🐺 Zarpazo salvaje","SAB",3),("🌩️ Llamado de tormenta","SAB",3)],
+ "monje":[("👊 Ráfaga de golpes","DES",3),("🦶 Patada circular","DES",2),("💨 Palma veloz","SAB",2)],
+ "hechicero":[("🔥 Explosión innata","CAR",3),("⚡ Lanza caótica","CAR",3),("🩸 Pulso arcano","CAR",2)],
+ "nigromante":[("💀 Toque sepulcral","INT",2),("🦴 Lanza ósea","INT",3),("👻 Mano espectral","SAB",2)],
+ "cazador_demonios":[("🗡️ Corte de plata","DES",3),("🎯 Disparo de sello","DES",3),("🔥 Marca del Cazador","SAB",2),("⛓️ Cadena infernal","DES",2)],
+ "caballero_sangre":[("🩸 Tajo carmesí","FUE",3),("⚔️ Sangre por acero","CON",3),("🛡️ Golpe escarlata","FUE",2)],
+ "invocador":[("🐉 Ataque del familiar","INT",2),("🔮 Garra invocada","INT",3),("🌀 Ruptura de pacto","CAR",3)],
+ "exorcista":[("📜 Sello de expulsión","SAB",3),("✨ Golpe consagrado","SAB",2),("⛓️ Cadena de sello","INT",2)],
+ "domador_bestias":[("🐺 Ataque coordinado","SAB",3),("🦅 Picado de compañero","DES",2),("🦁 Carga bestial","SAB",3)],
+ "espadachin_arcano":[("⚔️ Filo arcano","DES",3),("✨ Estocada rúnica","INT",2),("🌙 Corte de mana","DES",3)],
+ "artificiero":[("💣 Carga alquímica","INT",3),("🔫 Disparo mecánico","DES",2),("⚙️ Trampa instantánea","INT",2)],
+ "bruja":[("🕯️ Maldición punzante","CAR",2),("🌑 Aguja de sombra","INT",3),("🔮 Hex de dolor","CAR",3)],
+ "explorador":[("🏹 Disparo preciso","DES",3),("🪤 Golpe de cazador","SAB",2),("🎯 Flecha marcada","DES",3)],
+ "custom":[("⚔️ Ataque característico","DES",3),("✨ Técnica especial","CAR",2)]
+}
+
+def _attack_set(ch):
+    return CLASS_ATTACKS.get(str((ch or {}).get('class_key') or '').lower(), CLASS_ATTACKS['custom'])
+
+def _stat_mod(ch, stat):
+    col={'FUE':'str','DES':'dex','CON':'con','INT':'intel','SAB':'wis','CAR':'cha'}.get(stat,'dex')
+    return (int((ch or {}).get(col) or 10)-10)//2
+
+def _short_scene(camp):
+    cd,phase,_=_dnd_scene_context(camp)
+    return f"📍 {cd.get('place','Aeternus')} · {phase.get('title','Escena')}\n🎯 {cd.get('goal','Seguir adelante')}"
+
 DND_FAST_ACTIONS=[
  ('⚔️ Atacar','attack'),('🔎 Investigar','investigate'),('🗣️ Hablar','talk'),
  ('😏 Seducir','seduce'),('🤝 Ayudar','help'),('🏃 Huir','flee'),('🎯 Otra acción','target')
 ]
 
-def _scene_action_options(camp,context=''):
-    """Botones contextuales: cambian según lo que acaba de ocurrir, sin depender de IA."""
-    cd,phase,_=_dnd_scene_context(camp)
-    npc=str(cd.get('npc') or 'alguien'); obj=str(cd.get('object') or 'la pista')
-    goal=str(cd.get('goal') or 'seguir adelante'); threat=str(cd.get('threat') or 'el peligro')
-    ctx=_norm(context or camp.get('scene_text') or '')
+def _scene_action_options(camp,context='',ch=None):
+    """Acciones cortas y cambiantes. En combate muestra técnicas reales de la clase."""
+    cd,phase,_=_dnd_scene_context(camp); npc=str(cd.get('npc') or 'alguien'); obj=str(cd.get('object') or 'la pista')
+    threat=str(cd.get('threat') or 'el peligro'); goal=str(cd.get('goal') or 'seguir adelante'); ctx=_norm(context or camp.get('scene_text') or '')
     flags=_flags(camp); dead=bool(flags.get('dead_npc_'+_norm(npc).replace(' ','_')))
-    # El orden también cambia para que la interfaz refleje el momento actual.
+    combat=any(w in ctx for w in ('ataque','golpe','retrocede','desventaja','pelea','violencia','hostil','combate','iniciativa'))
+    if combat and not dead:
+        attacks=_attack_set(ch)[:4] if ch else [("⚔️ Atacar",'DES',3)]
+        out=[(label,f'attack|{stat}|{dice}') for label,stat,dice in attacks]
+        out += [(f'🛡️ Defender','defend'),(f'🏃 Retirarse','flee'),(f'🗣️ Negociar con {npc}'[:48],'talk'),('🎯 Otra acción','target')]
+        return out[:8]
     if dead:
-        return [(f'🔎 Revisar a {npc}'[:48],'investigate'),(f'🧭 Seguir hacia {goal}'[:48],'flee'),
-                (f'👁️ Examinar {obj}'[:48],'investigate'),('🗣️ Hablar con el grupo','talk'),
-                (f'⚠️ Vigilar {threat}'[:48],'help'),('🎯 Otra acción','target')]
-    combat=any(w in ctx for w in ('ataque','golpe','retrocede','desventaja','pelea','violencia','iniciativa','defensa'))
-    clue=any(w in ctx for w in ('pista','descub','revela','objeto','runa','huella','señal','llave','misterio'))
-    social=any(w in ctx for w in ('confianza','hablar','convers','verdad','sospecha','relación','reaccion'))
-    danger=any(w in ctx for w in ('peligro','amenaza','caos','cierra el paso','urgente'))
-    if combat:
-        return [(f'☠️ Rematar a {npc}'[:48],'attack'),(f'⛓️ Inmovilizar a {npc}'[:48],'help'),
-                (f'🗣️ Interrogar a {npc}'[:48],'talk'),('🛑 Perdonarle la vida','help'),
-                (f'🔎 Aprovechar y revisar {obj}'[:48],'investigate'),('🏃 Romper el combate','flee'),('🎯 Otra acción','target')]
+        return [(f'🔎 Registrar a {npc}'[:48],'investigate'),(f'👣 Seguir hacia {goal}'[:48],'advance'),(f'👁️ Examinar {obj}'[:48],'investigate'),('💬 Hablar con el grupo','talk'),('🎯 Otra acción','target')]
+    clue=any(w in ctx for w in ('pista','descub','revela','runa','huella','señal','llave','misterio'))
+    social=any(w in ctx for w in ('confianza','hablar','convers','verdad','sospecha','relacion','reaccion'))
     if clue:
-        return [(f'👁️ Examinar {obj}'[:48],'investigate'),(f'🗣️ Preguntar a {npc}'[:48],'talk'),
-                (f'👣 Seguir la pista'[:48],'flee'),(f'⚠️ Prepararse contra {threat}'[:48],'help'),
-                (f'⚔️ Confrontar a {npc}'[:48],'attack'),('🧠 Probar otra teoría','investigate'),('🎯 Otra acción','target')]
+        return [(f'🔎 Examinar {obj}'[:48],'investigate'),(f'👁️ Percepción','perception'),(f'🗣️ Preguntar a {npc}'[:48],'talk'),('🧠 Deducir','deduce'),(f'👣 Seguir pista','advance'),(f'⚔️ Confrontar a {npc}'[:48],'confront'),('🎯 Otra acción','target')]
     if social:
-        return [(f'🗣️ Presionar a {npc}'[:48],'talk'),(f'😏 Acercarte a {npc}'[:48],'seduce'),
-                ('🤝 Ganarte su confianza','help'),('🧠 Intentar engañarlo','talk'),
-                (f'⚠️ Amenazar a {npc}'[:48],'attack'),('🔎 Leer sus reacciones','investigate'),('🎯 Otra acción','target')]
-    if danger:
-        return [(f'⚔️ Enfrentar {threat}'[:48],'attack'),('🛡️ Proteger al grupo','help'),
-                (f'🔎 Buscar una debilidad'[:48],'investigate'),(f'🗣️ Avisar a {npc}'[:48],'talk'),
-                ('🏃 Buscar una salida','flee'),('🎯 Otra acción','target')]
-    return [(f'🔎 Examinar {obj}'[:48],'investigate'),(f'🗣️ Hablar con {npc}'[:48],'talk'),
-            (f'⚔️ Enfrentar a {npc}'[:48],'attack'),(f'🤝 Ayudar a {npc}'[:48],'help'),
-            (f'🧭 Avanzar hacia {goal}'[:48],'flee'),(f'😏 Acercarte a {npc}'[:48],'seduce'),('🎯 Otra acción','target')]
+        return [(f'🗣️ Persuadir a {npc}'[:48],'persuade'),('🎭 Engañar','deceive'),('⚠️ Intimidar','intimidate'),(f'😏 Seducir a {npc}'[:48],'seduce'),('👁️ Leer reacción','insight'),(f'⚔️ Atacar a {npc}'[:48],'confront'),('🎯 Otra acción','target')]
+    return [(f'🔎 Investigar {obj}'[:48],'investigate'),('👁️ Percepción','perception'),(f'🗣️ Hablar con {npc}'[:48],'talk'),(f'👣 Avanzar','advance'),(f'⚔️ Enfrentar {threat}'[:48],'confront'),('🕵️ Sigilo','stealth'),('🎯 Otra acción','target')]
 
 def _suggestion_options(camp,context='',mode='scene'):
     if mode=='roll': return [('🎲 Lanzar dado','__roll__')]
@@ -665,13 +710,15 @@ def _suggestion_options(camp,context='',mode='scene'):
 def _suggestions(camp,context='',mode='scene'):
     return ''
 
-def _suggestion_keyboard(camp,context='',mode='scene'):
-    if mode=='roll': return {'inline_keyboard':[[{'text':'🎲 Lanzar dado','callback_data':'dnd:rollhint'}]]}
-    opts=_scene_action_options(camp,context)
+def _suggestion_keyboard(camp,context='',mode='scene',uid=0):
+    if mode=='roll': return {'inline_keyboard':[[{'text':'🎲 Tirada pendiente','callback_data':'dnd:rollhint'}]]}
+    ch=_char(camp['id'],uid) if uid else None
+    opts=_scene_action_options(camp,context,ch)
     rows=[]
     for i in range(0,len(opts),2):
-        rows.append([{'text':label,'callback_data':f'dnd:fast:{key}'} for label,key in opts[i:i+2]])
+        rows.append([{'text':label,'callback_data':f'dnd:dyn:{i+j}'} for j,(label,key) in enumerate(opts[i:i+2])])
     return {'inline_keyboard':rows}
+
 
 def _dnd_scene_context(camp):
     """Contexto estructurado del capítulo actual para que TODAS las acciones rápidas narren la escena real."""
@@ -741,7 +788,7 @@ def _send_with_choices(chat_id,thread,camp,uid,text,context='',mode='scene'):
     if fresh: camp=fresh
     ctx=context or text
     _store_scene_options(camp,uid,ctx,mode)
-    return _S(chat_id,thread,_with_suggestions(camp,text,ctx,mode),reply_markup=_suggestion_keyboard(camp,ctx,mode))
+    return _S(chat_id,thread,_with_suggestions(camp,text,ctx,mode),reply_markup=_suggestion_keyboard(camp,ctx,mode,uid))
 
 def _local_narration(camp,ch,text):
     """Director local: interpreta acciones frecuentes sin IA y conserva pistas básicas."""
@@ -877,7 +924,7 @@ def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
         _save_flag(camp,'dead_npc_'+_norm(target_name).replace(' ','_'),{'at':int(time.time()),'by':int(ch.get('user_id') or 0)})
         body += f"\n\n{target_name} ya no puede continuar el enfrentamiento. La historia registra su muerte y las personas presentes recordarán quién tomó esa decisión."
         consequence=f"{target_name} queda fuera de la historia activa. Ahora tendrás que afrontar lo que provoque esta muerte y decidir cómo seguir hacia {goal}."
-    text=f"{labels[grade]}\n\n{body}\n\n{consequence}"
+    text=f"{labels[grade]}\n{body.split('.')[0].strip()}.\n➡️ {consequence.split('.')[0].strip()}."
     # La nueva consecuencia pasa a ser la escena persistida que /dnd recuperará.
     now=int(time.time()); c=_db(); c.execute("UPDATE dnd_campaigns SET scene_text=?,updated_at=? WHERE id=?",(text,now,int(camp['id']))); c.commit(); c.close()
     return grade,text
@@ -901,7 +948,7 @@ def handle_message(message,text):
         rolls=json.loads(p.get('rolls') or '[]'); rolls.append(val); cur=len(rolls); needed=int(p['needed'])
         if cur<needed:
             c.execute("UPDATE dnd_pending_rolls SET current=?,rolls=? WHERE campaign_id=?",(cur,json.dumps(rolls),int(camp['id']))); c.commit(); c.close(); _S(chat_id,thread,f"🎲 DADO {cur}/{needed}: {val}\n\n🎲 DADO {cur+1}/{needed} — {_mention(user)}, lánzalo."); return True
-        c.execute("DELETE FROM dnd_pending_rolls WHERE campaign_id=?",(int(camp['id']),)); c.commit(); c.close(); total=sum(rolls); target=int(p['difficulty'])*needed; success=total>=target
+        c.execute("DELETE FROM dnd_pending_rolls WHERE campaign_id=?",(int(camp['id']),)); c.commit(); c.close(); ch_roll=_char(camp['id'],uid); smod=_stat_mod(ch_roll,str(p.get('stat') or '').upper()); total=sum(rolls)+smod; target=int(p['difficulty'])*needed; success=total>=target
         now=int(time.time()); cj=_db(); cj.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'roll_result',f"{_mention(user)} intentó {str(p.get('reason') or '')[:350]} — {'éxito' if success else 'consecuencia'} ({total}/{target}).",now)); cj.commit(); cj.close()
         reason_low=str(p.get('reason') or '').lower(); lethal=any(w in reason_low for w in ('salto al vac','me sacrific','recibo el golpe','boss','lava','abismo','explos','caigo','caída','veneno mortal'))
         if (not success) and lethal and (all(v<=2 for v in rolls) or total<=needed*2):
@@ -910,7 +957,7 @@ def handle_message(message,text):
         ch_now=_char(camp['id'],uid)
         grade,resolution=_dnd_roll_resolution(camp,ch_now,user,str(p.get('reason') or ''),rolls,target)
         fresh=_campaign(chat_id,thread) or camp
-        header=f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n🎯 Umbral narrativo: {target}"
+        header=f"🎲 {' + '.join(map(str,rolls))} {smod:+d} = {total}\n🎯 CD: {target}"
         _send_with_choices(chat_id,thread,fresh,uid,f"{header}\n\n{resolution}",resolution); return True
     t=(text or '').strip()
     if not t or t.startswith('/'): return False
@@ -924,11 +971,11 @@ def handle_message(message,text):
         _S(chat_id,thread,f"✨ Clase personalizada creada: {concept.title()}\n\nLa idea se conserva como identidad narrativa y usa una base equilibrada de atributos.\n\n{_sheet(ch)}\n\nAhora puedes escribir: Apariencia: <cómo quieres verte>",reply_markup=_menu()); return True
     if not ch: return False
     if low.startswith('apariencia:'):
-        appearance=t.split(':',1)[1].strip()[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close(); _S(chat_id,thread,"🎨 Apariencia guardada. Será la referencia canónica para el retrato de tu personaje.",reply_markup=_suggestion_keyboard(camp,'')); return True
+        appearance=t.split(':',1)[1].strip()[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close(); _S(chat_id,thread,"🎨 Apariencia guardada. Será la referencia canónica para el retrato de tu personaje.",reply_markup=_suggestion_keyboard(camp,'',uid=uid)); return True
     if not str(ch.get('appearance') or '').strip() and len(t)>=20:
         appearance=t[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close()
-        _S(chat_id,thread,"🎨 Apariencia guardada. Ya no la trataré como una escena. Usa /dnd para volver a la historia.",reply_markup=_suggestion_keyboard(camp,'')); return True
+        _S(chat_id,thread,"🎨 Apariencia guardada. Ya no la trataré como una escena. Usa /dnd para volver a la historia.",reply_markup=_suggestion_keyboard(camp,'',uid=uid)); return True
     # Juego rápido: el texto libre ya no intenta adivinar acciones.
     # Se conserva para charla/rol; las acciones mecánicas salen de los 7 botones.
-    _S(chat_id,thread,f"💬 {_mention(user)}: {t[:700]}",reply_markup=_suggestion_keyboard(camp,t)); return True
+    _S(chat_id,thread,f"💬 {_mention(user)}: {t[:700]}",reply_markup=_suggestion_keyboard(camp,t,uid=uid)); return True
 

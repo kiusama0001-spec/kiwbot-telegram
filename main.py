@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 
 import requests
+from requests.adapters import HTTPAdapter
 from flask import Flask, jsonify, request, send_from_directory, Response
 from openai import OpenAI
 
@@ -268,6 +269,10 @@ _runtime_cache = {
 _cache_lock = RLock()
 
 TELEGRAM_SESSION = requests.Session()
+# Reutiliza conexiones HTTPS a Telegram entre los workers. Sin esto, cuando hay
+# varios botones/dados a la vez los workers pueden esperar por conexiones del pool.
+_TELEGRAM_HTTP_POOL = max(24, int(os.getenv("KIWBOT_WORKERS", "24")) + 8)
+TELEGRAM_SESSION.mount("https://", HTTPAdapter(pool_connections=_TELEGRAM_HTTP_POOL, pool_maxsize=_TELEGRAM_HTTP_POOL, max_retries=0, pool_block=False))
 _bot_identity = {"loaded": False, "id": None, "username": ""}
 _bot_identity_lock = RLock()
 _processed_cleanup_at = 0
@@ -12557,7 +12562,7 @@ def _tower_buff(uid):
 def _tower_spawn(c,uid,floor,encounter_no,player_hp,player_max_hp,boss=False):
     total=_tower_encounters_for_floor(floor); e=_tower_enemy(floor,encounter_no,boss)
     c.execute("""INSERT INTO rpg_tower_fights(user_id,floor,enemy_key,enemy_name,enemy_hp,enemy_max_hp,enemy_atk,enemy_def,player_hp,player_max_hp,status,updated_at,encounter_no,encounter_total,is_boss)
-      VALUES(?,?,?,?,?,?,?,?,?,?, 'active',?,?,?,?,?)
+      VALUES(?,?,?,?,?,?,?,?,?,?, 'active',?,?,?,?)
       ON CONFLICT(user_id) DO UPDATE SET floor=EXCLUDED.floor,enemy_key=EXCLUDED.enemy_key,enemy_name=EXCLUDED.enemy_name,
       enemy_hp=EXCLUDED.enemy_hp,enemy_max_hp=EXCLUDED.enemy_max_hp,enemy_atk=EXCLUDED.enemy_atk,enemy_def=EXCLUDED.enemy_def,
       player_hp=EXCLUDED.player_hp,player_max_hp=EXCLUDED.player_max_hp,status='active',updated_at=EXCLUDED.updated_at,
@@ -14898,13 +14903,23 @@ def handle_rpg_callback(query):
             ok,txt=_tower_use_potion(uid,iid); card,kb,key=_tower_card(uid); send_message(chat_id,txt+"\n\n"+card,reply_markup=kb); return True
         if action.startswith('skill:'):
             ability_key=action.split(':',1)[1]
-            result=_tower_action(chat_id,thread_id,uid,ability_key=ability_key)
-            card,kb,key=_tower_card(uid)
-            send_message(chat_id,result+"\n\n"+card,reply_markup=kb); return True
+            try:
+                result=_tower_action(chat_id,thread_id,uid,ability_key=ability_key)
+                card,kb,key=_tower_card(uid)
+                send_message(chat_id,result+"\n\n"+card,reply_markup=kb)
+            except Exception as exc:
+                logger.exception("Error resolviendo habilidad de Torre uid=%s action=%s",uid,ability_key)
+                send_message(chat_id,"🏰 La tirada salió, pero hubo un error al resolver el turno. Tu progreso no se reinició; pulsa 🔄 Actualizar e inténtalo otra vez.")
+            return True
         if action in ('attack','defend'):
-            result=_tower_action(chat_id,thread_id,uid,defend=(action=='defend'))
-            card,kb,key=_tower_card(uid)
-            send_message(chat_id,result+"\n\n"+card,reply_markup=kb); return True
+            try:
+                result=_tower_action(chat_id,thread_id,uid,defend=(action=='defend'))
+                card,kb,key=_tower_card(uid)
+                send_message(chat_id,result+"\n\n"+card,reply_markup=kb)
+            except Exception as exc:
+                logger.exception("Error resolviendo turno de Torre uid=%s action=%s",uid,action)
+                send_message(chat_id,"🏰 La tirada salió, pero hubo un error al resolver el turno. Tu progreso no se reinició; pulsa 🔄 Actualizar e inténtalo otra vez.")
+            return True
         if action=='refresh':
             card,kb,key=_tower_card(uid); send_message(chat_id,card,reply_markup=kb); return True
         return True
@@ -17314,11 +17329,12 @@ def _rpg_ai_asset_info(asset_key):
         camera,lighting,scene=_rpg_art_variant("enemy_"+key)
         return {"canonical":f"enemy:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":scene,"camera":camera,"lighting":lighting}
     if kind=="tower":
-        cfg=_rpg_enemy_info(key)
-        if not cfg: return None
+        # La Torre tiene catálogo propio: no depende del catálogo PvE normal.
+        tname=(globals().get('_TOWER_ENEMY_MAP',{}).get(key) or globals().get('_TOWER_BOSS_MAP',{}).get(key))
+        if not tname: return None
         camera,lighting,scene=_rpg_art_variant("tower_"+key)
-        visual=f"unique dark fantasy tower creature named {cfg.get('name',key)}, original monster design, clearly distinct silhouette, floor-themed armor and anatomy"
-        return {"canonical":f"tower:{key}","kind":kind,"key":key,"name":str(cfg.get('name') or key),"visual":visual,"scene":"inside the legendary one hundred floor tower, monumental dungeon architecture","camera":camera,"lighting":lighting}
+        visual=f"unique dark fantasy tower creature named {tname}, original monster design, clearly distinct silhouette, floor-themed armor and anatomy"
+        return {"canonical":f"tower:{key}","kind":kind,"key":key,"name":str(tname),"visual":visual,"scene":"inside the legendary one hundred floor tower, monumental dungeon architecture","camera":camera,"lighting":lighting}
     if kind=="class":
         aliases={"picaro":"picaro","pícaro":"picaro","paladin":"paladin","paladín":"paladin","the cleaner":"the_cleaner","the_cleaner":"the_cleaner"}
         key=aliases.get(key,key)
@@ -17806,10 +17822,10 @@ def process_command(
     if command in ("/regenerarimagen", "/regenerararte"):
         if not is_owner(user_id):
             send_message(chat_id,"Solo Kiu puede reemplazar arte oficial generado por IA."); return True
-        key=(parts[1].strip().lower() if len(parts)>1 else "")
+        key=(parts[1].split("#",1)[0].strip().lower() if len(parts)>1 else "")
         info=_rpg_ai_asset_info(key)
         if not info:
-            send_message(chat_id,"❌ Clave desconocida. Tipos: enemy:, class:, boss:, pet:, npc:, event:, eventboss:\nEjemplo: /regenerarimagen boss:fenrir"); return True
+            send_message(chat_id,"❌ Clave desconocida. Tipos: enemy:, class:, boss:, pet:, npc:, event:, eventboss:, tower:\nEjemplo: /regenerarimagen tower:tower_enemy_01"); return True
         canonical=info['canonical']
         send_message(chat_id,f"🎨 Regenerando {info['name']}. Si sale bien reemplazaré el arte anterior…")
         try:
@@ -17822,9 +17838,9 @@ def process_command(
     if command in ("/generarimagen", "/generarimagenrpg", "/generararte"):
         if not is_owner(user_id):
             send_message(chat_id,"Solo Kiu puede generar arte oficial del RPG."); return True
-        key=(parts[1].strip().lower() if len(parts)>1 else "")
+        key=(parts[1].split("#",1)[0].strip().lower() if len(parts)>1 else "")
         if not key:
-            send_message(chat_id,"Usa /generarimagen TIPO:CLAVE\n\nTipos: enemy, class, boss, pet, npc, event, eventboss\nEjemplo: /generarimagen boss:fenrir")
+            send_message(chat_id,"Usa /generarimagen TIPO:CLAVE\n\nTipos: enemy, class, boss, pet, npc, event, eventboss, tower\nEjemplo: /generarimagen tower:tower_enemy_01")
             return True
         info=_rpg_ai_asset_info(key)
         if not info:

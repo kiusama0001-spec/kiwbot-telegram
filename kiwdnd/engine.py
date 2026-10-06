@@ -769,6 +769,59 @@ def _local_narration(camp,ch,text):
 def _with_suggestions(camp,text,context='',mode='scene'):
     return str(text).rstrip()+_suggestions(camp, context or text, mode)
 
+def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
+    """Resuelve una tirada como continuación real de la escena, no como texto genérico."""
+    total=sum(int(x) for x in rolls); needed=max(1,len(rolls)); margin=total-int(target)
+    low=str(reason or '').strip(); low_norm=_norm(low)
+    cd,phase,_=_dnd_scene_context(camp)
+    place=str(cd.get('place') or 'el lugar'); npc=str(cd.get('npc') or 'alguien')
+    obj=str(cd.get('object') or 'la pista'); goal=str(cd.get('goal') or 'seguir avanzando')
+    threat=str(cd.get('threat') or 'el peligro cercano'); reveal=str(cd.get('reveal') or 'algo oculto')
+    target_name=npc
+    m=re.search(r'(?i)^(?:atacar|seducir)\s+a\s+(.+)$', low)
+    if m: target_name=m.group(1).strip()
+    if margin >= max(2,needed*2): grade='exceptional'
+    elif margin >= 0: grade='success'
+    elif margin >= -max(1,needed): grade='cost'
+    else: grade='failure'
+    labels={'exceptional':'🌟 ÉXITO EXCEPCIONAL','success':'✨ ÉXITO','cost':'⚠️ ÉXITO CON CONSECUENCIA','failure':'💥 FALLO'}
+    seed=int(camp.get('arc') or 1)*101+int(camp.get('chapter') or 1)*37+int(camp.get('scene') or 1)*13+int(ch.get('user_id') or 0)+total
+    if low_norm.startswith('atacar'):
+        if grade=='exceptional':
+            body=f"Tu ataque entra limpio antes de que {target_name} pueda recomponerse. Lo obligas a retroceder y tomas el control inmediato de la escena. En {place}, el ruido también revela un detalle alrededor de {obj}: {reveal}."
+            consequence=f"{target_name} queda en clara desventaja. Ahora puedes presionarlo, detener la pelea o aprovechar la apertura para {goal}."
+        elif grade=='success':
+            body=f"Alcanzas a {target_name} y rompes su posición. No es un golpe sin consecuencias: el choque altera {place} y hace que {threat} deje de ser un problema lejano."
+            consequence=f"Ganaste terreno, pero {target_name} sigue en condiciones de responder. La escena recuerda que tú iniciaste la violencia."
+        elif grade=='cost':
+            body=f"Consigues golpear a {target_name}, pero te expones al hacerlo. El impacto funciona; la respuesta también. Algo cerca de {obj} se desplaza y {threat} encuentra una oportunidad para acercarse."
+            consequence="Lograste lo que intentabas, aunque ahora tendrás que resolver la consecuencia que abriste."
+        else:
+            body=f"{target_name} lee tu movimiento y evita el golpe. Tu impulso te deja mal colocado y el equilibrio de {place} cambia en tu contra."
+            consequence=f"No es el final de la partida: {target_name} tiene ahora la iniciativa y {threat} se vuelve más urgente."
+    elif low_norm.startswith('seducir'):
+        if grade=='exceptional':
+            body=f"La resistencia de {target_name} se rompe justo donde querías. La cercanía deja de ser un juego unilateral y, al hablar de {obj}, obtienes una reacción demasiado sincera para fingirla: {reveal}."
+            consequence=f"Has creado confianza y una apertura real. Puedes usarla para acercarte a {goal}, pero lo que hagas con esa confianza también tendrá memoria."
+        elif grade=='success':
+            body=f"{target_name} responde a tu acercamiento. No consigues control absoluto, pero sí suficiente confianza para que baje la guardia y deje escapar algo relacionado con {obj}."
+            consequence=f"La relación cambia a tu favor y aparece una vía nueva hacia {goal}."
+        elif grade=='cost':
+            body=f"{target_name} acepta parte del juego, aunque nota que buscas algo. Consigues cercanía, pero también despiertas sospecha cuando aparece el tema de {obj}."
+            consequence="Obtienes una oportunidad, a cambio de que tus intenciones ya no sean invisibles."
+        else:
+            body=f"{target_name} detecta la intención antes de que puedas conducir la situación. La tensión cambia de tono y tu intento queda demasiado claro."
+            consequence=f"No bloquea la historia, pero tendrás que reconstruir confianza o buscar otra ruta hacia {goal}."
+    else:
+        if grade=='exceptional': body=f"La acción sale mejor de lo previsto. En {place}, además de conseguir lo que buscabas, descubres una conexión con {obj}: {reveal}."; consequence=f"Obtienes una ventaja clara para {goal}."
+        elif grade=='success': body=f"La acción funciona. El entorno responde y consigues avanzar sin perder de vista {threat}."; consequence=f"Se abre una ruta concreta hacia {goal}."
+        elif grade=='cost': body=f"Lo consigues, pero no gratis. Mientras avanzas, {threat} obliga a aceptar una complicación nueva."; consequence="La historia continúa con una ventaja y un problema al mismo tiempo."
+        else: body=f"El intento falla y {place} responde de la peor manera útil: no te detiene la partida, pero {threat} gana terreno."; consequence=f"Necesitas cambiar de enfoque para acercarte a {goal}."
+    text=f"{labels[grade]}\n\n{body}\n\n{consequence}"
+    # La nueva consecuencia pasa a ser la escena persistida que /dnd recuperará.
+    now=int(time.time()); c=_db(); c.execute("UPDATE dnd_campaigns SET scene_text=?,updated_at=? WHERE id=?",(text,now,int(camp['id']))); c.commit(); c.close()
+    return grade,text
+
 def _request_roll(camp,user,reason,needed=1,difficulty=10,stat=''):
     c=_db(); c.execute("""INSERT INTO dnd_pending_rolls(campaign_id,user_id,reason,stat,needed,current,rolls,difficulty,created_at) VALUES(?,?,?,?,?,0,'[]',?,?) ON CONFLICT(campaign_id) DO UPDATE SET user_id=EXCLUDED.user_id,reason=EXCLUDED.reason,stat=EXCLUDED.stat,needed=EXCLUDED.needed,current=0,rolls='[]',difficulty=EXCLUDED.difficulty,created_at=EXCLUDED.created_at""",(int(camp['id']),int(user['id']),reason,stat,int(needed),int(difficulty),int(time.time()))); c.commit(); c.close()
     _S(int(camp['chat_id']),int(camp.get('thread_id') or 0),_with_suggestions(camp,f"🎲 {_mention(user)} — {reason}\nNecesito {needed} dado{'s' if needed!=1 else ''}.\n\n🎲 DADO 1/{needed} — lánzalo en Telegram.",reason,'roll'))
@@ -789,13 +842,16 @@ def handle_message(message,text):
         if cur<needed:
             c.execute("UPDATE dnd_pending_rolls SET current=?,rolls=? WHERE campaign_id=?",(cur,json.dumps(rolls),int(camp['id']))); c.commit(); c.close(); _S(chat_id,thread,f"🎲 DADO {cur}/{needed}: {val}\n\n🎲 DADO {cur+1}/{needed} — {_mention(user)}, lánzalo."); return True
         c.execute("DELETE FROM dnd_pending_rolls WHERE campaign_id=?",(int(camp['id']),)); c.commit(); c.close(); total=sum(rolls); target=int(p['difficulty'])*needed; success=total>=target
-        outcome=("La situación se inclina a tu favor, pero el mundo registra cómo lo lograste." if success else "No sale como esperabas. No es un GAME OVER: la historia toma una ruta más peligrosa.")
         now=int(time.time()); cj=_db(); cj.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'roll_result',f"{_mention(user)} intentó {str(p.get('reason') or '')[:350]} — {'éxito' if success else 'consecuencia'} ({total}/{target}).",now)); cj.commit(); cj.close()
         reason_low=str(p.get('reason') or '').lower(); lethal=any(w in reason_low for w in ('salto al vac','me sacrific','recibo el golpe','boss','lava','abismo','explos','caigo','caída','veneno mortal'))
         if (not success) and lethal and (all(v<=2 for v in rolls) or total<=needed*2):
             ch_now=_char(camp['id'],uid); _enter_agony(camp,ch_now,str(p.get('reason') or 'tirada letal'))
             _S(chat_id,thread,f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n\n💀 EL FALLO ES LETAL. {_mention(user)} cae a 0 HP y entra en AGONÍA.\n\n🎲 En tu siguiente dado harás una SALVACIÓN CONTRA LA MUERTE. Tres éxitos estabilizan; tres fallos significan muerte. El grupo puede intentar salvarte antes.",reply_markup=_menu()); return True
-        _S(chat_id,thread,_with_suggestions(camp,f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n🎯 Umbral narrativo: {target}\n\n{'✨ ÉXITO' if success else '⚠️ CONSECUENCIA'}\n\n{outcome}",str(p.get('reason') or ''))); return True
+        ch_now=_char(camp['id'],uid)
+        grade,resolution=_dnd_roll_resolution(camp,ch_now,user,str(p.get('reason') or ''),rolls,target)
+        fresh=_campaign(chat_id,thread) or camp
+        header=f"🎲 TIRADA COMPLETA — {' + '.join(map(str,rolls))} = {total}\n🎯 Umbral narrativo: {target}"
+        _send_with_choices(chat_id,thread,fresh,uid,f"{header}\n\n{resolution}",resolution); return True
     t=(text or '').strip()
     if not t or t.startswith('/'): return False
     ch=_char(camp['id'],uid)

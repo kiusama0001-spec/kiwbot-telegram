@@ -785,14 +785,23 @@ def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
     elif margin >= -max(1,needed): grade='cost'
     else: grade='failure'
     labels={'exceptional':'🌟 ÉXITO EXCEPCIONAL','success':'✨ ÉXITO','cost':'⚠️ ÉXITO CON CONSECUENCIA','failure':'💥 FALLO'}
-    seed=int(camp.get('arc') or 1)*101+int(camp.get('chapter') or 1)*37+int(camp.get('scene') or 1)*13+int(ch.get('user_id') or 0)+total
+    # Incluye historial + entropía local: el mismo número nunca obliga a repetir la misma escena.
+    try:
+        qc=_db(); qr=qc.execute("SELECT COUNT(*) AS n FROM dnd_journal WHERE campaign_id=? AND actor_id=? AND event_type='roll_result'",(int(camp['id']),int(ch.get('user_id') or 0))).fetchone(); qc.close(); turn_no=int((qr or {}).get('n') or 0)
+    except Exception: turn_no=int(time.time()*1000)%997
+    seed=(int(camp.get('arc') or 1)*101+int(camp.get('chapter') or 1)*37+int(camp.get('scene') or 1)*13+int(ch.get('user_id') or 0)+total+turn_no*53+random.SystemRandom().randint(0,1000003))
     if low_norm.startswith('atacar'):
         if grade=='exceptional':
             body=f"Tu ataque entra limpio antes de que {target_name} pueda recomponerse. Lo obligas a retroceder y tomas el control inmediato de la escena. En {place}, el ruido también revela un detalle alrededor de {obj}: {reveal}."
             consequence=f"{target_name} queda en clara desventaja. Ahora puedes presionarlo, detener la pelea o aprovechar la apertura para {goal}."
         elif grade=='success':
-            body=f"Alcanzas a {target_name} y rompes su posición. No es un golpe sin consecuencias: el choque altera {place} y hace que {threat} deje de ser un problema lejano."
-            consequence=f"Ganaste terreno, pero {target_name} sigue en condiciones de responder. La escena recuerda que tú iniciaste la violencia."
+            attack_success=[
+                (f"Tu golpe obliga a {target_name} a ceder terreno. El ruido rebota por {place} y, durante un instante, deja al descubierto algo relacionado con {obj}.", f"{target_name} aún puede responder, pero perdió la posición y tú decides si presionas o cambias de objetivo."),
+                (f"Engañas la guardia de {target_name} y conectas antes de que pueda cerrarla. El movimiento agita {place}; {threat} reacciona al conflicto y deja de permanecer al margen.", f"Tienes la iniciativa, aunque continuar la pelea puede atraer una consecuencia mayor."),
+                (f"El ataque encuentra un hueco y {target_name} retrocede para recuperar el equilibrio. Cerca de {obj} ocurre algo que antes había pasado inadvertido: {reveal}.", f"La ventaja es tuya por ahora. Puedes aprovecharla para {goal} o mantener la presión sobre {target_name}."),
+                (f"Cruzas la defensa de {target_name} con un impacto preciso. No lo sacas de la escena, pero cambias por completo el ritmo del enfrentamiento en {place}.", f"{target_name} queda obligado a reaccionar a ti, mientras {threat} se vuelve más difícil de ignorar.")
+            ]
+            body,consequence=attack_success[seed%len(attack_success)]
         elif grade=='cost':
             body=f"Consigues golpear a {target_name}, pero te expones al hacerlo. El impacto funciona; la respuesta también. Algo cerca de {obj} se desplaza y {threat} encuentra una oportunidad para acercarse."
             consequence="Lograste lo que intentabas, aunque ahora tendrás que resolver la consecuencia que abriste."
@@ -814,7 +823,12 @@ def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
             consequence=f"No bloquea la historia, pero tendrás que reconstruir confianza o buscar otra ruta hacia {goal}."
     else:
         if grade=='exceptional': body=f"La acción sale mejor de lo previsto. En {place}, además de conseguir lo que buscabas, descubres una conexión con {obj}: {reveal}."; consequence=f"Obtienes una ventaja clara para {goal}."
-        elif grade=='success': body=f"La acción funciona. El entorno responde y consigues avanzar sin perder de vista {threat}."; consequence=f"Se abre una ruta concreta hacia {goal}."
+        elif grade=='success':
+            generic_success=[
+                (f"La acción funciona y cambia la disposición de {place}. Un detalle de {obj} cobra sentido mientras {threat} queda contenido por el momento.",f"Se abre una ruta concreta hacia {goal}."),
+                (f"Consigues exactamente la apertura que buscabas. La reacción del entorno confirma que {reveal}.",f"Puedes usar esta ventaja para acercarte a {goal} antes de que cambie la situación."),
+                (f"Tu decisión da resultado, pero también mueve otras piezas de la escena. {threat.capitalize()} sigue presente, aunque ahora tienes margen para actuar.",f"El siguiente movimiento puede convertir esta ventaja en progreso real hacia {goal}.")
+            ]; body,consequence=generic_success[seed%len(generic_success)]
         elif grade=='cost': body=f"Lo consigues, pero no gratis. Mientras avanzas, {threat} obliga a aceptar una complicación nueva."; consequence="La historia continúa con una ventaja y un problema al mismo tiempo."
         else: body=f"El intento falla y {place} responde de la peor manera útil: no te detiene la partida, pero {threat} gana terreno."; consequence=f"Necesitas cambiar de enfoque para acercarte a {goal}."
     text=f"{labels[grade]}\n\n{body}\n\n{consequence}"

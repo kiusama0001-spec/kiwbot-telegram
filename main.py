@@ -15128,6 +15128,29 @@ def handle_rpg_callback(query):
         except Exception:
             pass
 
+    if data=='gifshop:menu':
+        txt,kb=_gifshop_menu(uid);send_message(chat_id,txt,reply_markup=kb);return True
+    if data=='gifshop:close':
+        send_message(chat_id,'🎞️ Tienda de GIFs cerrada.');return True
+    if data.startswith('gifshop:view:'):
+        key=data.split(':',2)[2];txt,kb=_gifshop_view(uid,key);send_message(chat_id,txt,reply_markup=kb);return True
+    if data.startswith('gifshop:setup:'):
+        key=data.split(':',2)[2]
+        if key not in _GIF_ACTIONS:return True
+        _gifshop_begin_setup(uid,chat_id,key);return True
+    if data=='gifshop:setup_cancel':
+        _gifshop_state_clear(uid);send_message(chat_id,'❌ Configuración cancelada. No cambié tu GIF ni tu texto.');return True
+    if data.startswith('gifshop:buy:'):
+        key=data.split(':',2)[2]
+        if key not in _GIF_ACTIONS:return True
+        if _gifshop_owned(uid,key):
+            txt,kb=_gifshop_view(uid,key);send_message(chat_id,f'⚠️ /{key} ya lo compraste. No te cobraré otra vez.\n\nCada jugador configura su propia copia.');send_message(chat_id,txt,reply_markup=kb);return True
+        ok,bal,err=change_kiwons(uid,-_GIF_ACTION_PRICE,'gif_social_purchase',note=key)
+        if not ok: send_message(chat_id,f'🪙 No te alcanza. Necesitas {_GIF_ACTION_PRICE:,} Kiwons.');return True
+        _gifshop_ensure();now=int(time.time());c=get_db();c.execute('INSERT INTO rpg_social_gifs(user_id,action_key,gif_file_id,custom_text,purchased_at,updated_at) VALUES(?,?,\'\',?,?,?) ON CONFLICT(user_id,action_key) DO NOTHING',(int(uid),key,_GIF_ACTIONS[key][1],now,now));c.commit();c.close()
+        send_message(chat_id,f'✅ Compraste /{key}.\n\nSaldo: {bal:,} Kiwons\n\nAhora vamos a dejarlo a tu gusto.')
+        _gifshop_begin_setup(uid,chat_id,key);return True
+
     if data=='rpg_potions':
         battle=get_rpg_battle(chat_id,uid)
         if not battle: send_message(chat_id,'⚔️ No tienes un combate PvE activo.'); return True
@@ -18000,6 +18023,127 @@ def send_photo_bytes(chat_id, raw, caption="", message_thread_id=None, content_t
     return data
 
 
+
+# =========================================================
+# TIENDA DE GIFS SOCIALES — compras permanentes por jugador
+# =========================================================
+_GIF_ACTIONS={
+ 'saludar':('👋 Saludar','{yo} saluda a {target}.'),'golpear':('💥 Golpear','{yo} golpea a {target}.'),
+ 'abrazar':('🫂 Abrazar','{yo} abraza a {target}.'),'besar':('💋 Besar','{yo} besa a {target}.'),
+ 'morder':('🦷 Morder','{yo} muerde a {target}.'),'acariciar':('🤍 Acariciar','{yo} acaricia a {target}.'),
+ 'patear':('🦵 Patear','{yo} patea a {target}.'),'retar':('⚔️ Retar','{yo} reta a {target}.'),
+ 'brindar':('🥂 Brindar','{yo} brinda con {target}.'),'bailar':('💃 Bailar','{yo} saca a bailar a {target}.'),
+ 'guinar':('😉 Guiñar','{yo} le guiña el ojo a {target}.'),'asustar':('👻 Asustar','{yo} asusta a {target}.'),
+ 'felicitar':('🎉 Felicitar','{yo} felicita a {target}.'),'despertar':('⏰ Despertar','{yo} despierta a {target}.'),
+ 'molestar':('😈 Molestar','{yo} va a molestar a {target}.')}
+_GIF_ACTION_PRICE=30000
+
+def _gifshop_ensure():
+    c=get_db();c.execute("""CREATE TABLE IF NOT EXISTS rpg_social_gifs(
+      user_id BIGINT NOT NULL,action_key TEXT NOT NULL,gif_file_id TEXT DEFAULT '',custom_text TEXT DEFAULT '',purchased_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,
+      PRIMARY KEY(user_id,action_key))""");c.commit();c.close()
+
+
+def _gifshop_state_ensure():
+    c=get_db();c.execute("""CREATE TABLE IF NOT EXISTS rpg_social_gif_setup(
+      user_id BIGINT PRIMARY KEY,action_key TEXT NOT NULL,step TEXT NOT NULL,pending_gif TEXT DEFAULT '',updated_at BIGINT NOT NULL)""");c.commit();c.close()
+
+def _gifshop_state_set(uid,key,step,pending_gif=''):
+    _gifshop_state_ensure();c=get_db();c.execute("INSERT INTO rpg_social_gif_setup(user_id,action_key,step,pending_gif,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET action_key=excluded.action_key,step=excluded.step,pending_gif=excluded.pending_gif,updated_at=excluded.updated_at",(int(uid),str(key),str(step),str(pending_gif or ''),int(time.time())));c.commit();c.close()
+
+def _gifshop_state_get(uid):
+    _gifshop_state_ensure();c=get_db();r=c.execute('SELECT * FROM rpg_social_gif_setup WHERE user_id=?',(int(uid),)).fetchone();c.close();return dict(r) if r else None
+
+def _gifshop_state_clear(uid):
+    _gifshop_state_ensure();c=get_db();c.execute('DELETE FROM rpg_social_gif_setup WHERE user_id=?',(int(uid),));c.commit();c.close()
+
+def _gifshop_begin_setup(uid,chat_id,key):
+    own=_gifshop_owned(uid,key)
+    if not own:
+        send_message(chat_id,f'🔒 Primero compra /{key}.');return
+    _gifshop_state_set(uid,key,'gif','')
+    send_message(chat_id,f"🎞️ CONFIGURAR /{key}\n\n1/2 · Envíame ahora el GIF que quieres usar.\n\nTiene que ser el GIF directamente, no hace falta escribir ningún comando.",reply_markup={'inline_keyboard':[[{'text':'❌ Cancelar','callback_data':'gifshop:setup_cancel'}]]})
+
+def _gifshop_handle_setup_message(message,text):
+    chat=message.get('chat') or {}
+    if chat.get('type')!='private': return False
+    uid=int((message.get('from') or {}).get('id') or 0); chat_id=int(chat.get('id') or 0)
+    st=_gifshop_state_get(uid)
+    if not st:return False
+    key=str(st.get('action_key') or '')
+    if key not in _GIF_ACTIONS:
+        _gifshop_state_clear(uid);return False
+    step=str(st.get('step') or '')
+    if step=='gif':
+        anim=message.get('animation') or {}
+        fid=str(anim.get('file_id') or '')
+        if not fid:
+            send_message(chat_id,'🎞️ Estoy esperando el GIF. Envíamelo directamente desde Telegram.');return True
+        _gifshop_state_set(uid,key,'text',fid)
+        default=_GIF_ACTIONS[key][1]
+        send_message(chat_id,f"✍️ 2/2 · Ahora escribe el texto que quieres que salga.\n\nUsa {{yo}} para tu nombre y {{target}} para la otra persona.\n\nEjemplo:\n{default}\n\nEscribe solamente el texto.",reply_markup={'inline_keyboard':[[{'text':'❌ Cancelar','callback_data':'gifshop:setup_cancel'}]]})
+        return True
+    if step=='text':
+        custom=str(text or '').strip()
+        if not custom:
+            send_message(chat_id,'✍️ Envíame el texto que quieres usar.');return True
+        if len(custom)>900: custom=custom[:900]
+        # Si olvidan variables, se permite: algunos comandos pueden ser expresiones sin objetivo en el texto.
+        fid=str(st.get('pending_gif') or '')
+        if not fid:
+            _gifshop_state_set(uid,key,'gif','');send_message(chat_id,'🎞️ Perdí el GIF de la configuración. Envíamelo otra vez.');return True
+        _gifshop_ensure();c=get_db();c.execute('UPDATE rpg_social_gifs SET gif_file_id=?,custom_text=?,updated_at=? WHERE user_id=? AND action_key=?',(fid,custom,int(time.time()),uid,key));c.commit();c.close();_gifshop_state_clear(uid)
+        label=_GIF_ACTIONS[key][0]
+        send_message(chat_id,f"✅ {label} quedó configurado para TI.\n\n/{key} @usuario\no responde al mensaje de alguien con /{key}\n\nCada jugador puede tener su propio GIF y su propio texto.",reply_markup={'inline_keyboard':[[{'text':'🎞️ Volver a la tienda','callback_data':'gifshop:menu'},{'text':'⚙️ Cambiar','callback_data':f'gifshop:setup:{key}'}]]})
+        return True
+    return False
+
+def _gifshop_owned(uid,key):
+    _gifshop_ensure();c=get_db();r=c.execute('SELECT * FROM rpg_social_gifs WHERE user_id=? AND action_key=?',(int(uid),str(key))).fetchone();c.close();return dict(r) if r else None
+
+def _gifshop_menu(uid):
+    _gifshop_ensure();c=get_db();owned={str(r['action_key']) for r in c.execute('SELECT action_key FROM rpg_social_gifs WHERE user_id=?',(int(uid),)).fetchall()};c.close()
+    rows=[]
+    keys=list(_GIF_ACTIONS)
+    for i in range(0,len(keys),2):
+        row=[]
+        for k in keys[i:i+2]:
+            label=_GIF_ACTIONS[k][0]; row.append({'text':('✅ ' if k in owned else '🛒 ')+label,'callback_data':f'gifshop:view:{k}'})
+        rows.append(row)
+    rows.append([{'text':'❌ Cerrar','callback_data':'gifshop:close'}])
+    return '🎞️ TIENDA DE GIFS\n\nCada comando cuesta 30,000 Kiwons una sola vez. Después puedes cambiar su GIF y texto cuando quieras.\n\nLos comandos comprados son permanentes.',{'inline_keyboard':rows}
+
+def _gifshop_view(uid,key):
+    if key not in _GIF_ACTIONS:return 'Ese comando no existe.',{'inline_keyboard':[]}
+    own=_gifshop_owned(uid,key);label,default=_GIF_ACTIONS[key]
+    if own:
+        state='✅ Comprado'+(' · GIF configurado' if own.get('gif_file_id') else ' · falta configurar')
+        kb={'inline_keyboard':[[{'text':'⚙️ Configurar GIF y texto','callback_data':f'gifshop:setup:{key}'}],[{'text':'⬅️ Tienda','callback_data':'gifshop:menu'}]]}
+        return f"🎞️ {label}\n\n{state}\nComando: /{key} @usuario\n\nTu compra es personal: tu GIF y tu texto pueden ser distintos a los de todos los demás.\n\nPulsa Configurar y KiwBot te pedirá primero el GIF y después el texto.",kb
+    kb={'inline_keyboard':[[{'text':'🪙 Comprar · 30,000','callback_data':f'gifshop:buy:{key}'}],[{'text':'⬅️ Tienda','callback_data':'gifshop:menu'}]]}
+    return f"🎞️ {label}\n\nComando: /{key} @usuario\nTexto inicial: {default}\n\nPrecio: 30,000 Kiwons",kb
+
+def _gifshop_target(message,text):
+    reply=(message.get('reply_to_message') or {}).get('from') or {}
+    if reply and not reply.get('is_bot'):return reply
+    parts=str(text or '').strip().split()
+    if len(parts)>1 and parts[1].startswith('@'):
+        return find_cached_user((message.get('chat') or {}).get('id'),parts[1])
+    return None
+
+def _gifshop_run(message,text,key):
+    uid=int((message.get('from') or {}).get('id') or 0); own=_gifshop_owned(uid,key)
+    chat_id=int((message.get('chat') or {}).get('id') or 0)
+    if not own: send_message(chat_id,f'🔒 Primero compra /{key} en /tiendagif.');return True
+    target=_gifshop_target(message,text)
+    if not target: send_message(chat_id,f'Usa /{key} @usuario o responde a su mensaje con /{key}.');return True
+    me=message.get('from') or {}; myname=me.get('first_name') or me.get('username') or 'Alguien'; tname=target.get('first_name') or target.get('display_name') or target.get('username') or 'alguien'
+    template=str(own.get('custom_text') or _GIF_ACTIONS[key][1]);caption=template.replace('{yo}',str(myname)).replace('{target}',str(tname))[:1024]
+    fid=str(own.get('gif_file_id') or '')
+    if fid: send_animation(chat_id,fid,caption,reply_to_message_id=message.get('message_id'))
+    else: send_message(chat_id,caption+'\n\n🎞️ Aún no configuraste un GIF para este comando.')
+    return True
+
 def process_command(
     message,
     text
@@ -18024,6 +18168,23 @@ def process_command(
     # cuando /testmision llega sin argumentos.
     parts = str(text or "").strip().split(maxsplit=1)
     user_id = int((message.get("from") or {}).get("id") or 0)
+
+    # Tienda de GIFs sociales. Compra en privado; los comandos funcionan también en grupos.
+    if command=="/tiendagif":
+        if chat.get("type")!="private": send_message(chat_id,"🎞️ Abre /tiendagif por privado con KiwBot para comprar y configurar tus comandos."); return True
+        txt,kb=_gifshop_menu(user_id);send_message(chat_id,txt,reply_markup=kb);return True
+    if command=="/gifconfig":
+        if chat.get("type")!="private": send_message(chat_id,"🎞️ La configuración de GIF se hace por privado.");return True
+        parts=str(text or '').split(maxsplit=2)
+        if len(parts)<2 or parts[1].lower() not in _GIF_ACTIONS: send_message(chat_id,"Usa /gifconfig comando TEXTO respondiendo a un GIF. Ejemplo: /gifconfig saludar {yo} llegó a saludar a {target}.");return True
+        key=parts[1].lower();own=_gifshop_owned(user_id,key)
+        if not own: send_message(chat_id,f"🔒 Primero compra /{key} en /tiendagif.");return True
+        reply=message.get('reply_to_message') or {}; anim=reply.get('animation') or message.get('animation') or {}; fid=str(anim.get('file_id') or '')
+        if not fid: send_message(chat_id,"Responde al GIF que quieras usar con /gifconfig comando TU TEXTO.");return True
+        custom=(parts[2].strip() if len(parts)>2 else _GIF_ACTIONS[key][1])[:900]
+        _gifshop_ensure();c=get_db();c.execute('UPDATE rpg_social_gifs SET gif_file_id=?,custom_text=?,updated_at=? WHERE user_id=? AND action_key=?',(fid,custom,int(time.time()),user_id,key));c.commit();c.close();send_message(chat_id,f"✅ /{key} configurado. Ya puedes usarlo con @usuario o respondiendo a su mensaje.");return True
+    if command.startswith('/') and command[1:] in _GIF_ACTIONS:
+        return _gifshop_run(message,text,command[1:])
     if chat.get("type") in ("group","supergroup"):
         _touch_rpg_realm(user_id,chat_id)
 
@@ -20521,6 +20682,11 @@ def process_update(
         except Exception:
             logger.exception("No pude aplicar el silencio temporal del muerto")
 
+        # Configurador guiado de GIFs: cada jugador sube SU GIF y escribe SU texto.
+        # Sólo consume mensajes privados no-comando mientras existe una configuración activa.
+        if not text.startswith('/') and _gifshop_handle_setup_message(message,text):
+            return
+
         # =================================================
         # COMANDOS — FAST PATH
         # =================================================
@@ -21337,18 +21503,27 @@ def _invclean_bucket(v):
     m={'comun':'comun','poco comun':'poco_comun','raro':'raro','epico':'epico','legendario':'legendario','mitico':'mitico','evento':'evento','unico':'unico'}
     return m.get(x,'otro')
 def _inventory_cleanup_candidates(uid, selected=None):
+    """Agrupa duplicados reales aunque estén guardados como filas serializadas quantity=1.
+    Conserva una copia utilizable por item_key y nunca toca equipados/bloqueados ni objetos protegidos.
+    """
     char=get_active_character(uid)
     if not char:return []
-    c=get_db();rows=c.execute("""SELECT i.id,i.item_key,i.quantity,x.name,x.rarity,x.item_type,x.equip_slot FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.character_id=? AND COALESCE(i.equipped,0)=0 AND COALESCE(i.quantity,0)>1""",(int(uid),int(char['id']))).fetchall();c.close()
+    c=get_db(); rows=c.execute("""SELECT i.id,i.item_key,i.quantity,COALESCE(i.forge_level,0) forge_level,
+        x.name,x.rarity,x.item_type,x.equip_slot
+        FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key
+        WHERE i.user_id=? AND i.character_id=? AND COALESCE(i.equipped,0)=0 AND COALESCE(i.locked,0)=0
+          AND COALESCE(i.quantity,0)>0
+        ORDER BY i.item_key,COALESCE(i.forge_level,0) DESC,i.acquired_at ASC,i.id ASC""",(int(uid),int(char['id']))).fetchall(); c.close()
     selected=set(selected or [])
-    out=[]
+    groups={}
     for rr in rows:
         r=dict(rr)
         if str(r.get('item_type') or '').lower() in ('quest','mission','titulo','title','gift','regalo'):continue
-        r['_bucket']=_invclean_bucket(r.get('rarity'))
-        if selected and r['_bucket'] not in selected:continue
-        out.append(r)
-    return out
+        bucket=_invclean_bucket(r.get('rarity'))
+        if selected and bucket not in selected:continue
+        g=groups.setdefault(str(r['item_key']),{'item_key':r['item_key'],'name':r['name'],'rarity':r['rarity'],'item_type':r.get('item_type'),'_bucket':bucket,'rows':[],'quantity':0})
+        g['rows'].append(r); g['quantity']+=int(r.get('quantity') or 0)
+    return [g for g in groups.values() if int(g['quantity'])>1]
 
 def _invclean_decode(mask):
     try: mask=int(mask)
@@ -21368,8 +21543,8 @@ def _invclean_keyboard(uid,mask=0):
 def _inventory_cleanup_preview(uid,mask=0):
     allrows=_inventory_cleanup_candidates(uid)
     dups=sum(max(0,int(r['quantity'])-1) for r in allrows)
-    if not dups:return '🧹 No encontré stacks repetidos en tu inventario.\n\nLa limpieza sólo considera objetos con cantidad mayor a 1.',{'inline_keyboard':[[{'text':'❌ Cerrar','callback_data':'invclean:cancel'}]]}
-    return ('🧹 LIMPIEZA POR RAREZA\n\nElige una o varias rarezas. El número de cada botón indica cuántas unidades repetidas hay.\n\nSiempre conservaré 1 unidad de cada objeto y nunca tocaré equipados, objetos de misión, títulos ni regalos.',_invclean_keyboard(uid,mask))
+    if not dups:return '🧹 No encontré stacks repetidos en tu inventario.\n\nLa limpieza detecta tanto stacks como copias separadas del mismo objeto.',{'inline_keyboard':[[{'text':'❌ Cerrar','callback_data':'invclean:cancel'}]]}
+    return ('🧹 LIMPIEZA POR RAREZA\n\nElige una o varias rarezas. El número de cada botón indica cuántas copias repetidas hay, aunque estén guardadas en filas separadas.\n\nSiempre conservaré 1 unidad de cada objeto y nunca tocaré equipados, objetos de misión, títulos ni regalos.',_invclean_keyboard(uid,mask))
 def _inventory_cleanup_review(uid,mask):
     selected=_invclean_decode(mask); rows=_inventory_cleanup_candidates(uid,selected)
     dups=sum(max(0,int(r['quantity'])-1) for r in rows)
@@ -21379,22 +21554,27 @@ def _inventory_cleanup_review(uid,mask):
     kb={'inline_keyboard':[[{'text':'🧹 Eliminar repetidos','callback_data':f'invclean:delete:{mask}'},{'text':'💰 Vender repetidos','callback_data':f'invclean:sell:{mask}'}],[{'text':'⬅️ Cambiar rarezas','callback_data':f'invclean:menu:{mask}'},{'text':'❌ Cancelar','callback_data':'invclean:cancel'}]]}
     return txt,kb
 def _inventory_cleanup_apply(uid,selected,sell=False):
-    rows=_inventory_cleanup_candidates(uid,selected)
-    if not rows:return '🧹 Ya no hay repetidos de esas rarezas.'
+    groups=_inventory_cleanup_candidates(uid,selected)
+    if not groups:return '🧹 Ya no hay repetidos de esas rarezas.'
     removed=0;earned=0;c=get_db()
     try:
-        for r in rows:
-            extra=max(0,int(r['quantity'])-1)
+        for g in groups:
+            rows=list(g.get('rows') or [])
+            if not rows:continue
+            # La consulta ya ordena por mayor forja: esa es la copia que conservamos.
+            keep=rows[0]; total=sum(int(r.get('quantity') or 0) for r in rows); extra=max(0,total-1)
             if not extra:continue
-            c.execute('UPDATE rpg_inventory SET quantity=1 WHERE id=?',(int(r['id']),));removed+=extra
+            c.execute('UPDATE rpg_inventory SET quantity=1 WHERE id=?',(int(keep['id']),))
+            for r in rows[1:]: c.execute('DELETE FROM rpg_inventory WHERE id=?',(int(r['id']),))
+            removed+=extra
             if sell:
-                unit={'comun':25,'poco_comun':50,'raro':100,'epico':250,'legendario':500,'mitico':1000,'evento':250,'unico':1000,'otro':20}.get(r['_bucket'],20);earned+=unit*extra
+                unit={'comun':25,'poco_comun':50,'raro':100,'epico':250,'legendario':500,'mitico':1000,'evento':250,'unico':1000,'otro':20}.get(g['_bucket'],20);earned+=unit*extra
         c.commit();c.close()
     except Exception:c.rollback();c.close();raise
     if sell and earned:
         try:change_kiwons(uid,earned,'inventory_cleanup_sale',note=f'{removed} duplicados')
         except Exception:earned=0
-    return f"🧹 Inventario limpiado.\n♻️ Repetidos retirados: {removed}"+(f"\n🪙 Venta: +{earned:,} Kiwons" if sell else '')+'\n\nConservé 1 unidad de cada objeto.'
+    return f"🧹 Inventario limpiado.\n♻️ Repetidos retirados: {removed}"+(f"\n🪙 Venta: +{earned:,} Kiwons" if sell else '')+'\n\nConservé 1 copia de cada objeto y prioricé la de mayor Forja.'
 
 # Alias del callback viejo para utilidades (curación, forja, etc.) y override de dado manual.
 def _legacy_world_npc_utility(uid,chat_id,thread_id,key,action):

@@ -514,8 +514,11 @@ def handle_callback(query):
         result=_dnd_fast_result(camp,ch,user,fast,target_name)
         now=int(time.time()); c=_db(); c.execute("INSERT INTO dnd_journal(campaign_id,chapter,actor_id,event_type,text,created_at) VALUES(?,?,?,?,?,?)",(int(camp['id']),int(camp['chapter']),uid,'fast_action',f"{_mention(user)}: {fast} -> {target_name}",now)); c.commit(); c.close()
         if fast=='attack':
-            _S(chat_id,thread,f"⚔️ {_mention(user)} apunta a {target_name}.\n\n{result}")
-            _request_roll(camp,user,f"Atacar a {target_name}",needed=1,difficulty=4,stat='attack'); return True
+            current=_norm(str(camp.get('scene_text') or ''))
+            finishing=any(w in current for w in ('clara desventaja','retrocede','perdio la posicion','perdió la posición','iniciativa'))
+            verb='Rematar' if finishing else 'Atacar'
+            _S(chat_id,thread,f"⚔️ {_mention(user)} intenta {verb.lower()} a {target_name}.\n\n{result}")
+            _request_roll(camp,user,f"{verb} a {target_name}",needed=1,difficulty=5 if finishing else 4,stat='attack'); return True
         if fast=='seduce':
             _S(chat_id,thread,f"😏 {_mention(user)} intenta seducir a {target_name}.\n\n{result}")
             _request_roll(camp,user,f"Seducir a {target_name}",needed=2,difficulty=4,stat='charisma'); return True
@@ -616,22 +619,58 @@ def _save_flag(camp,key,value=True):
 
 DND_FAST_ACTIONS=[
  ('⚔️ Atacar','attack'),('🔎 Investigar','investigate'),('🗣️ Hablar','talk'),
- ('😏 Seducir','seduce'),('🤝 Ayudar','help'),('🏃 Huir','flee'),('🎯 Acción a alguien','target')
+ ('😏 Seducir','seduce'),('🤝 Ayudar','help'),('🏃 Huir','flee'),('🎯 Otra acción','target')
 ]
+
+def _scene_action_options(camp,context=''):
+    """Botones contextuales: cambian según lo que acaba de ocurrir, sin depender de IA."""
+    cd,phase,_=_dnd_scene_context(camp)
+    npc=str(cd.get('npc') or 'alguien'); obj=str(cd.get('object') or 'la pista')
+    goal=str(cd.get('goal') or 'seguir adelante'); threat=str(cd.get('threat') or 'el peligro')
+    ctx=_norm(context or camp.get('scene_text') or '')
+    flags=_flags(camp); dead=bool(flags.get('dead_npc_'+_norm(npc).replace(' ','_')))
+    # El orden también cambia para que la interfaz refleje el momento actual.
+    if dead:
+        return [(f'🔎 Revisar a {npc}'[:48],'investigate'),(f'🧭 Seguir hacia {goal}'[:48],'flee'),
+                (f'👁️ Examinar {obj}'[:48],'investigate'),('🗣️ Hablar con el grupo','talk'),
+                (f'⚠️ Vigilar {threat}'[:48],'help'),('🎯 Otra acción','target')]
+    combat=any(w in ctx for w in ('ataque','golpe','retrocede','desventaja','pelea','violencia','iniciativa','defensa'))
+    clue=any(w in ctx for w in ('pista','descub','revela','objeto','runa','huella','señal','llave','misterio'))
+    social=any(w in ctx for w in ('confianza','hablar','convers','verdad','sospecha','relación','reaccion'))
+    danger=any(w in ctx for w in ('peligro','amenaza','caos','cierra el paso','urgente'))
+    if combat:
+        return [(f'☠️ Rematar a {npc}'[:48],'attack'),(f'⛓️ Inmovilizar a {npc}'[:48],'help'),
+                (f'🗣️ Interrogar a {npc}'[:48],'talk'),('🛑 Perdonarle la vida','help'),
+                (f'🔎 Aprovechar y revisar {obj}'[:48],'investigate'),('🏃 Romper el combate','flee'),('🎯 Otra acción','target')]
+    if clue:
+        return [(f'👁️ Examinar {obj}'[:48],'investigate'),(f'🗣️ Preguntar a {npc}'[:48],'talk'),
+                (f'👣 Seguir la pista'[:48],'flee'),(f'⚠️ Prepararse contra {threat}'[:48],'help'),
+                (f'⚔️ Confrontar a {npc}'[:48],'attack'),('🧠 Probar otra teoría','investigate'),('🎯 Otra acción','target')]
+    if social:
+        return [(f'🗣️ Presionar a {npc}'[:48],'talk'),(f'😏 Acercarte a {npc}'[:48],'seduce'),
+                ('🤝 Ganarte su confianza','help'),('🧠 Intentar engañarlo','talk'),
+                (f'⚠️ Amenazar a {npc}'[:48],'attack'),('🔎 Leer sus reacciones','investigate'),('🎯 Otra acción','target')]
+    if danger:
+        return [(f'⚔️ Enfrentar {threat}'[:48],'attack'),('🛡️ Proteger al grupo','help'),
+                (f'🔎 Buscar una debilidad'[:48],'investigate'),(f'🗣️ Avisar a {npc}'[:48],'talk'),
+                ('🏃 Buscar una salida','flee'),('🎯 Otra acción','target')]
+    return [(f'🔎 Examinar {obj}'[:48],'investigate'),(f'🗣️ Hablar con {npc}'[:48],'talk'),
+            (f'⚔️ Enfrentar a {npc}'[:48],'attack'),(f'🤝 Ayudar a {npc}'[:48],'help'),
+            (f'🧭 Avanzar hacia {goal}'[:48],'flee'),(f'😏 Acercarte a {npc}'[:48],'seduce'),('🎯 Otra acción','target')]
+
 def _suggestion_options(camp,context='',mode='scene'):
     if mode=='roll': return [('🎲 Lanzar dado','__roll__')]
-    return DND_FAST_ACTIONS
+    return _scene_action_options(camp,context)
 
 def _suggestions(camp,context='',mode='scene'):
     return ''
 
 def _suggestion_keyboard(camp,context='',mode='scene'):
     if mode=='roll': return {'inline_keyboard':[[{'text':'🎲 Lanzar dado','callback_data':'dnd:rollhint'}]]}
+    opts=_scene_action_options(camp,context)
     rows=[]
-    for i in range(0,len(DND_FAST_ACTIONS),2):
-        row=[]
-        for label,key in DND_FAST_ACTIONS[i:i+2]: row.append({'text':label,'callback_data':f'dnd:fast:{key}'})
-        rows.append(row)
+    for i in range(0,len(opts),2):
+        rows.append([{'text':label,'callback_data':f'dnd:fast:{key}'} for label,key in opts[i:i+2]])
     return {'inline_keyboard':rows}
 
 def _dnd_scene_context(camp):
@@ -650,7 +689,9 @@ def _dnd_target_keyboard(camp,action):
         rows.append([{'text':label,'callback_data':f"dnd:fasttarget:{action}:{int(r['user_id'])}"}])
     cd,phase,_=_dnd_scene_context(camp)
     npc=str(cd.get('npc') or 'NPC de la escena')
-    rows.append([{'text':f'🎭 {npc}'[:48],'callback_data':f'dnd:fasttarget:{action}:0'}])
+    dead=bool(_flags(camp).get('dead_npc_'+_norm(npc).replace(' ','_')))
+    if not dead:
+        rows.append([{'text':f'🎭 {npc}'[:48],'callback_data':f'dnd:fasttarget:{action}:0'}])
     return {'inline_keyboard':rows}
 
 def _dnd_fast_result(camp,ch,user,action,target_name=''):
@@ -790,7 +831,7 @@ def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
         qc=_db(); qr=qc.execute("SELECT COUNT(*) AS n FROM dnd_journal WHERE campaign_id=? AND actor_id=? AND event_type='roll_result'",(int(camp['id']),int(ch.get('user_id') or 0))).fetchone(); qc.close(); turn_no=int((qr or {}).get('n') or 0)
     except Exception: turn_no=int(time.time()*1000)%997
     seed=(int(camp.get('arc') or 1)*101+int(camp.get('chapter') or 1)*37+int(camp.get('scene') or 1)*13+int(ch.get('user_id') or 0)+total+turn_no*53+random.SystemRandom().randint(0,1000003))
-    if low_norm.startswith('atacar'):
+    if low_norm.startswith(('atacar','rematar')):
         if grade=='exceptional':
             body=f"Tu ataque entra limpio antes de que {target_name} pueda recomponerse. Lo obligas a retroceder y tomas el control inmediato de la escena. En {place}, el ruido también revela un detalle alrededor de {obj}: {reveal}."
             consequence=f"{target_name} queda en clara desventaja. Ahora puedes presionarlo, detener la pelea o aprovechar la apertura para {goal}."
@@ -831,6 +872,11 @@ def _dnd_roll_resolution(camp,ch,user,reason,rolls,target):
             ]; body,consequence=generic_success[seed%len(generic_success)]
         elif grade=='cost': body=f"Lo consigues, pero no gratis. Mientras avanzas, {threat} obliga a aceptar una complicación nueva."; consequence="La historia continúa con una ventaja y un problema al mismo tiempo."
         else: body=f"El intento falla y {place} responde de la peor manera útil: no te detiene la partida, pero {threat} gana terreno."; consequence=f"Necesitas cambiar de enfoque para acercarte a {goal}."
+    # Una intención explícita de rematar puede cambiar permanentemente el elenco de la escena.
+    if low_norm.startswith('rematar') and grade in ('exceptional','success'):
+        _save_flag(camp,'dead_npc_'+_norm(target_name).replace(' ','_'),{'at':int(time.time()),'by':int(ch.get('user_id') or 0)})
+        body += f"\n\n{target_name} ya no puede continuar el enfrentamiento. La historia registra su muerte y las personas presentes recordarán quién tomó esa decisión."
+        consequence=f"{target_name} queda fuera de la historia activa. Ahora tendrás que afrontar lo que provoque esta muerte y decidir cómo seguir hacia {goal}."
     text=f"{labels[grade]}\n\n{body}\n\n{consequence}"
     # La nueva consecuencia pasa a ser la escena persistida que /dnd recuperará.
     now=int(time.time()); c=_db(); c.execute("UPDATE dnd_campaigns SET scene_text=?,updated_at=? WHERE id=?",(text,now,int(camp['id']))); c.commit(); c.close()

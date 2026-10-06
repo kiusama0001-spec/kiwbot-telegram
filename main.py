@@ -5793,6 +5793,9 @@ def _ensure_npc_moral_jobs_db():
                 ON CONFLICT(user_id,npc_key,title) DO NOTHING""")
             # Un viajero que aparece trae UN encargo público: el primer jugador que lo reclama se lo queda.
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_npc_moral_spawn_claim ON rpg_npc_moral_jobs(chat_id,npc_key,spawn_started_at) WHERE spawn_started_at>0")
+            # Parche Mundo Vivo 10: los encargos humanos ya no usan barras de Boss.
+            # Conserva el porcentaje de vida de encargos activos antiguos, pero los baja a un máximo humano de 900 HP.
+            c.execute("""UPDATE rpg_npc_moral_jobs SET target_hp=GREATEST(1,ROUND(target_hp*900.0/NULLIF(target_max_hp,0))),target_max_hp=900 WHERE status='active' AND target_max_hp>900""")
             c.commit(); c.close()
         _npc_moral_schema_ready = True
 
@@ -5858,7 +5861,7 @@ def _npc_offer_moral_job(user_id,chat_id,key):
             available=[x for x in _npc_moral_pool(key) if str(x['title']) not in done_titles]
             if not available:
                 c.close(); return f'🏁 Ya completaste los {NPC_MORAL_POOL_SIZE} encargos disponibles de {WORLD_NPCS.get(str(key),(str(key),0))[0]}.',None
-            scenario=random.choice(available); eff=effective_character_stats(char); mh=max(80,int(eff['atk'])*5+random.randint(25,65))
+            scenario=random.choice(available); eff=effective_character_stats(char); mh=random.choice((500,600,800,900))
             payload=json.dumps(scenario,ensure_ascii=False)
             row=c.execute("""INSERT INTO rpg_npc_moral_jobs(user_id,chat_id,npc_key,title,target_name,payload,status,target_hp,target_max_hp,attacks,listened,created_at,updated_at,spawn_started_at)
                 VALUES(?,?,?,?,?,?,'active',?,?,0,0,?,?,?) ON CONFLICT DO NOTHING RETURNING *""",(uid,cid,str(key),scenario['title'],scenario['target'],payload,mh,mh,now,now,spawn_at)).fetchone()
@@ -21830,6 +21833,15 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
     if action=='mission':return _npc_offer_moral_job(uid,chat_id,key)
     if action=='history':return _legacy_npc_history_text(uid,key)
     if action=='social_seduce':return _npc_social_seduce(uid,chat_id,key)
+    if key=='erick' and action=='enchant':
+        char=get_active_character(uid)
+        if not char:return 'Necesitas un personaje activo.',None
+        with db_lock:
+            c=get_db();rows=c.execute("""SELECT i.id,x.name,i.enchant_atk,i.enchant_def,i.enchant_hp FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.character_id=? AND i.equipped=1 AND COALESCE(x.equip_slot,'')<>'' ORDER BY i.id""",(int(uid),int(char['id']))).fetchall();c.close()
+        valid=[r for r in rows if int(r.get('enchant_atk') or 0)+int(r.get('enchant_def') or 0)+int(r.get('enchant_hp') or 0)==0]
+        if not valid:return '✨ Erick: —No tienes una pieza equipada disponible para encantar.',_npc_role_keyboard(key)
+        kb={'inline_keyboard':[[{'text':f"✨ {r['name']}",'callback_data':f"erick_target:{int(r['id'])}"}] for r in valid[:12]]+[[{'text':'⬅️ Volver','callback_data':'wnpc:erick:role_show'}]]}
+        return '✨ Erick: —Elige qué pieza quieres encantar. Después escogerás otra pieza sin equipar para sacrificar.',kb
     if action.startswith('role_'):
         _npc_remember(uid,key,action,NPC_ROLE_TEXT.get(action,'Compartieron un momento fuera de los encargos.'))
         # Pequeños efectos propios del oficio, sin convertirlos en botones de premio gratis.
@@ -21852,6 +21864,83 @@ def handle_rpg_dice(message):
     _ensure_npc3_db();c=get_db();r=c.execute('SELECT * FROM rpg_npc_pending_roll WHERE user_id=?',(uid,)).fetchone();c.close()
     if not r or int(r.get('chat_id') or 0)!=chat_id:return False
     txt,kb=_npc3_resolve_roll(uid,chat_id,dict(r),val);send_message(chat_id,txt,reply_markup=kb);return True
+
+
+# =========================================================
+# KIWRPG — MUNDO VIVO 10: CASOS MENOS PREDECIBLES + MISIONES VARIADAS
+# =========================================================
+# Los casos se mantienen cortos. La verdad puede ser inocente, gris o culpable.
+# Las acciones vienen dentro del propio caso para que no parezcan botones pegados.
+_NPC_LIVE_CASES = [
+ ('El almacén vacío','encargado','Faltan medicinas del almacén y {n} tenía la única llave.','Vendió parte de las medicinas y falsificó el inventario para quedarse con el dinero.','guilty',[('🔎 Revisar cuentas','investigate'),('💰 Exigir devolución','negotiate'),('😠 Presionarlo','intimidate')]),
+ ('Tres viajeros desaparecidos','guía','Tres viajeros desaparecieron después de contratar a {n}.','Los llevó deliberadamente a una emboscada y cobró una parte del botín.','guilty',[('🐾 Seguir el rastro','investigate'),('🎭 Fingir que sabes todo','deceive'),('😠 Hacerlo hablar','intimidate')]),
+ ('La medicina falsa','curandero','Varios enfermos empeoraron después de comprarle tónicos a {n}.','Sabía que eran falsos y siguió vendiéndolos porque daban más dinero.','guilty',[('🧪 Probar el tónico','investigate'),('💰 Exigir compensación','negotiate'),('🎭 Tenderle una trampa','deceive')]),
+ ('El incendio de la posada','posadero','La posada ardió de madrugada y {n} cobró una indemnización enorme.','Provocó el incendio para cobrar; creyó que el edificio estaba vacío y una persona murió dentro.','guilty',[('🔥 Buscar acelerante','investigate'),('💰 Negociar confesión','negotiate'),('😠 Acorralarlo','intimidate')]),
+ ('El recaudador','recaudador','Familias del barrio dicen que {n} cobra el doble de lo ordenado.','Es verdad. Amenaza a quienes reclaman y se queda con la diferencia.','guilty',[('📜 Revisar recibos','investigate'),('💰 Recuperar lo robado','negotiate'),('😠 Enfrentarlo','intimidate')]),
+ ('La caravana perdida','mercenario','Una caravana protegida por {n} desapareció sin dejar mercancía.','Vendió la ruta a bandidos. Dos guardias que se negaron a participar fueron asesinados.','guilty',[('🗺️ Revisar la ruta','investigate'),('🎭 Mentir sobre un testigo','deceive'),('😠 Exigir nombres','intimidate')]),
+ ('El veneno del pozo','alquimista','El pozo del pueblo fue contaminado y encontraron frascos de {n}.','Contaminó el pozo para obligar al pueblo a comprar su antídoto.','guilty',[('🧪 Comparar muestras','investigate'),('💰 Exigir el antídoto','negotiate'),('😠 Amenazar con denunciar','intimidate')]),
+ ('La llave copiada','cerrajero','Varias casas fueron robadas sin forzar puertas. Todas habían contratado a {n}.','Copiaba llaves y las vendía a ladrones.','guilty',[('🗝️ Revisar moldes','investigate'),('🎭 Hacerte pasar por comprador','deceive'),('💰 Comprar los nombres','bribe')]),
+ ('El duelo amañado','espadachín','Un joven murió en un duelo organizado por {n}.','Saboteó el arma del joven porque había apostado contra él.','guilty',[('⚔️ Revisar el arma','investigate'),('🎭 Fingir que tienes pruebas','deceive'),('😠 Exigir confesión','intimidate')]),
+ ('El niño acusado','aprendiz','Acusan a {n} de robar la caja del mercado.','No la robó. El dueño escondió el dinero para cobrar un seguro y necesitaba un culpable fácil.','innocent',[('🔎 Buscar la caja','investigate'),('🤝 Hablar con el dueño','negotiate'),('🎭 Tender una trampa','deceive')]),
+ ('La sangre en el cuchillo','cazador','Encontraron el cuchillo de {n} junto a un cadáver.','La sangre es de una bestia. El cadáver murió horas después por otra arma.','innocent',[('🩸 Revisar la sangre','investigate'),('🐾 Buscar huellas','investigate'),('🤝 Buscar otro testigo','negotiate')]),
+ ('La carta falsificada','mensajero','Una carta firmada por {n} ordena incendiar una granja.','La firma fue copiada. {n} llevaba otra carta a kilómetros de allí a esa hora.','innocent',[('✉️ Comparar firmas','investigate'),('🗺️ Comprobar la ruta','investigate'),('🤝 Hablar con el destinatario','negotiate')]),
+ ('La bolsa del muerto','viajero','{n} lleva las monedas de un hombre encontrado muerto.','Encontró el cuerpo y tomó la bolsa para entregarla a su familia; todavía conserva una carta con la dirección.','innocent',[('📜 Leer la carta','investigate'),('🤝 Acompañarlo','negotiate'),('🎭 Probar su historia','deceive')]),
+ ('El monstruo del establo','cuidador','Dicen que {n} liberó una criatura que hirió a dos personas.','Intentó encerrarla y fue quien avisó del peligro. Otro cuidador dejó la puerta abierta.','innocent',[('🐾 Revisar el establo','investigate'),('🤝 Buscar al otro cuidador','negotiate'),('🎭 Fingir que ya confesó','deceive')]),
+ ('La espada prohibida','escudera','{n} robó una espada sellada del cuartel.','La tomó para impedir que su capitán la usara en una ejecución ilegal. El robo es real; la acusación principal no.','mixed',[('🗡️ Revisar la espada','investigate'),('🤝 Pedir que la entregue','negotiate'),('🎭 Ocultar la prueba','deceive')]),
+ ('El ladrón del mercado','ladrón','{n} fue atrapado robando comida por tercera vez.','Roba para comer, pero también vendió parte de lo robado y golpeó a un tendero al escapar.','mixed',[('🔎 Revisar lo robado','investigate'),('💰 Pedir reparación','negotiate'),('😠 Exigir que responda','intimidate')]),
+ ('La orden del capitán','soldado','{n} incendió una casa siguiendo una orden militar.','Obedeció sabiendo que había civiles dentro, pero luego regresó y salvó a dos.','mixed',[('📜 Buscar la orden','investigate'),('🤝 Pedir testimonio','negotiate'),('😠 Exigir nombres','intimidate')]),
+ ('El contrabando','barquero','{n} cruza personas por una frontera cerrada.','Ayuda a familias a escapar, pero cobra fortunas a quienes pueden pagar y abandonó a una familia cuando llegaron soldados.','mixed',[('🗺️ Revisar la ruta','investigate'),('💰 Negociar devolución','negotiate'),('😠 Pedir explicaciones','intimidate')]),
+ ('La bestia herida','cazador','{n} mató una criatura protegida.','La criatura estaba herida y atacó primero, pero {n} sabía que podía espantarla y prefirió cobrar por el trofeo.','mixed',[('🐾 Revisar huellas','investigate'),('💰 Exigir el trofeo','negotiate'),('😠 Confrontarlo','intimidate')]),
+ ('La deuda comprada','prestamista','{n} compró las deudas de varias familias y ahora exige sus casas.','El contrato es legal, pero alteró dos fechas para poder cobrar antes.','guilty',[('📜 Revisar contratos','investigate'),('💰 Negociar las deudas','negotiate'),('🎭 Hacerlo admitir el cambio','deceive')]),
+ ('La tumba abierta','sepulturero','Una tumba fue abierta y encontraron herramientas de {n}.','Abrió la tumba por orden de una curandera para investigar una enfermedad; ocultó el permiso porque llevaba un sello falso.','mixed',[('🪦 Revisar la tumba','investigate'),('📜 Buscar el permiso','investigate'),('🤝 Hablar con la curandera','negotiate')]),
+ ('El mapa vendido','exploradora','Una patrulla cayó en una emboscada usando un mapa de {n}.','El mapa era correcto cuando lo vendió; alguien modificó una marca después.','innocent',[('🗺️ Comparar mapas','investigate'),('🔎 Buscar la tinta nueva','investigate'),('🤝 Rastrear al comprador','negotiate')]),
+ ('El cofre cambiado','mercader','Un cliente acusa a {n} de cambiar un cofre de reliquias por piedras.','Cambió el cofre, pero porque descubrió que las reliquias estaban malditas. Pensaba devolverlas después de romper la maldición.','mixed',[('🧰 Abrir el cofre','investigate'),('🤝 Exigir las reliquias','negotiate'),('💰 Comprar la verdad','bribe')]),
+ ('El falso héroe','aventurero','{n} cobra recompensas por monstruos que dice haber derrotado.','Nunca los mató. Compra colmillos a cazadores y falsifica pruebas.','guilty',[('🐲 Revisar trofeos','investigate'),('🎭 Retarlo con una mentira','deceive'),('💰 Exigir devolución','negotiate')]),
+ ('La puerta cerrada','guardia','{n} impidió salir a varias personas durante un incendio.','Cerró la puerta porque creyó que detrás había saqueadores. Cuando entendió el error ya era tarde.','mixed',[('🔥 Revisar el lugar','investigate'),('🤝 Hablar con sobrevivientes','negotiate'),('😠 Exigir explicación','intimidate')]),
+]
+
+def _build_npc_hundred(npc_key):
+    out=[]; offset=sum(ord(x) for x in str(npc_key))%len(_NPC_NAMES)
+    twists=[('', ''),(' — Sin testigos',' No hay un testigo fiable.'),(' — La prueba tardía',' Una prueba apareció después.'),(' — Alguien miente',' Una de las versiones tiene una contradicción.')]
+    for i in range(100):
+        base=_NPC_LIVE_CASES[(i+offset)%len(_NPC_LIVE_CASES)]; title,role,hook,truth,moral,actions=base
+        suffix,extra=twists[(i//len(_NPC_LIVE_CASES))%len(twists)]
+        name=_NPC_NAMES[(offset+i*3)%len(_NPC_NAMES)]
+        out.append({'title':title+suffix,'target':f'{name}, {role}','hook':hook.format(n=name)+extra,'truth':truth.format(n=name),
+                    'pleas':['—Espera.','—No conoces toda la historia.','—Decide cuando tengas claro qué pasó.'],
+                    'kind':'livecase','moral':moral,'actions':actions})
+    return out
+NPC_MORAL_POOL_SIZE=100
+NPC_MORAL_JOBS_BY_NPC={k:_build_npc_hundred(k) for k in WORLD_NPCS.keys()}
+
+def _npc_job_actions(row):
+    p=json.loads(row['payload']); custom=list(p.get('actions') or [])
+    if custom:
+        return [('⚔️ Atacar','attack')]+[(str(a[0]),str(a[1])) for a in custom[:3]]+[('🚪 Dejarlo ir','spare')]
+    kind=str(p.get('kind') or '')
+    # Compatibilidad con encargos que ya estaban activos antes de este parche.
+    return [('⚔️ Atacar','attack'),('🔎 Investigar','investigate'),('🤝 Negociar','negotiate'),('🎭 Engañar','deceive'),('🚪 Dejarlo ir','spare')]
+
+def _npc_listen_story(row,p):
+    target=str(row['target_name']); truth=str(p.get('truth') or '').strip()
+    line=(p.get('pleas') or ['—Espera.'])[min(int(row.get('attacks') or 0),len(p.get('pleas') or ['x'])-1)]
+    return f"{line}\n\n{target} da su versión, pero no tienes forma de saber todavía si está diciendo la verdad.\n\nSi quieres pruebas, investiga. Si decides ahora, tendrás que asumir el riesgo."
+
+# Más misiones públicas sin depender casi siempre de voz/dibujo.
+# Reutilizan mecánicas ligeras que ya existen: puntería, azar, número y carrera.
+_EXTRA_QUICK=[]
+for i,(title,prompt) in enumerate([
+ ('Atrapa al ladrón','El ladrón cruza el mercado. ¡El primero que reaccione lo alcanza!'),('Cierra la compuerta','El agua está entrando a la mina. ¡Corre a cerrar la compuerta!'),('Salva la poción','Una poción rueda hacia el borde de la mesa. ¡Atrápala!'),('Toma el mapa','El viento se lleva el mapa del grupo. ¡Agárralo!'),('Apaga la mecha','Una mecha encendida llega a un barril. No preguntes quién la prendió.'),('Rescata al mercader','El carro se volcó y el mercader quedó atrapado. ¡Ayúdalo!'),('La llave cae','La llave de la mazmorra cae por una rejilla. ¡Rápido!'),('El Mimic bosteza','El Mimic abrió la boca. Es el momento de recuperar la bolsa.'),('Cruza el puente','El puente empieza a caer. ¡Muévete!'),('Atrapa al cuervo','Un cuervo se lleva una gema del grupo.'),('La antorcha','La última antorcha se apaga. Alguien debe encender otra.'),('Protege el huevo','Un huevo de criatura rara rueda colina abajo.'),('Cofre sin dueño','Un cofre aparece en mitad del camino. El primero que llegue lo reclama.'),('Campana de alarma','Hay humo detrás de las murallas. ¡Haz sonar la campana!'),('La cuerda','Un aventurero resbala por un barranco. ¡Sujeta la cuerda!'),('Libro fugitivo','Un grimorio encantado intenta escapar volando.'),('La bolsa rota','Una bolsa de Kiwons se rompe en plena calle.'),('El portal','El portal sólo estará abierto unos segundos.'),('Bestia dormida','La bestia se durmió encima del objeto que buscan.'),('Último asiento','La carreta sale ya. Queda un lugar.')
+]): _EXTRA_QUICK.append({'key':f'live_speed_{i}','type':'speed','title':'⚡ '+title,'prompt':prompt,'kw':700+(i%5)*100,'exp':75+(i%4)*10})
+for i in range(20):
+    _EXTRA_QUICK.append({'key':f'live_target_{i}','type':'target','title':f'🎯 Disparo de oportunidad #{i+1}','prompt':random.choice(['Una cuerda sostiene un saco sobre los bandidos. Córtala con un disparo.','Una campana lejana debe sonar antes de que cierre la puerta.','Una criatura lleva una llave colgando. Intenta soltarla sin acertarle a la criatura.','Una botella marcada es la única que contiene el antídoto. Derríbala.']),'kw':850+(i%4)*100,'exp':85+(i%5)*8})
+for i in range(15):
+    _EXTRA_QUICK.append({'key':f'live_parity_{i}','type':'parity','title':f'🎲 Apuesta del camino #{i+1}','prompt':random.choice(['Un mercader lanza dos huesos dentro de una copa. ¿Par o impar?','Una puerta antigua pide una apuesta sencilla: par o impar.','Un duende asegura que puede adivinar tu elección. Demuéstrale lo contrario.']),'kw':800+(i%5)*100,'exp':80+(i%4)*10})
+for i in range(15):
+    _EXTRA_QUICK.append({'key':f'live_number_{i}','type':'number','title':f'🔢 Cerradura cambiante #{i+1}','prompt':random.choice(['La cerradura eligió un número del 1 al 5. Tienes tres intentos.','El alquimista olvidó qué frasco numerado era el correcto: 1 al 5.','Cinco runas brillan. Sólo una abre la puerta.']),'kw':900+(i%4)*100,'exp':90+(i%5)*8})
+# Evita duplicar al recargar en entornos que reutilicen módulo.
+_seen_q={str(x.get('key')) for x in RPG_QUICK_MISSIONS}
+RPG_QUICK_MISSIONS.extend(x for x in _EXTRA_QUICK if str(x.get('key')) not in _seen_q)
 
 # =========================================================
 # KIWRPG — HALLOWEEN ANTICIPADO + DULCE O TRUCO
@@ -22237,7 +22326,13 @@ def npc_moral_job_action(user_id,chat_id,job_id,action):
         if not str(action).startswith('atk_'):c.rollback();c.close();return 'Acción no válida.',None
         ability_key=str(action)[4:];ab=_rpg_get_ability(char['class_name'],ability_key)
         if not ab:c.rollback();c.close();return 'Ese movimiento no está disponible.',None
-        eff=effective_character_stats(char);roll=random.randint(1,6);power=float(ab.get('power') or 1.0);dmg=max(5,int(eff['atk']*power*(0.45+roll*0.09)));hp=max(0,hp-dmg);attacks+=1
+        eff=effective_character_stats(char)
+        set_current_combat_user(uid)
+        try:
+            _dr=send_dice(chat_id,'🎲') or {};roll=int((((_dr.get('result') or {}).get('dice') or {}).get('value') or 0))
+        finally:set_current_combat_user(None)
+        if roll<1 or roll>6:roll=random.randint(1,6)
+        power=float(ab.get('power') or 1.0);dmg=max(5,int(eff['atk']*power*(0.45+roll*0.09)));hp=max(0,hp-dmg);attacks+=1
         retaliation=max(1,int((6+attacks*2)*random.uniform(.7,1.2)));fresh=c.execute('SELECT hp FROM characters WHERE id=?',(int(char['id']),)).fetchone();curhp=int(fresh['hp']) if fresh else int(char['hp']);newphp=max(1,curhp-retaliation);c.execute('UPDATE characters SET hp=?,updated_at=? WHERE id=?',(newphp,now,int(char['id'])))
         if hp<=0:
             rep=_npc_moral_rep(p.get('moral'),'killed',attacks);reward=random.randint(1200,3200)

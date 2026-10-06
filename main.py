@@ -12585,21 +12585,50 @@ def _tower_start_or_get(uid):
             c.close()
     return prog,dict(fight),char
 
+def _tower_cooldowns(uid):
+    """Cooldown por habilidad en Torre. Persistente y separado de PvP/PvE normal."""
+    return _equipped_move_cd_map('tower',int(uid),int(uid))
+
+def _tower_ability_cd(ability):
+    if not ability: return 0
+    # Incluso las técnicas sin CD explícito descansan 1 turno; especiales/ultimates conservan su CD real.
+    if ability.get('ultimate'): return max(3,int(ability.get('cooldown') or 4))
+    if ability.get('special'): return max(2,int(ability.get('cooldown') or 2))
+    return max(1,int(ability.get('cooldown') or 1))
+
+def _tower_tick_cooldowns(uid,used_key=None,used_cd=0):
+    _ensure_equipped_move_cd_table(); now=int(time.time())
+    with db_lock:
+        c=get_db()
+        c.execute("UPDATE rpg_equipped_move_cooldowns SET remaining=GREATEST(0,remaining-1),updated_at=? WHERE scope='tower' AND context_id=? AND user_id=? AND remaining>0",(now,int(uid),int(uid)))
+        if used_key and used_cd>0:
+            c.execute("""INSERT INTO rpg_equipped_move_cooldowns(scope,context_id,user_id,ability_key,remaining,updated_at) VALUES('tower',?,?,?,?,?)
+                ON CONFLICT(scope,context_id,user_id,ability_key) DO UPDATE SET remaining=EXCLUDED.remaining,updated_at=EXCLUDED.updated_at""",(int(uid),int(uid),str(used_key),int(used_cd),now))
+        c.commit(); c.close()
+
 def _tower_keyboard(uid):
-    char=get_active_character(uid); skills=[]
+    char=get_active_character(uid); skills=[]; cds=_tower_cooldowns(uid)
     if char:
+        all_abs=[]
         for a in rpg_abilities_for(char.get('class_name')):
-            aa=_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a
-            skills.append({"text":f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}","callback_data":f"tower:skill:{aa['key']}"})
-        extras=[]
-        if has_special_technique(uid,'hidden_blade'): extras.append(_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade'))
-        extras += list(_equipped_gacha_weapon_abilities(uid,int(char['id'])) or [])
-        extras += list(_equipped_recuerdo_abilities(uid,int(char['id'])) or [])
-        for a in [x for x in extras if x]: skills.append({"text":f"{a.get('emoji','✨')} {a.get('name','Habilidad')}","callback_data":f"tower:skill:{a['key']}"})
-    rows=[skills[i:i+2] for i in range(0,len(skills),2)] if skills else [[{"text":"⚔️ Atacar","callback_data":"tower:attack"}]]
-    rows += [[{"text":"🛡️ Defender","callback_data":"tower:defend"},{"text":"🧪 Pociones","callback_data":"tower:potions"}],
-             [{"text":"📊 Progreso","callback_data":"tower:progress"},{"text":"🔄 Actualizar","callback_data":"tower:refresh"}]]
-    return {"inline_keyboard":rows}
+            all_abs.append(_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a)
+        if has_special_technique(uid,'hidden_blade'):
+            hb=_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade')
+            if hb: all_abs.append(hb)
+        all_abs += [x for x in (_equipped_gacha_weapon_abilities(uid,int(char['id'])) or []) if x]
+        all_abs += [x for x in (_equipped_recuerdo_abilities(uid,int(char['id'])) or []) if x]
+        seen=set()
+        for aa in all_abs:
+            key=str(aa.get('key') or '')
+            if not key or key in seen: continue
+            seen.add(key); rem=int(cds.get(key) or 0)
+            name=f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}"
+            if rem>0: skills.append({'text':f'⏳ {name} · {rem}t','callback_data':f'tower:cooldown:{rem}'})
+            else: skills.append({'text':name,'callback_data':f'tower:skill:{key}'})
+    rows=[skills[i:i+2] for i in range(0,len(skills),2)] if skills else [[{'text':'⚔️ Ataque básico','callback_data':'tower:attack'}]]
+    rows += [[{'text':'🛡️ Defender','callback_data':'tower:defend'},{'text':'🧪 Pociones','callback_data':'tower:potions'}],
+             [{'text':'📊 Progreso','callback_data':'tower:progress'},{'text':'🔄 Actualizar','callback_data':'tower:refresh'}]]
+    return {'inline_keyboard':rows}
 
 def _tower_card(uid):
     prog,f,char=_tower_start_or_get(uid)
@@ -12666,6 +12695,11 @@ def _tower_action(chat_id,thread_id,uid,defend=False,ability_key=None):
     if buff: atk+=round(atk*int(buff.get('atk_pct') or 0)/100); defense+=round(defense*int(buff.get('def_pct') or 0)/100)
     rolls=_tower_roll(chat_id,uid,bool(int(prog.get('double_dice') or 0))); roll=sum(rolls)
     ability=_rpg_get_ability_for_user(uid,char.get('class_name'),ability_key) if ability_key and char else None
+    if ability_key:
+        rem=int(_tower_cooldowns(uid).get(str(ability_key)) or 0)
+        if rem>0: return f'⏳ Esa habilidad sigue en cooldown: {rem} turno{"s" if rem!=1 else ""}.'
+    used_cd=_tower_ability_cd(ability) if ability_key else 0
+    _tower_tick_cooldowns(uid,ability_key,used_cd)
     if ability:
         mult=float(ability.get('power') or 1.0)*(0.72+roll*0.08); penetration=max(0.0,min(.90,float(ability.get('pen') or 0.0))); enemy_def=int(round(int(f['enemy_def'])*(1.0-penetration)))
     else: mult=0.65+roll*0.12; enemy_def=int(f['enemy_def'])
@@ -14916,6 +14950,11 @@ def handle_rpg_callback(query):
             try: iid=int(action.split(':',1)[1])
             except Exception: return True
             ok,txt=_tower_use_potion(uid,iid); card,kb,key=_tower_card(uid); send_message(chat_id,txt+"\n\n"+card,reply_markup=kb); return True
+        if action.startswith('cooldown:'):
+            try: rem=int(action.split(':',1)[1])
+            except Exception: rem=1
+            send_message(chat_id,f'⏳ Esa técnica todavía necesita {rem} turno{"s" if rem!=1 else ""} para volver a usarse.')
+            return True
         if action.startswith('skill:'):
             ability_key=action.split(':',1)[1]
             try:

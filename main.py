@@ -2,7 +2,6 @@ import threading
 from pathlib import Path
 import json
 import logging
-from kiwdnd import engine as kiwdnd_engine
 import hashlib
 import hmac
 from urllib.parse import parse_qsl
@@ -554,6 +553,13 @@ def init_db():
             ALTER TABLE characters
             ADD COLUMN IF NOT EXISTS portrait_file_id TEXT DEFAULT ''
         """)
+        # KiwRPG Identidad: compatible con todos los personajes veteranos.
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS origin_key TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS trait_key TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS evolution_key TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS awakening_key TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS portrait_prompt TEXT DEFAULT ''")
+        cur.execute("ALTER TABLE characters ADD COLUMN IF NOT EXISTS identity_updated_at BIGINT NOT NULL DEFAULT 0")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rpg_items (
@@ -4538,6 +4544,11 @@ RPG_CLASSES = {
     "paladin": {"hp": 130, "atk": 11, "defense": 10},
     "paladín": {"hp": 130, "atk": 11, "defense": 10},
     "arquero": {"hp": 100, "atk": 15, "defense": 6},
+    "cazador": {"hp": 105, "atk": 15, "defense": 6},
+    "vampiro": {"hp": 105, "atk": 16, "defense": 5},
+    "demonio": {"hp": 110, "atk": 17, "defense": 4},
+    "angel caido": {"hp": 115, "atk": 14, "defense": 7},
+    "ángel caído": {"hp": 115, "atk": 14, "defense": 7},
     # Clase secreta exclusiva de Kiu. La clave con espacio coincide con
     # get_rpg_class_stats("The Cleaner") -> "the cleaner".
     "the cleaner": {"hp": 130, "atk": 18, "defense": 9},
@@ -4552,6 +4563,11 @@ RPG_CLASS_LABELS = {
     "paladin": "Paladín",
     "paladín": "Paladín",
     "arquero": "Arquero",
+    "cazador": "Cazador",
+    "vampiro": "Vampiro",
+    "demonio": "Demonio",
+    "angel caido": "Ángel Caído",
+    "ángel caído": "Ángel Caído",
     "the cleaner": "The Cleaner",
     "the_cleaner": "The Cleaner",
 }
@@ -4677,7 +4693,9 @@ def character_card(row):
     hpbonus=f" (+{b['hp']} equipo)" if b['hp'] else ""
     level_text = f"{row['level']} — MAX" if int(row["level"]) >= RPG_MAX_LEVEL else str(row["level"])
     exp_text = "MAX" if int(row["level"]) >= RPG_MAX_LEVEL else str(row["exp"])
-    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {level_text} | EXP: {exp_text}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{extra}")
+    evo,_=_evolution_info(row) if '_evolution_info' in globals() else ("Sin ascender",{})
+    identity=(f"\n✨ {evo}" if evo!="Sin ascender" else ("\n✨ Ascensión disponible" if int(row['level'])>=100 else ""))
+    return (f"🧙 Personaje: {row['name']}\n⚔️ Clase: {row['class_name']}\n⭐ Nivel: {level_text} | EXP: {exp_text}\n❤️ HP: {row['hp']}/{maxhp}{hpbonus}\n🗡️ ATK: {atk} | 🛡️ DEF: {deff}{identity}{extra}")
 
 
 
@@ -6024,6 +6042,26 @@ RPG_ABILITIES = {
         {"key":"flecha_perforante","emoji":"🎯","name":"Flecha Perforante","power":1.122,"pen":0.55,"special":True,"cooldown":2},
         {"key":"lluvia_flechas","emoji":"🌧️","name":"Lluvia de Flechas","power":1.518,"pen":0.25,"ultimate":True,"cooldown":4},
     ],
+    "Cazador": [
+        {"key":"marca_cazador","emoji":"🎯","name":"Marca del Cazador","power":1.06,"pen":0.18},
+        {"key":"trampa_lunar","emoji":"🌙","name":"Trampa Lunar","power":1.12,"pen":0.28,"special":True,"cooldown":2},
+        {"key":"caceria_salvaje","emoji":"🐺","name":"Cacería Salvaje","power":1.48,"pen":0.30,"ultimate":True,"cooldown":4},
+    ],
+    "Vampiro": [
+        {"key":"garra_carmesi","emoji":"🩸","name":"Garra Carmesí","power":1.04,"pen":0.12},
+        {"key":"mordida_nocturna","emoji":"🦇","name":"Mordida Nocturna","power":1.05,"pen":0.18,"heal_pct":0.06,"special":True,"cooldown":3},
+        {"key":"luna_sangre","emoji":"🌑","name":"Luna de Sangre","power":1.42,"pen":0.28,"heal_pct":0.08,"ultimate":True,"cooldown":5},
+    ],
+    "Demonio": [
+        {"key":"garra_infernal","emoji":"😈","name":"Garra Infernal","power":1.08,"pen":0.10},
+        {"key":"llama_abismo","emoji":"🔥","name":"Llama del Abismo","power":1.16,"pen":0.32,"special":True,"cooldown":3},
+        {"key":"puerta_infierno","emoji":"🌋","name":"Puerta del Infierno","power":1.50,"pen":0.30,"ultimate":True,"cooldown":5},
+    ],
+    "Ángel Caído": [
+        {"key":"pluma_negra","emoji":"🪽","name":"Pluma Negra","power":1.02,"pen":0.14},
+        {"key":"juicio_caido","emoji":"⚫","name":"Juicio Caído","power":1.10,"pen":0.22,"heal_pct":0.04,"special":True,"cooldown":3},
+        {"key":"eclipse_serafin","emoji":"🌘","name":"Eclipse Serafín","power":1.40,"pen":0.26,"heal_pct":0.07,"ultimate":True,"cooldown":5},
+    ],
     "The Cleaner": [
         {"key":"v_trigger","emoji":"⚡","name":"V-Trigger","power":0.713,"pen":0.12},
         {"key":"snap_dragon","emoji":"🐉","name":"Snap Dragon","power":0.766,"pen":0.20,"high_roll_bonus":0.10,"special":True,"cooldown":3},
@@ -6932,6 +6970,10 @@ RPG_CLASS_INFO = {
     "picaro": {"label":"Pícaro","emoji":"🗡️","desc":"Ágil y agresivo. Especialista en críticos y evasión.","ability":"Crítico / evasión"},
     "paladin": {"label":"Paladín","emoji":"🛡️","desc":"La clase más resistente, con defensa y recuperación.","ability":"Bloqueo / recuperación"},
     "arquero": {"label":"Arquero","emoji":"🏹","desc":"Preciso y consistente. Premia las buenas tiradas.","ability":"Precisión"},
+    "cazador": {"label":"Cazador","emoji":"🐺","desc":"Especialista en rastrear presas y derribar enemigos resistentes.","ability":"Marca de presa"},
+    "vampiro": {"label":"Vampiro","emoji":"🩸","desc":"Agresivo y autosuficiente. Algunas técnicas recuperan vida.","ability":"Robo de vida"},
+    "demonio": {"label":"Demonio","emoji":"😈","desc":"Daño alto y defensa menor. Crece cuando la pelea se vuelve peligrosa.","ability":"Furia abisal"},
+    "angel_caido": {"label":"Ángel Caído","emoji":"🪽","desc":"Equilibrio entre daño, defensa y recuperación.","ability":"Última gracia"},
 }
 
 OWNER_RPG_CLASS = {"key":"the_cleaner","label":"The Cleaner","emoji":"🪽","hp":130,"atk":18,"defense":9,"desc":"Clase exclusiva de Kiu. One Winged Angel.","ability":"One Winged Angel"}
@@ -6975,7 +7017,9 @@ def creator_keyboard(user_id=None):
     rows=[
         [{"text":"⚔️ Guerrero","callback_data":"rpg_class:guerrero"},{"text":"🔮 Mago","callback_data":"rpg_class:mago"}],
         [{"text":"🗡️ Pícaro","callback_data":"rpg_class:picaro"},{"text":"🛡️ Paladín","callback_data":"rpg_class:paladin"}],
-        [{"text":"🏹 Arquero","callback_data":"rpg_class:arquero"}],
+        [{"text":"🏹 Arquero","callback_data":"rpg_class:arquero"},{"text":"🐺 Cazador","callback_data":"rpg_class:cazador"}],
+        [{"text":"🩸 Vampiro","callback_data":"rpg_class:vampiro"},{"text":"😈 Demonio","callback_data":"rpg_class:demonio"}],
+        [{"text":"🪽 Ángel Caído","callback_data":"rpg_class:angel_caido"}],
     ]
     if user_id is not None and is_owner(user_id):
         rows.append([{"text":"🪽 The Cleaner","callback_data":"rpg_class:the_cleaner"}])
@@ -7072,6 +7116,139 @@ def activate_combat_potion(user_id,item_key):
         c=get_db(); c.execute("INSERT INTO rpg_combat_potion_effects(user_id,effect_key,magnitude,expires_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,effect_key) DO UPDATE SET magnitude=EXCLUDED.magnitude,expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at",(int(user_id),effect,int(mag),exp,now)); c.commit(); c.close()
     return True,f"🧪 Efecto activado: +{mag}% {effect.upper()} durante 30 minutos. No se acumula; una nueva poción refresca/reemplaza el efecto."
 
+RPG_ORIGINS = {
+    "noble": ("👑 Noble", {"defense":1}, "Creciste entre privilegios y responsabilidades."),
+    "mercenario": ("⚔️ Mercenario", {"atk":1}, "Aprendiste a sobrevivir cobrando por tu espada."),
+    "exiliado": ("🌑 Exiliado", {"hp":8}, "Perdiste un hogar, no las ganas de seguir."),
+    "erudito": ("📚 Erudito", {"exp_pct":3}, "Aprendes un poco más de cada victoria."),
+    "forastero": ("🧭 Forastero", {"kiw_pct":3}, "Siempre encuentras una oportunidad donde otros no miran."),
+}
+RPG_TRAITS = {
+    "afortunado": ("🍀 Afortunado", {"kiw_pct":4}, "Las recompensas suelen sonreírte."),
+    "temerario": ("🔥 Temerario", {"atk":1}, "Golpeas un poco más fuerte."),
+    "duro": ("💀 Duro de matar", {"hp":10}, "Tienes una reserva extra de vida."),
+    "disciplinado": ("🎯 Disciplinado", {"defense":1}, "La constancia te vuelve más difícil de derribar."),
+    "cazatesoros": ("💎 Cazatesoros", {"kiw_pct":5}, "Obtienes un pequeño extra económico en recompensas compatibles."),
+}
+RPG_EVOLUTIONS = {
+    "Guerrero": [("berserker","🩸 Berserker",{"atk":5,"hp":15}),("caballero_imperial","🛡️ Caballero Imperial",{"defense":4,"hp":25})],
+    "Mago": [("archimago","✨ Archimago",{"atk":6}),("nigromante","💀 Nigromante",{"atk":4,"hp":20})],
+    "Pícaro": [("sombra","🌑 Sombra",{"atk":5,"defense":2}),("verdugo","☠️ Verdugo",{"atk":7})],
+    "Paladín": [("guardian_celestial","👼 Guardián Celestial",{"defense":5,"hp":25}),("paladin_caido","🔥 Paladín Caído",{"atk":5,"defense":2})],
+    "Arquero": [("ojo_halcon","🦅 Ojo de Halcón",{"atk":5,"defense":1}),("arquero_astral","🌌 Arquero Astral",{"atk":4,"hp":15})],
+    "Cazador": [("cazador_demonios","😈 Cazador de Demonios",{"atk":6,"defense":1}),("maestro_bestias","🐺 Maestro de Bestias",{"atk":3,"hp":25})],
+    "Vampiro": [("senor_vampiro","👑 Señor Vampiro",{"atk":5,"hp":20}),("caminante_nocturno","🌙 Caminante Nocturno",{"atk":3,"defense":3})],
+    "Demonio": [("archidemonio","🔥 Archidemonio",{"atk":7}),("senor_abismo","🕳️ Señor del Abismo",{"atk":4,"defense":3,"hp":15})],
+    "Ángel Caído": [("serafin_renacido","🪽 Serafín Renacido",{"defense":4,"hp":25}),("angel_fin","⚫ Ángel del Fin",{"atk":6,"defense":1})],
+    "The Cleaner": [("best_bout_machine","⭐ Best Bout Machine",{"atk":6,"defense":2}),("one_winged_legend","🪽 One Winged Legend",{"atk":5,"hp":25})],
+}
+
+def _identity_choice_label(mapping,key):
+    item=mapping.get(str(key or ''))
+    return item[0] if item else "Sin elegir"
+
+def _evolution_info(char):
+    opts=RPG_EVOLUTIONS.get(str(char.get('class_name') or ''),[])
+    key=str(char.get('evolution_key') or '')
+    for k,label,bonus in opts:
+        if k==key: return label,bonus
+    return "Sin ascender",{}
+
+def rpg_identity_bonus(char):
+    out={"atk":0,"defense":0,"hp":0}
+    for mapping,key in ((RPG_ORIGINS,char.get('origin_key')),(RPG_TRAITS,char.get('trait_key'))):
+        item=mapping.get(str(key or ''))
+        if item:
+            for k,v in item[1].items():
+                if k in out: out[k]+=int(v)
+    _,eb=_evolution_info(char)
+    for k,v in eb.items():
+        if k in out: out[k]+=int(v)
+    # Hitos: pequeños, universales y retroactivos.
+    lv=int(char.get('level') or 1)
+    if lv>=25: out['hp']+=5
+    if lv>=50: out['atk']+=1
+    if lv>=75: out['defense']+=1
+    return out
+
+def rpg_identity_text(char):
+    if not char: return "No tienes personaje activo."
+    evo,_=_evolution_info(char)
+    lv=int(char.get('level') or 1)
+    asc="✨ ASCENSIÓN DISPONIBLE" if lv>=100 and not str(char.get('evolution_key') or '') else evo
+    return (f"🧬 IDENTIDAD DE {char['name']}\n\n"
+            f"⚔️ Clase: {char['class_name']}\n"
+            f"🌍 Origen: {_identity_choice_label(RPG_ORIGINS,char.get('origin_key'))}\n"
+            f"🧬 Rasgo: {_identity_choice_label(RPG_TRAITS,char.get('trait_key'))}\n"
+            f"✨ Evolución: {asc}\n\n"
+            "Los bonos son pequeños y permanentes; la evolución de Nv.100 es la gran decisión.")
+
+def rpg_main_menu(user_id):
+    char=get_active_character(user_id)
+    if not char:
+        return "⚔️ K I W R P G\n\nAún no tienes personaje activo.", {"inline_keyboard":[[{"text":"🧙 Crear personaje","callback_data":"rpg_create_back"}]]}
+    evo,_=_evolution_info(char); lv=int(char.get('level') or 1)
+    asc=" · ✨ ASCENSIÓN" if lv>=100 and not str(char.get('evolution_key') or '') else ""
+    text=(f"⚔️ K I W R P G ⚔️\n━━━━━━━━━━━━━━━━━━\n🧙 {char['name']}\n"
+          f"{char['class_name']} · Nivel {lv}{asc}\n{evo if evo!='Sin ascender' else ''}").rstrip()
+    kb={"inline_keyboard":[
+        [{"text":"👤 Mi personaje","callback_data":"rpg_hub:character"},{"text":"⚔️ Combate","callback_data":"rpg_hub:combat"}],
+        [{"text":"🏰 Torre","callback_data":"rpg_hub:tower"},{"text":"📜 Misiones","callback_data":"rpg_hub:missions"}],
+        [{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},{"text":"🐉 Mascotas","callback_data":"rpg_hub:pets"}],
+        [{"text":"✨ Habilidades","callback_data":"rpg_hub:skills"},{"text":"🏆 Logros","callback_data":"rpg_hub:achievements"}],
+        [{"text":"🖼️ Retrato","callback_data":"rpg_hub:portrait"},{"text":"🧬 Identidad","callback_data":"rpg_hub:identity"}],
+    ]}
+    if lv>=100 and not str(char.get('evolution_key') or ''): kb['inline_keyboard'].insert(0,[{"text":"✨ ASCENDER CLASE","callback_data":"rpg_hub:ascend"}])
+    return text,kb
+
+def _rpg_back_kb(): return {"inline_keyboard":[[{"text":"⬅️ KiwRPG","callback_data":"rpg_hub:home"}]]}
+
+def _rpg_identity_keyboard(char):
+    rows=[]
+    if not str(char.get('origin_key') or ''): rows.append([{"text":"🌍 Elegir origen","callback_data":"rpg_hub:origins"}])
+    if not str(char.get('trait_key') or ''): rows.append([{"text":"🧬 Elegir rasgo","callback_data":"rpg_hub:traits"}])
+    if int(char.get('level') or 1)>=100 and not str(char.get('evolution_key') or ''): rows.append([{"text":"✨ Ascensión Nv.100","callback_data":"rpg_hub:ascend"}])
+    rows.append([{"text":"⬅️ KiwRPG","callback_data":"rpg_hub:home"}]); return {"inline_keyboard":rows}
+
+def _rpg_save_identity(uid,column,value):
+    allowed={'origin_key','trait_key','evolution_key','portrait_file_id','portrait_prompt'}
+    if column not in allowed: return False
+    char=get_active_character(uid)
+    if not char: return False
+    with db_lock:
+        c=get_db(); c.execute(f"UPDATE characters SET {column}=?,identity_updated_at=?,updated_at=? WHERE id=?",(str(value),int(time.time()),int(time.time()),int(char['id']))); c.commit(); c.close()
+    return True
+
+def generate_rpg_character_portrait(chat_id,user_id):
+    char=get_active_character(user_id)
+    if not char: raise RuntimeError("No tienes personaje activo.")
+    cached=str(char.get('portrait_file_id') or '').strip()
+    if cached:
+        return telegram('sendPhoto',{'chat_id':int(chat_id),'photo':cached,'caption':f"🖼️ {char['name']} · {char['class_name']}"})
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN: raise RuntimeError("Falta configurar Cloudflare Workers AI.")
+    evo,_=_evolution_info(char); origin=_identity_choice_label(RPG_ORIGINS,char.get('origin_key')); trait=_identity_choice_label(RPG_TRAITS,char.get('trait_key'))
+    prompt=("Premium dark fantasy RPG character portrait, full body, cinematic, unique silhouette, no text, no logo, no watermark. "
+            f"Character {char['name']}, class {char['class_name']}, origin {origin}, trait {trait}, evolution {evo}. "
+            "Aeternus fantasy world, detailed practical equipment, dramatic natural lighting, character-centered composition.")
+    ok,used,limit,day=_rpg_ai_usage_reserve()
+    if not ok: raise RuntimeError(f"Límite diario de arte IA alcanzado ({used}/{limit}).")
+    try:
+        url=f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+        r=TELEGRAM_SESSION.post(url,headers={'Authorization':f'Bearer {CLOUDFLARE_API_TOKEN}','Content-Type':'application/json'},json={'prompt':prompt},timeout=90)
+        if r.status_code!=200: raise RuntimeError(f"Cloudflare HTTP {r.status_code}")
+        raw=r.content; ctype=str(r.headers.get('content-type') or '').lower()
+        if 'application/json' in ctype:
+            payload=r.json(); result=payload.get('result') if isinstance(payload,dict) else {}; b64=(result or {}).get('image') or (result or {}).get('data')
+            if not b64: raise RuntimeError('Cloudflare devolvió JSON sin imagen.')
+            import base64; raw=base64.b64decode(b64); ctype='image/png'
+        sent=send_photo_bytes(chat_id,raw,caption=f"🎨 {char['name']} · {char['class_name']}\n💾 Retrato guardado",content_type=(ctype.split(';',1)[0] or 'image/png'))
+        photos=((sent or {}).get('result') or {}).get('photo') or []; fid=str((photos[-1] if photos else {}).get('file_id') or '')
+        if not fid: raise RuntimeError('Telegram no devolvió file_id.')
+        _rpg_save_identity(user_id,'portrait_file_id',fid); _rpg_save_identity(user_id,'portrait_prompt',prompt)
+        return sent
+    except Exception:
+        _rpg_ai_usage_release(day); raise
+
 def effective_character_stats(char):
     """Stats efectivos con una sola sesión DB en el camino caliente.
 
@@ -7098,21 +7275,22 @@ def effective_character_stats(char):
         b["hp"]+=int(r.get("hp_bonus") or 0)+int(fb.get("hp") or 0)+int(r.get("enchant_hp") or 0)
 
     lvlb=rpg_level_character_bonus(char)
+    ident=rpg_identity_bonus(char)
     # El antiguo toggle de Espadas del Ángel fue retirado.
     # The Cleaner obtiene sus bonos exclusivamente del equipo real que lleve puesto.
     secret_atk=0
     founder={"atk":3,"defense":3,"hp":30} if founder_row else {"atk":0,"defense":0,"hp":0}
-    pre_atk=int(char["atk"])+b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]
-    pre_def=int(char["defense"])+b["defense"]+lvlb["defense"]+founder["defense"]
-    pre_hp=int(char["max_hp"])+b["hp"]+lvlb["hp"]+founder["hp"]
+    pre_atk=int(char["atk"])+b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]+ident["atk"]
+    pre_def=int(char["defense"])+b["defense"]+lvlb["defense"]+founder["defense"]+ident["defense"]
+    pre_hp=int(char["max_hp"])+b["hp"]+lvlb["hp"]+founder["hp"]+ident["hp"]
     bases={"atk":pre_atk,"defense":pre_def,"hp":pre_hp}; pot={"atk":0,"defense":0,"hp":0}
     for r in potion_rows:
         k=str(r.get("effect_key") or ""); mag=int(r.get("magnitude") or 0)
         if k in pot:
             pot[k]=max(pot[k],int(round(bases[k]*mag/100.0)))
-    total_bonus={"atk":b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]+pot["atk"],
-                 "defense":b["defense"]+lvlb["defense"]+founder["defense"]+pot["defense"],
-                 "hp":b["hp"]+lvlb["hp"]+founder["hp"]+pot["hp"]}
+    total_bonus={"atk":b["atk"]+secret_atk+lvlb["atk"]+founder["atk"]+ident["atk"]+pot["atk"],
+                 "defense":b["defense"]+lvlb["defense"]+founder["defense"]+ident["defense"]+pot["defense"],
+                 "hp":b["hp"]+lvlb["hp"]+founder["hp"]+ident["hp"]+pot["hp"]}
     return {"atk":int(char["atk"])+total_bonus["atk"],
             "defense":int(char["defense"])+total_bonus["defense"],
             "max_hp":int(char["max_hp"])+total_bonus["hp"],
@@ -12585,50 +12763,21 @@ def _tower_start_or_get(uid):
             c.close()
     return prog,dict(fight),char
 
-def _tower_cooldowns(uid):
-    """Cooldown por habilidad en Torre. Persistente y separado de PvP/PvE normal."""
-    return _equipped_move_cd_map('tower',int(uid),int(uid))
-
-def _tower_ability_cd(ability):
-    if not ability: return 0
-    # Incluso las técnicas sin CD explícito descansan 1 turno; especiales/ultimates conservan su CD real.
-    if ability.get('ultimate'): return max(3,int(ability.get('cooldown') or 4))
-    if ability.get('special'): return max(2,int(ability.get('cooldown') or 2))
-    return max(1,int(ability.get('cooldown') or 1))
-
-def _tower_tick_cooldowns(uid,used_key=None,used_cd=0):
-    _ensure_equipped_move_cd_table(); now=int(time.time())
-    with db_lock:
-        c=get_db()
-        c.execute("UPDATE rpg_equipped_move_cooldowns SET remaining=GREATEST(0,remaining-1),updated_at=? WHERE scope='tower' AND context_id=? AND user_id=? AND remaining>0",(now,int(uid),int(uid)))
-        if used_key and used_cd>0:
-            c.execute("""INSERT INTO rpg_equipped_move_cooldowns(scope,context_id,user_id,ability_key,remaining,updated_at) VALUES('tower',?,?,?,?,?)
-                ON CONFLICT(scope,context_id,user_id,ability_key) DO UPDATE SET remaining=EXCLUDED.remaining,updated_at=EXCLUDED.updated_at""",(int(uid),int(uid),str(used_key),int(used_cd),now))
-        c.commit(); c.close()
-
 def _tower_keyboard(uid):
-    char=get_active_character(uid); skills=[]; cds=_tower_cooldowns(uid)
+    char=get_active_character(uid); skills=[]
     if char:
-        all_abs=[]
         for a in rpg_abilities_for(char.get('class_name')):
-            all_abs.append(_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a)
-        if has_special_technique(uid,'hidden_blade'):
-            hb=_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade')
-            if hb: all_abs.append(hb)
-        all_abs += [x for x in (_equipped_gacha_weapon_abilities(uid,int(char['id'])) or []) if x]
-        all_abs += [x for x in (_equipped_recuerdo_abilities(uid,int(char['id'])) or []) if x]
-        seen=set()
-        for aa in all_abs:
-            key=str(aa.get('key') or '')
-            if not key or key in seen: continue
-            seen.add(key); rem=int(cds.get(key) or 0)
-            name=f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}"
-            if rem>0: skills.append({'text':f'⏳ {name} · {rem}t','callback_data':f'tower:cooldown:{rem}'})
-            else: skills.append({'text':name,'callback_data':f'tower:skill:{key}'})
-    rows=[skills[i:i+2] for i in range(0,len(skills),2)] if skills else [[{'text':'⚔️ Ataque básico','callback_data':'tower:attack'}]]
-    rows += [[{'text':'🛡️ Defender','callback_data':'tower:defend'},{'text':'🧪 Pociones','callback_data':'tower:potions'}],
-             [{'text':'📊 Progreso','callback_data':'tower:progress'},{'text':'🔄 Actualizar','callback_data':'tower:refresh'}]]
-    return {'inline_keyboard':rows}
+            aa=_rpg_get_ability_for_user(uid,char.get('class_name'),a['key']) or a
+            skills.append({"text":f"{aa.get('emoji','⚔️')} {aa.get('name','Ataque')}","callback_data":f"tower:skill:{aa['key']}"})
+        extras=[]
+        if has_special_technique(uid,'hidden_blade'): extras.append(_rpg_get_ability_for_user(uid,char.get('class_name'),'hidden_blade'))
+        extras += list(_equipped_gacha_weapon_abilities(uid,int(char['id'])) or [])
+        extras += list(_equipped_recuerdo_abilities(uid,int(char['id'])) or [])
+        for a in [x for x in extras if x]: skills.append({"text":f"{a.get('emoji','✨')} {a.get('name','Habilidad')}","callback_data":f"tower:skill:{a['key']}"})
+    rows=[skills[i:i+2] for i in range(0,len(skills),2)] if skills else [[{"text":"⚔️ Atacar","callback_data":"tower:attack"}]]
+    rows += [[{"text":"🛡️ Defender","callback_data":"tower:defend"},{"text":"🧪 Pociones","callback_data":"tower:potions"}],
+             [{"text":"📊 Progreso","callback_data":"tower:progress"},{"text":"🔄 Actualizar","callback_data":"tower:refresh"}]]
+    return {"inline_keyboard":rows}
 
 def _tower_card(uid):
     prog,f,char=_tower_start_or_get(uid)
@@ -12695,11 +12844,6 @@ def _tower_action(chat_id,thread_id,uid,defend=False,ability_key=None):
     if buff: atk+=round(atk*int(buff.get('atk_pct') or 0)/100); defense+=round(defense*int(buff.get('def_pct') or 0)/100)
     rolls=_tower_roll(chat_id,uid,bool(int(prog.get('double_dice') or 0))); roll=sum(rolls)
     ability=_rpg_get_ability_for_user(uid,char.get('class_name'),ability_key) if ability_key and char else None
-    if ability_key:
-        rem=int(_tower_cooldowns(uid).get(str(ability_key)) or 0)
-        if rem>0: return f'⏳ Esa habilidad sigue en cooldown: {rem} turno{"s" if rem!=1 else ""}.'
-    used_cd=_tower_ability_cd(ability) if ability_key else 0
-    _tower_tick_cooldowns(uid,ability_key,used_cd)
     if ability:
         mult=float(ability.get('power') or 1.0)*(0.72+roll*0.08); penetration=max(0.0,min(.90,float(ability.get('pen') or 0.0))); enemy_def=int(round(int(f['enemy_def'])*(1.0-penetration)))
     else: mult=0.65+roll*0.12; enemy_def=int(f['enemy_def'])
@@ -14950,11 +15094,6 @@ def handle_rpg_callback(query):
             try: iid=int(action.split(':',1)[1])
             except Exception: return True
             ok,txt=_tower_use_potion(uid,iid); card,kb,key=_tower_card(uid); send_message(chat_id,txt+"\n\n"+card,reply_markup=kb); return True
-        if action.startswith('cooldown:'):
-            try: rem=int(action.split(':',1)[1])
-            except Exception: rem=1
-            send_message(chat_id,f'⏳ Esa técnica todavía necesita {rem} turno{"s" if rem!=1 else ""} para volver a usarse.')
-            return True
         if action.startswith('skill:'):
             ability_key=action.split(':',1)[1]
             try:
@@ -15059,6 +15198,63 @@ def handle_rpg_callback(query):
                                   'marry_accept:','clan_join:','story_choice:','tower:')
         if (not _allowed) and data.startswith(_other_gameplay_prefixes):
             send_message(chat_id,_combat_lock_message(_busy_state))
+            return True
+
+    if data.startswith("rpg_hub:"):
+        act=data.split(":",1)[1]; char=get_active_character(uid)
+        if act=='home': txt,kb=rpg_main_menu(uid); send_message(chat_id,txt,reply_markup=kb); return True
+        if not char: send_message(chat_id,'No tienes personaje activo.'); return True
+        if act=='character': send_message(chat_id,character_card(char),reply_markup=_rpg_back_kb()); return True
+        if act=='identity': send_message(chat_id,rpg_identity_text(char),reply_markup=_rpg_identity_keyboard(char)); return True
+        if act=='origins':
+            rows=[[{'text':v[0],'callback_data':f'rpg_origin:{k}'}] for k,v in RPG_ORIGINS.items()]; rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}]); send_message(chat_id,'🌍 ELIGE TU ORIGEN\n\nEs permanente para este personaje. El bono es pequeño.',reply_markup={'inline_keyboard':rows}); return True
+        if act=='traits':
+            # Tres opciones estables por personaje: variedad sin reroll infinito.
+            keys=list(RPG_TRAITS); rng=random.Random(int(char['id'])*7919); rng.shuffle(keys); keys=keys[:3]
+            rows=[[{'text':RPG_TRAITS[k][0],'callback_data':f'rpg_trait:{k}'}] for k in keys]; rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}]); send_message(chat_id,'🧬 ELIGE UN RASGO\n\nTe salieron estas tres opciones. La elección es permanente.',reply_markup={'inline_keyboard':rows}); return True
+        if act=='ascend':
+            if int(char['level'])<100: send_message(chat_id,'🔒 La Ascensión se desbloquea al nivel 100.',reply_markup=_rpg_back_kb()); return True
+            if str(char.get('evolution_key') or ''): send_message(chat_id,'✨ Este personaje ya realizó su Ascensión.',reply_markup=_rpg_back_kb()); return True
+            opts=RPG_EVOLUTIONS.get(str(char['class_name']),[])
+            rows=[[{'text':label,'callback_data':f'rpg_evolve:{key}'}] for key,label,_ in opts]; rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}])
+            desc=['✨ ASCENSIÓN — NIVEL 100','',f"{char['name']} puede evolucionar su clase.",'','Esta elección es permanente.']
+            for key,label,b in opts: desc.append(f"\n{label}: "+' · '.join(f"+{v} {k.upper()}" for k,v in b.items()))
+            send_message(chat_id,'\n'.join(desc),reply_markup={'inline_keyboard':rows}); return True
+        if act=='portrait': send_message(chat_id,'🖼️ RETRATO\n\nGenera un retrato con IA o responde a tu propia foto con /retrato guardar.',reply_markup={'inline_keyboard':[[{'text':'🎨 Crear con IA','callback_data':'rpg_portrait:ai'},{'text':'👁️ Ver','callback_data':'rpg_portrait:view'}],[{'text':'⬅️ KiwRPG','callback_data':'rpg_hub:home'}]]}); return True
+        if act=='combat': send_message(chat_id,'⚔️ COMBATE\n\nUsa /encuentro para una aparición o entra a PvP desde /duelo.',reply_markup=_rpg_back_kb()); return True
+        if act=='tower': card,kb,key=_tower_card(uid); send_message(chat_id,card,reply_markup=kb); return True
+        if act=='missions': send_message(chat_id,'📜 MISIONES\n\nUsa /misiones para abrir tus misiones disponibles.',reply_markup=_rpg_back_kb()); return True
+        if act=='pets': txt,kb=pets_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+        if act=='skills': txt,kb=techniques_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
+        if act=='achievements': send_message(chat_id,chronicles_achievements_text(uid),reply_markup=_rpg_back_kb()); return True
+        return True
+    if data.startswith('rpg_origin:'):
+        char=get_active_character(uid); key=data.split(':',1)[1]
+        if not char or str(char.get('origin_key') or ''): send_message(chat_id,'Ese personaje ya eligió origen.'); return True
+        if key not in RPG_ORIGINS: return True
+        _rpg_save_identity(uid,'origin_key',key); send_message(chat_id,f"🌍 Origen elegido: {RPG_ORIGINS[key][0]}",reply_markup=_rpg_back_kb()); return True
+    if data.startswith('rpg_trait:'):
+        char=get_active_character(uid); key=data.split(':',1)[1]
+        if not char or str(char.get('trait_key') or ''): send_message(chat_id,'Ese personaje ya eligió rasgo.'); return True
+        if key not in RPG_TRAITS: return True
+        _rpg_save_identity(uid,'trait_key',key); send_message(chat_id,f"🧬 Rasgo elegido: {RPG_TRAITS[key][0]}",reply_markup=_rpg_back_kb()); return True
+    if data.startswith('rpg_evolve:'):
+        char=get_active_character(uid); key=data.split(':',1)[1]
+        if not char or int(char['level'])<100 or str(char.get('evolution_key') or ''): send_message(chat_id,'No puedes realizar esa Ascensión.'); return True
+        opt=next((x for x in RPG_EVOLUTIONS.get(str(char['class_name']),[]) if x[0]==key),None)
+        if not opt: return True
+        _rpg_save_identity(uid,'evolution_key',key); send_message(chat_id,f"✨ ASCENSIÓN COMPLETA\n\n{char['name']} ahora es {opt[1]}.\nLos nuevos bonos ya están activos.",reply_markup=_rpg_back_kb()); return True
+    if data.startswith('rpg_portrait:'):
+        act=data.split(':',1)[1]; char=get_active_character(uid)
+        if not char: send_message(chat_id,'No tienes personaje activo.'); return True
+        if act=='view':
+            fid=str(char.get('portrait_file_id') or '')
+            if not fid: send_message(chat_id,'🖼️ Todavía no tienes retrato.',reply_markup=_rpg_back_kb()); return True
+            telegram('sendPhoto',{'chat_id':int(chat_id),'photo':fid,'caption':f"🖼️ {char['name']} · {char['class_name']}"}); return True
+        if act=='ai':
+            if str(char.get('portrait_file_id') or ''): send_message(chat_id,'🖼️ Ya tienes retrato. Para evitar gastar IA no lo regeneré automáticamente.',reply_markup=_rpg_back_kb()); return True
+            try: generate_rpg_character_portrait(chat_id,uid)
+            except Exception as e: send_message(chat_id,f"No pude crear el retrato: {e}")
             return True
 
     if data.startswith("rpg_switch:"):
@@ -17672,10 +17868,6 @@ def process_command(
     text
 ):
 
-    # KiwD&D vive en su propio módulo y sus comandos no caen al RPG/IA.
-    if kiwdnd_engine.handle_command(message, text):
-        return True
-
     chat = message.get(
         "chat",
         {}
@@ -18019,25 +18211,16 @@ def process_command(
     # -----------------------------------------------------
 
     if command in ("/rpg", "/kiwrpg"):
-        send_message(
-            chat_id,
-            "⚔️ KIWRPG — V6.0\n\n"
-            "/duelo — duelo amistoso (no afecta ranking)\n"
-            "/duelo @usuario — amistoso directo\n"
-            "/duelopvp — clasificatoria abierta · /duelopvp @usuario — reto clasificatorio\n"
-            "/rendirse — abandonar el duelo actual\n"
-            "/pvp — perfil de la temporada · /rankingpvp — clasificación de temporada\n"
-            "/encuentro — combate y apariciones por rareza\n"
-            "/huir — abandona el encuentro actual\n"
-            "/inventario — objetos con botones\n"
-            "/tienda — compra consumibles y equipo básico con Kiwons\n"
-            "/materiales — materiales reunidos\n"
-            "/equipo — equipo y estadísticas totales\n"
-            "/personaje — muestra tu personaje\n"
-            "/heroes — salón de eras anteriores\n\n"
-            "En combate elige tus movimientos con botones. KiwBot lanza el dado REAL 🎲 de Telegram automáticamente."
-        )
-        return True
+        txt,kb=rpg_main_menu(message.get("from",{}).get("id")); send_message(chat_id,txt,reply_markup=kb); return True
+
+    if command in ("/retrato", "/portrait"):
+        uid=message.get("from",{}).get("id"); char=get_active_character(uid)
+        if not char: send_message(chat_id,"Primero crea o activa un personaje."); return True
+        reply=message.get("reply_to_message") or {}; photos=reply.get("photo") or message.get("photo") or []
+        if photos and ("guardar" in str(text).lower() or message.get("photo")):
+            fid=str(photos[-1].get("file_id") or "")
+            if fid: _rpg_save_identity(uid,"portrait_file_id",fid); send_message(chat_id,"🖼️ Retrato guardado para tu personaje.",reply_markup=_rpg_back_kb()); return True
+        send_message(chat_id,"🖼️ RETRATO DEL PERSONAJE\n\nPuedes generar uno con IA o usar tu propia imagen respondiendo a una foto con /retrato guardar.",reply_markup={"inline_keyboard":[[{"text":"🎨 Crear con IA","callback_data":"rpg_portrait:ai"},{"text":"👁️ Ver retrato","callback_data":"rpg_portrait:view"}],[{"text":"⬅️ KiwRPG","callback_data":"rpg_hub:home"}]]}); return True
 
     if command in ("/duelo", "/duelopvp"):
         duel_mode="ranked" if command=="/duelopvp" else "friendly"
@@ -20115,8 +20298,6 @@ def process_update(
             callback_message = callback_query.get("message") or {}
             set_current_combat_user((callback_query.get("from") or {}).get("id"))
             set_current_message_thread_id(callback_message.get("message_thread_id"))
-            if kiwdnd_engine.handle_callback(callback_query):
-                return
             handle_rpg_callback(callback_query)
             return
 
@@ -20204,10 +20385,6 @@ def process_update(
             # Esto evita que Groq invente respuestas para comandos RPG mal escritos
             # (por ejemplo, /generarimagen) o comandos destinados a otros bots.
             logger.info("Comando no manejado ignorado: %s | chat=%s | user=%s", command_name(text), chat_id, user_id)
-            return
-
-        # KiwD&D solo consume mensajes/dados dentro del tema que tiene una campaña activa.
-        if kiwdnd_engine.handle_message(message, text):
             return
 
         if handle_reset_password_message(message, text):
@@ -20753,143 +20930,7 @@ def index():
 # =========================================================
 
 
-def send_kiwdnd_topic_message(chat_id, thread_id, text, reply_markup=None):
-    """Envía KiwD&D exclusivamente al tema al que pertenece la campaña."""
-    if not text:
-        return None
-    raw=str(text)
-    # Divide narraciones largas sin partir palabras/oraciones cuando sea posible.
-    limit=min(int(TELEGRAM_MAX_CHARS or 4096),3900)
-    chunks=[]
-    while len(raw)>limit:
-        cut=max(raw.rfind("\n\n",0,limit),raw.rfind("\n",0,limit),raw.rfind(". ",0,limit),raw.rfind(" ",0,limit))
-        if cut < int(limit*0.55): cut=limit
-        else:
-            if raw[cut:cut+2]==". ": cut+=1
-        chunks.append(raw[:cut].rstrip())
-        raw=raw[cut:].lstrip()
-    if raw: chunks.append(raw)
-    result=None
-    for index,chunk in enumerate(chunks):
-        data={"chat_id":int(chat_id),"text":chunk}
-        if int(thread_id or 0): data["message_thread_id"]=int(thread_id)
-        if reply_markup and index==0: data["reply_markup"]=reply_markup
-        result=telegram("sendMessage",data)
-    return result
-
-def generate_kiwdnd_character_portrait(chat_id, character, thread_id=0):
-    """Retrato D&D persistente: reutiliza el file_id de Telegram y solo genera una vez."""
-    appearance=str(character.get('appearance') or '').strip()
-    if not appearance:
-        raise RuntimeError("Primero describe tu personaje con: Apariencia: ...")
-
-    # CACHE PRIMERO: volver a ver el retrato no consume Workers AI.
-    cached_file_id=str(character.get('portrait_file_id') or '').strip()
-    if cached_file_id:
-        data={
-            "chat_id": int(chat_id),
-            "photo": cached_file_id,
-            "caption": f"🎨 {character.get('name')} · {character.get('class_name')}\n♻️ Retrato guardado",
-        }
-        if int(thread_id or 0):
-            data["message_thread_id"]=int(thread_id)
-        result=telegram("sendPhoto",data)
-        if isinstance(result,dict) and result.get("ok"):
-            return result
-        # Nunca regenerar automáticamente si Telegram rechazara el caché:
-        # así un fallo temporal no puede gastar otra generación.
-        raise RuntimeError("El retrato guardado no pudo enviarse. No generé otro para evitar gastar IA.")
-
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        raise RuntimeError("Falta configurar Cloudflare Workers AI.")
-
-    prompt=(
-        "Premium dark fantasy tabletop RPG character concept art, full body, cinematic and emotionally expressive, "
-        f"character name {character.get('name')}, class {character.get('class_name')}. "
-        f"Canonical appearance: {appearance}. "
-        "Aeternus dark fantasy world, believable clothing and equipment, unique silhouette, dramatic natural lighting, "
-        "no text, no letters, no logo, no watermark, no UI, no border."
-    )
-    ok,used,limit,day=_rpg_ai_usage_reserve()
-    if not ok:
-        raise RuntimeError(f"Límite diario de arte IA alcanzado ({used}/{limit}).")
-    url=f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
-    try:
-        r=TELEGRAM_SESSION.post(
-            url,
-            headers={"Authorization":f"Bearer {CLOUDFLARE_API_TOKEN}","Content-Type":"application/json"},
-            json={"prompt":prompt},
-            timeout=90,
-        )
-        if r.status_code!=200:
-            raise RuntimeError(f"Cloudflare HTTP {r.status_code}: {(r.text or '')[:400]}")
-        ctype=str(r.headers.get('content-type') or '').lower()
-        raw=r.content
-        if 'application/json' in ctype:
-            payload=r.json()
-            result=payload.get('result') if isinstance(payload,dict) else None
-            b64=(result or {}).get('image') if isinstance(result,dict) else None
-            if not b64 and isinstance(result,dict): b64=result.get('data')
-            if not b64 and isinstance(payload,dict): b64=payload.get('image')
-            if not b64: raise RuntimeError("Cloudflare devolvió JSON sin imagen.")
-            import base64
-            raw=base64.b64decode(b64)
-            ctype='image/png'
-        if len(raw)<1000:
-            raise RuntimeError("Cloudflare devolvió una imagen vacía.")
-
-        sent=send_photo_bytes(
-            chat_id,raw,
-            caption=f"🎨 {character.get('name')} · {character.get('class_name')}\n💾 Retrato guardado permanentemente",
-            message_thread_id=(int(thread_id) if thread_id else None),
-            content_type=(ctype.split(';',1)[0] or 'image/png'),
-        )
-        photos=((sent or {}).get("result") or {}).get("photo") or []
-        file_id=str((photos[-1] if photos else {}).get("file_id") or "").strip()
-        if not file_id:
-            raise RuntimeError("Telegram envió el retrato pero no devolvió un file_id reutilizable.")
-
-        # Guardado persistente en PostgreSQL. No depende del proceso de Render.
-        db=get_db()
-        try:
-            db.execute(
-                "UPDATE dnd_characters SET portrait_file_id=?, portrait_prompt=?, updated_at=? "
-                "WHERE campaign_id=? AND user_id=?",
-                (file_id,appearance,int(time.time()),int(character.get('campaign_id')),int(character.get('user_id'))),
-            )
-            db.commit()
-        finally:
-            db.close()
-        return sent
-    except Exception:
-        _rpg_ai_usage_release(day)
-        raise
-
-def narrate_kiwdnd_action(campaign, character, action, result=None):
-    """Narrador improvisacional. El estado canónico permanece en PostgreSQL, no en la IA."""
-    if not groq_client:
-        return None
-    flags=str(campaign.get('flags') or '{}')[:5000]
-    result_text=(json.dumps(result,ensure_ascii=False) if result else 'sin tirada; decide si la acción simplemente avanza la escena')
-    prompt=(
-        "Eres el Dungeon Master de KiwD&D, una campaña oscura, emotiva, hermosa, emocionante y con humor cuando nace naturalmente. "
-        "El mundo es Aeternus y debe sentirse persistente. Eira, Brok, Elías, Orin, Erick, Mara y Nox son personajes reales del mundo, no cameos. "
-        "Habla como un Dungeon Master conversando con amigos por Telegram, no como una novela. Entiende español informal, abreviaciones, faltas de ortografía, risas y frases incompletas por intención y contexto. "
-        "Para una acción cotidiana responde normalmente en 1 a 3 párrafos cortos (aprox. 60-180 palabras); sé directo, vivo y natural. Reserva narración más extensa para revelaciones, bosses, muertes o cierres de capítulo. "
-        "Continúa exactamente desde la escena actual y reacciona a lo que el jugador intentó; no respondas con frases genéricas como 'la escena registra tu acción'. "
-        "No decidas acciones por otros jugadores. No reveles secretos que el personaje no conoce. No concedas acciones imposibles ni inventes objetos/habilidades que el personaje no tiene. "
-        "No conviertas cada acción en combate. Si no hace falta tirada, deja que la acción avance naturalmente. El fracaso debe crear consecuencias e historia, no un GAME OVER automático. "
-        "No inventes resultados de dados: respeta exactamente el resultado suministrado. No escribas menús, listas de opciones ni comandos. Termina la respuesta completa, sin dejar una frase a medias.\n\n"
-        f"Campaña: {campaign.get('name')} | arco {campaign.get('arc')} capítulo {campaign.get('chapter')} escena {campaign.get('scene')}\n"
-        f"Estado/banderas: {flags}\n"
-        f"Personaje: {character.get('telegram_name')} / {character.get('name')} / {character.get('class_name')} Nv.{character.get('level')}\n"
-        f"Acción: {action}\nResultado mecánico: {result_text}"
-    )
-    r=groq_client.chat.completions.create(model=MODEL_NAME,messages=[{"role":"system","content":prompt}],temperature=.92,max_tokens=420)
-    return str(r.choices[0].message.content or '').strip()[:2600]
-
-# KiwD&D recibe dependencias explícitas: no importa KiwRPG ni acopla sus tablas.
-kiwdnd_engine.configure(send_message=send_message, send_dice=send_dice, get_db=get_db, is_admin=is_admin, generate_portrait=generate_kiwdnd_character_portrait, narrate=narrate_kiwdnd_action, send_topic=send_kiwdnd_topic_message)
+# KiwD&D retirado: KiwRPG es ahora el sistema RPG principal.
 
 def configure_webhook():
 

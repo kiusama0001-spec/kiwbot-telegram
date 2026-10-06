@@ -15232,7 +15232,10 @@ def handle_rpg_callback(query):
             send_message(chat_id,'\n'.join(desc),reply_markup={'inline_keyboard':rows}); return True
         if act=='portrait': send_message(chat_id,'🖼️ RETRATO\n\nGenera un retrato con IA o responde a tu propia foto con /retrato guardar.',reply_markup={'inline_keyboard':[[{'text':'🎨 Crear con IA','callback_data':'rpg_portrait:ai'},{'text':'👁️ Ver','callback_data':'rpg_portrait:view'}],[{'text':'⬅️ KiwRPG','callback_data':'rpg_hub:home'}]]}); return True
         if act=='combat': send_message(chat_id,'⚔️ COMBATE\n\nUsa /encuentro para una aparición o entra a PvP desde /duelo.',reply_markup=_rpg_back_kb()); return True
-        if act=='tower': card,kb,key=_tower_card(uid); send_message(chat_id,card,reply_markup=kb); return True
+        if act=='tower':
+            prog=_tower_progress(uid) or {}
+            floor=int(prog.get('floor') or 1)
+            send_message(chat_id,f'🏰 TORRE\n\n📍 Estás en el piso {floor}/100.',reply_markup=_rpg_back_kb()); return True
         if act=='missions': send_message(chat_id,'📜 MISIONES\n\nUsa /misiones para abrir tus misiones disponibles.',reply_markup=_rpg_back_kb()); return True
         if act=='pets': txt,kb=pets_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
         if act=='skills': txt,kb=techniques_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
@@ -15292,12 +15295,28 @@ def handle_rpg_callback(query):
         if not target: send_message(chat_id,"No encontré ese personaje en tu cuenta."); return True
         ok,name=set_active_character(uid,str(target['name'])); send_message(chat_id,f"⭐ Personaje activo: {name}" if ok else "No pude cambiar el personaje."); return True
     if data.startswith("invclean:"):
-        act=data.split(":",1)[1]
+        parts=data.split(":"); act=parts[1] if len(parts)>1 else ''
         if not _is_private_chat_obj(msg.get("chat")):
             send_message(chat_id,"🧹 Esta acción sólo funciona por privado."); return True
         if act=="cancel": send_message(chat_id,"🧹 Limpieza cancelada. No se tocó ningún objeto."); return True
-        if act in ("delete","sell"):
-            txt=_inventory_cleanup_apply(uid,sell=(act=="sell")); send_message(chat_id,txt); return True
+        if act=="toggle" and len(parts)>=4:
+            try: mask=int(parts[2]); idx=int(parts[3]); mask ^= (1<<idx)
+            except Exception: mask=0
+            txt,kb=_inventory_cleanup_preview(uid,mask); send_message(chat_id,txt,reply_markup=kb); return True
+        if act=="menu" and len(parts)>=3:
+            try: mask=int(parts[2])
+            except Exception: mask=0
+            txt,kb=_inventory_cleanup_preview(uid,mask); send_message(chat_id,txt,reply_markup=kb); return True
+        if act=="review" and len(parts)>=3:
+            try: mask=int(parts[2])
+            except Exception: mask=0
+            txt,kb=_inventory_cleanup_review(uid,mask); send_message(chat_id,txt,reply_markup=kb); return True
+        if act in ("delete","sell") and len(parts)>=3:
+            try: mask=int(parts[2])
+            except Exception: mask=0
+            selected=_invclean_decode(mask)
+            if not selected: send_message(chat_id,"🧹 Primero elige al menos una rareza."); return True
+            txt=_inventory_cleanup_apply(uid,selected,sell=(act=="sell")); send_message(chat_id,txt); return True
         return True
 
     if data.startswith("opening_choice:"):
@@ -21214,27 +21233,66 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
 # Guardamos la implementación anterior de utilidades antes de sobrescribirla en runtime.
 # Se asigna más abajo mediante el alias capturado justo antes del START.
 
-# Inventario: elimina/vende sólo stacks repetidos seguros; conserva 1 unidad.
-def _inventory_cleanup_candidates(uid):
+# Inventario: limpieza por rarezas elegidas; conserva 1 unidad de cada stack y nunca toca equipados/misión/títulos/regalos.
+_INVCLEAN_RARITIES = [
+    ('comun','⚪ Común'),('poco_comun','🟢 Poco común'),('raro','🔵 Raro'),('epico','🟣 Épico'),
+    ('legendario','🟠 Legendario'),('mitico','🔴 Mítico'),('evento','🎃 Evento'),('unico','💎 Único'),('otro','📦 Otra rareza')
+]
+def _invclean_norm(v):
+    import unicodedata
+    x=''.join(c for c in unicodedata.normalize('NFD',str(v or '').strip().lower()) if unicodedata.category(c)!='Mn')
+    x=' '.join(x.replace('_',' ').replace('-',' ').split())
+    aliases={'common':'comun','uncommon':'poco comun','rare':'raro','epic':'epico','legendary':'legendario','mythic':'mitico','unique':'unico','event':'evento'}
+    return aliases.get(x,x)
+def _invclean_bucket(v):
+    x=_invclean_norm(v)
+    m={'comun':'comun','poco comun':'poco_comun','raro':'raro','epico':'epico','legendario':'legendario','mitico':'mitico','evento':'evento','unico':'unico'}
+    return m.get(x,'otro')
+def _inventory_cleanup_candidates(uid, selected=None):
     char=get_active_character(uid)
     if not char:return []
     c=get_db();rows=c.execute("""SELECT i.id,i.item_key,i.quantity,x.name,x.rarity,x.item_type,x.equip_slot FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.character_id=? AND COALESCE(i.equipped,0)=0 AND COALESCE(i.quantity,0)>1""",(int(uid),int(char['id']))).fetchall();c.close()
-    blocked={'legendario','mítico','mitico','evento','único','unico'};out=[]
-    for r in rows:
-        if str(r.get('rarity') or '').lower() in blocked:continue
+    selected=set(selected or [])
+    out=[]
+    for rr in rows:
+        r=dict(rr)
         if str(r.get('item_type') or '').lower() in ('quest','mission','titulo','title','gift','regalo'):continue
-        out.append(dict(r))
+        r['_bucket']=_invclean_bucket(r.get('rarity'))
+        if selected and r['_bucket'] not in selected:continue
+        out.append(r)
     return out
 
-def _inventory_cleanup_preview(uid):
-    rows=_inventory_cleanup_candidates(uid);dups=sum(max(0,int(r['quantity'])-1) for r in rows)
-    if not dups:return '🧹 No encontré objetos repetidos seguros para limpiar.',{'inline_keyboard':[[{'text':'❌ Cerrar','callback_data':'invclean:cancel'}]]}
-    txt=f"🧹 LIMPIEZA DE INVENTARIO\n\nEncontré {dups} unidades repetidas en {len(rows)} tipos de objeto.\nSe conservará 1 de cada uno.\n\n🔒 No toca equipados, únicos, legendarios/míticos, evento, misión, títulos ni regalos.\n\n¿Qué quieres hacer?"
-    kb={'inline_keyboard':[[{'text':'🧹 Eliminar repetidos','callback_data':'invclean:delete'}],[{'text':'💰 Vender repetidos','callback_data':'invclean:sell'}],[{'text':'❌ Cancelar','callback_data':'invclean:cancel'}]]};return txt,kb
-
-def _inventory_cleanup_apply(uid,sell=False):
-    rows=_inventory_cleanup_candidates(uid)
-    if not rows:return '🧹 Ya no hay repetidos seguros que limpiar.'
+def _invclean_decode(mask):
+    try: mask=int(mask)
+    except Exception: mask=0
+    return {k for i,(k,_) in enumerate(_INVCLEAN_RARITIES) if mask & (1<<i)}
+def _invclean_keyboard(uid,mask=0):
+    counts={k:0 for k,_ in _INVCLEAN_RARITIES}
+    for r in _inventory_cleanup_candidates(uid): counts[r['_bucket']]+=max(0,int(r['quantity'])-1)
+    rows=[]
+    for i,(k,label) in enumerate(_INVCLEAN_RARITIES):
+        mark='✅' if mask & (1<<i) else '⬜'
+        rows.append([{'text':f'{mark} {label} · {counts.get(k,0)}','callback_data':f'invclean:toggle:{mask}:{i}'}])
+    if mask:
+        rows.append([{'text':'➡️ Continuar','callback_data':f'invclean:review:{mask}'}])
+    rows.append([{'text':'❌ Cancelar','callback_data':'invclean:cancel'}])
+    return {'inline_keyboard':rows}
+def _inventory_cleanup_preview(uid,mask=0):
+    allrows=_inventory_cleanup_candidates(uid)
+    dups=sum(max(0,int(r['quantity'])-1) for r in allrows)
+    if not dups:return '🧹 No encontré stacks repetidos en tu inventario.\n\nLa limpieza sólo considera objetos con cantidad mayor a 1.',{'inline_keyboard':[[{'text':'❌ Cerrar','callback_data':'invclean:cancel'}]]}
+    return ('🧹 LIMPIEZA POR RAREZA\n\nElige una o varias rarezas. El número de cada botón indica cuántas unidades repetidas hay.\n\nSiempre conservaré 1 unidad de cada objeto y nunca tocaré equipados, objetos de misión, títulos ni regalos.',_invclean_keyboard(uid,mask))
+def _inventory_cleanup_review(uid,mask):
+    selected=_invclean_decode(mask); rows=_inventory_cleanup_candidates(uid,selected)
+    dups=sum(max(0,int(r['quantity'])-1) for r in rows)
+    names=[label for k,label in _INVCLEAN_RARITIES if k in selected]
+    if not dups:return '🧹 En esas rarezas no hay unidades repetidas para limpiar.',_invclean_keyboard(uid,mask)
+    txt=f"🧹 CONFIRMAR LIMPIEZA\n\nRarezas: {', '.join(names)}\n♻️ Unidades repetidas que saldrán: {dups}\n\nConservaré 1 de cada objeto."
+    kb={'inline_keyboard':[[{'text':'🧹 Eliminar repetidos','callback_data':f'invclean:delete:{mask}'},{'text':'💰 Vender repetidos','callback_data':f'invclean:sell:{mask}'}],[{'text':'⬅️ Cambiar rarezas','callback_data':f'invclean:menu:{mask}'},{'text':'❌ Cancelar','callback_data':'invclean:cancel'}]]}
+    return txt,kb
+def _inventory_cleanup_apply(uid,selected,sell=False):
+    rows=_inventory_cleanup_candidates(uid,selected)
+    if not rows:return '🧹 Ya no hay repetidos de esas rarezas.'
     removed=0;earned=0;c=get_db()
     try:
         for r in rows:
@@ -21242,14 +21300,13 @@ def _inventory_cleanup_apply(uid,sell=False):
             if not extra:continue
             c.execute('UPDATE rpg_inventory SET quantity=1 WHERE id=?',(int(r['id']),));removed+=extra
             if sell:
-                # Valor conservador por rareza; evita explotar objetos sin precio de venta explícito.
-                unit={'común':25,'comun':25,'poco común':50,'raro':100,'épico':250,'epico':250}.get(str(r.get('rarity') or '').lower(),20);earned+=unit*extra
+                unit={'comun':25,'poco_comun':50,'raro':100,'epico':250,'legendario':500,'mitico':1000,'evento':250,'unico':1000,'otro':20}.get(r['_bucket'],20);earned+=unit*extra
         c.commit();c.close()
     except Exception:c.rollback();c.close();raise
     if sell and earned:
         try:change_kiwons(uid,earned,'inventory_cleanup_sale',note=f'{removed} duplicados')
         except Exception:earned=0
-    return f"🧹 Inventario limpiado.\n♻️ Repetidos retirados: {removed}"+(f"\n🪙 Venta: +{earned:,} Kiwons" if sell else '')+'\n\nConservé 1 unidad de cada objeto y protegí los objetos especiales.'
+    return f"🧹 Inventario limpiado.\n♻️ Repetidos retirados: {removed}"+(f"\n🪙 Venta: +{earned:,} Kiwons" if sell else '')+'\n\nConservé 1 unidad de cada objeto.'
 
 # Alias del callback viejo para utilidades (curación, forja, etc.) y override de dado manual.
 def _legacy_world_npc_utility(uid,chat_id,thread_id,key,action):
@@ -21281,6 +21338,216 @@ def spawn_world_npc(chatrow,now=None,rng=random):
     result=_old_spawn_world_npc(chatrow,now,rng)
     # No conocemos de antemano qué jugador interactuará; las consecuencias se revelan al siguiente contacto.
     return result
+
+
+# =========================================================
+# KIWRPG — MUNDO VIVO 4.0: NPC ÚNICOS + ENCARGOS CON DECISIONES
+# =========================================================
+# El menú principal del viajero muestra acciones propias de su oficio/personalidad.
+# Las decisiones morales (sobornar, mentir, intimidar, etc.) viven DENTRO del encargo.
+NPC_ROLE_ACTIONS={
+'eira':[('❤️ Curarme','heal'),('🌿 Pedir remedio','role_remedy'),('💬 Hablar','role_talk'),('😉 Seducir','social_seduce')],
+'brok':[('🔨 Analizar equipo','gear'),('⚒️ Consejo de Forja','forge'),('🛡️ Pieza limitada','shop'),('🍺 Invitar una bebida','role_drink')],
+'elias':[('⚔️ Mejores armas','weapons'),('🗺️ Dónde conseguirlas','where'),('🕯️ Pedir rumor','rumor'),('💬 Conversar','role_talk')],
+'orin':[('🗝️ Mostrar hallazgos','items'),('💍 Ver reliquias','shop'),('🎁 Intercambiar curiosidad','role_trade'),('😉 Seducir','social_seduce')],
+'erick':[('✨ Encantar equipo','enchant'),('❓ Preguntar por magia','help'),('🔮 Mostrarle una pieza','role_show'),('😉 Seducir','social_seduce')],
+'mara':[('🍲 Pedir comida','role_food'),('🤝 Ayudar en la cocina','role_help'),('💬 Conversar','role_talk'),('😉 Seducir','social_seduce')],
+'nox':[('🧳 Ver mercancía','shop'),('🗺️ Preguntar por rutas','role_routes'),('🎲 Apostar información','role_info'),('😉 Seducir','social_seduce')],
+'lyra':[('🗺️ Pedir un mapa','role_map'),('🏹 Hablar de caza','role_hunt'),('🤝 Ofrecer ayuda','role_help'),('😉 Seducir','social_seduce')],
+'kael':[('⚔️ Hablar de combate','role_combat'),('🏆 Retarlo de palabra','role_challenge'),('🍺 Invitar una bebida','role_drink'),('😉 Seducir','social_seduce')],
+'vesper':[('🕯️ Comprar un rumor','role_info'),('🎭 Intercambiar secretos','role_secret'),('🃏 Jugar con ella','role_game'),('😉 Seducir','social_seduce')],
+'torven':[('🛡️ Pedir consejo','role_advice'),('🍺 Invitar una bebida','role_drink'),('💬 Hablar del pasado','role_past')],
+'selene':[('🔭 Pedir una lectura','role_reading'),('🌙 Preguntar por señales','role_signs'),('💬 Conversar','role_talk'),('😉 Seducir','social_seduce')],
+'darius':[('📜 Preguntar por contratos','role_contract'),('🎯 Pedir consejo de caza','role_hunt'),('🍺 Invitar una bebida','role_drink'),('😉 Seducir','social_seduce')],
+'nyra':[('🧪 Pedir una muestra','role_sample'),('⚗️ Hablar de alquimia','role_alchemy'),('🤝 Ayudar con un experimento','role_help'),('😉 Seducir','social_seduce')],
+'ivar':[('🐾 Preguntar por bestias','role_beasts'),('🏹 Pedir consejo','role_hunt'),('🥩 Compartir provisiones','role_food')],
+'seraph':[('🕯️ Pedir una bendición','role_bless'),('📿 Preguntar por las ruinas','role_ruins'),('💬 Hablar','role_talk')],
+'valka':[('💰 Preguntar su precio','role_contract'),('⚔️ Hablar de mercenarios','role_combat'),('🍺 Invitar una bebida','role_drink'),('😉 Seducir','social_seduce')],
+'aurel':[('🛡️ Pedir consejo','role_advice'),('👑 Preguntar por su reino','role_past'),('🤝 Ofrecer ayuda','role_help'),('😉 Seducir','social_seduce')],
+'malkor':[('🧳 Ver mercancía','shop'),('🤝 Regatear','role_trade'),('🕯️ Pedir un rumor','role_info'),('😉 Seducir','social_seduce')],
+}
+NPC_ROLE_TEXT={
+'role_talk':'La conversación toma un giro inesperado. No obtienes una misión, pero el viajero recuerda que te detuviste a hablar.',
+'role_remedy':'Eira revisa su bolsa. —Los buenos remedios no arreglan malas decisiones, pero ayudan a sobrevivirlas.',
+'role_drink':'Acepta compartir un momento contigo. La próxima vez quizá recuerde quién pagó la primera ronda.',
+'role_trade':'El viajero examina lo que propones. —Intercambiar no siempre significa usar Kiwons.',
+'role_show':'Erick observa la pieza con demasiado interés. —Los objetos también guardan memoria.',
+'role_routes':'Nox marca una ruta y luego borra la mitad. —Si te doy todo el camino, dejaría de ser mío.',
+'role_map':'Lyra corrige una esquina de tu mapa y señala un camino menos peligroso.',
+'role_hunt':'Te explica un detalle que sólo alguien acostumbrado a perseguir criaturas notaría.',
+'role_combat':'La charla termina comparando cicatrices, errores y maneras de seguir vivo.',
+'role_challenge':'La provocación le divierte. No desenvaina; todavía.',
+'role_info':'Recibes una pista, pero no suficiente para saber si acabas de comprar información o un problema.',
+'role_secret':'Intercambian medias verdades. El problema es descubrir cuál mitad era mentira.',
+'role_game':'Acepta el juego con una sonrisa que no inspira ninguna tranquilidad.',
+'role_advice':'Te da un consejo nacido de errores que claramente no piensa explicar completos.',
+'role_past':'Por un momento habla de quién era antes de aparecer en estos caminos.',
+'role_reading':'La lectura no predice tu futuro: señala una posibilidad que depende de lo que hagas después.',
+'role_signs':'Señala una coincidencia que quizá sea una señal... o quizá sólo una coincidencia.',
+'role_contract':'Habla de trabajos, precios y de la diferencia entre cobrar por algo y querer hacerlo.',
+'role_sample':'Nyra te entrega una muestra pequeña. —Si cambia de color, no la bebas.',
+'role_alchemy':'La explicación empieza sencilla y termina con tres frascos que definitivamente no deberían mezclarse.',
+'role_beasts':'Ivar describe rastros, hábitos y la clase de silencio que anuncia una bestia grande.',
+'role_food':'Compartir provisiones mejora el ánimo. No todo beneficio necesita convertirse en una estadística.',
+'role_bless':'Seraph murmura unas palabras antiguas. No sabes si fue una bendición o una advertencia.',
+'role_ruins':'Habla de ruinas que deberían estar vacías y de luces que aparecen cuando nadie las busca.',
+'role_help':'Acepta tu ayuda. Es un gesto pequeño, pero el Mundo Vivo también recuerda esas cosas.',
+}
+
+def _npc_role_keyboard(key):
+    acts=NPC_ROLE_ACTIONS.get(str(key),[('💬 Conversar','role_talk'),('🤝 Ofrecer ayuda','role_help')])
+    rows=[]
+    for i in range(0,len(acts),2):
+        rows.append([{'text':lab,'callback_data':f'wnpc:{key}:{act}'} for lab,act in acts[i:i+2]])
+    rows.append([{'text':'🕯️ Encargo','callback_data':f'wnpc:{key}:mission'},{'text':'📖 Su historia','callback_data':f'wnpc:{key}:history'}])
+    return {'inline_keyboard':rows}
+
+def world_npc_keyboard(key):
+    return _npc_role_keyboard(str(key))
+
+# Encargos: 5 decisiones contextualizadas. Escuchar/investigar revela la segunda versión,
+# y negociar/engañar/intimidar/sobornar usan dado antes de cerrar el asunto.
+def _npc_job_actions(row):
+    p=json.loads(row['payload']); kind=str(p.get('kind') or '')
+    middle={
+      'debt':[('💰 Negociar la deuda','negotiate'),('🎭 Engañar al acreedor','deceive'),('💰 Sobornar','bribe')],
+      'deserter':[('🔎 Investigar','investigate'),('🎭 Mentir en su informe','deceive'),('😠 Intimidar testigos','intimidate')],
+      'relic':[('🔎 Revisar la reliquia','investigate'),('🤝 Negociar devolución','negotiate'),('💰 Comprar el problema','bribe')],
+      'curse':[('🔎 Buscar una cura','investigate'),('🤝 Ayudar a contenerlo','negotiate'),('😠 Forzarlo a rendirse','intimidate')],
+      'witness':[('🔎 Revisar las pruebas','investigate'),('💰 Comprar su silencio','bribe'),('🎭 Engañarlo','deceive')],
+      'hunter':[('🔎 Revisar las huellas','investigate'),('🤝 Mediar con el pueblo','negotiate'),('😠 Intimidarla','intimidate')],
+      'cargo':[('🔎 Rastrear la carga','investigate'),('🤝 Negociar','negotiate'),('💰 Cobrar por callar','bribe')],
+      'smuggler':[('🔎 Investigar la ruta','investigate'),('🤝 Hacer un trato','negotiate'),('💰 Exigir una parte','bribe')],
+    }.get(kind,[('🔎 Investigar','investigate'),('🤝 Negociar','negotiate'),('🎭 Mentir','deceive')])
+    # Siempre cinco dilemas visibles; atacar y dejar ir son los extremos.
+    return [('⚔️ Atacar','attack')]+middle[:3]+[('🕊️ Dejar ir','spare')]
+
+def _npc_job_card(row,reveal=False):
+    p=json.loads(row['payload']); hp=max(0,int(row['target_hp'])); mh=max(1,int(row['target_max_hp'])); attacks=int(row['attacks'] or 0)
+    lines=[f"🕯️ ENCARGO — {row['title']}","",f"👤 {row['target_name']}",f"❤️ {hp}/{mh}","",p['hook']]
+    if attacks:
+        idx=min(attacks-1,len(p['pleas'])-1); lines += ["",f"💬 {p['pleas'][idx]}",f"🩸 Ataques realizados: {attacks}"]
+    if reveal or int(row.get('listened') or 0): lines += ["","📖 SU VERSIÓN",_npc_listen_story(row,p)]
+    if attacks>=2: lines += ["","⚖️ Cada golpe adicional ya no parece sólo cumplir un encargo."]
+    acts=_npc_job_actions(row); rows=[]
+    for i in range(0,len(acts),2): rows.append([{'text':l,'callback_data':f"npcjob:{row['id']}:{a}"} for l,a in acts[i:i+2]])
+    if not int(row.get('listened') or 0): rows.append([{'text':'👂 Escuchar antes de decidir','callback_data':f"npcjob:{row['id']}:listen"}])
+    return '\n'.join(lines),{'inline_keyboard':rows}
+
+_npcjob4_ready=False
+def _ensure_npcjob4_db():
+    global _npcjob4_ready
+    if _npcjob4_ready:return
+    c=get_db();c.execute('''CREATE TABLE IF NOT EXISTS rpg_npc_job_pending_roll(user_id BIGINT PRIMARY KEY,chat_id BIGINT NOT NULL,job_id BIGINT NOT NULL,action_key TEXT NOT NULL,dc BIGINT NOT NULL,created_at BIGINT NOT NULL)''');c.commit();c.close();_npcjob4_ready=True
+
+def _npc_job_start_roll(uid,chat_id,job_id,action):
+    _ensure_npcjob4_db();dc={'investigate':3,'negotiate':4,'deceive':4,'intimidate':4,'bribe':3}.get(action,4)
+    c=get_db();r=c.execute('SELECT listened,attacks FROM rpg_npc_moral_jobs WHERE id=? AND user_id=?',(int(job_id),int(uid))).fetchone();
+    if not r:c.close();return 'Ese encargo ya no está disponible.',None
+    if action=='investigate' and int(r.get('listened') or 0):dc=max(2,dc-1)
+    if int(r.get('attacks') or 0)>=2:dc=min(6,dc+1)
+    c.execute('''INSERT INTO rpg_npc_job_pending_roll(user_id,chat_id,job_id,action_key,dc,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,job_id=EXCLUDED.job_id,action_key=EXCLUDED.action_key,dc=EXCLUDED.dc,created_at=EXCLUDED.created_at''',(int(uid),int(chat_id),int(job_id),str(action),int(dc),int(time.time())));c.commit();c.close()
+    labels={'investigate':'🔎 Investigar','negotiate':'🤝 Negociar','deceive':'🎭 Engañar','intimidate':'😠 Intimidar','bribe':'💰 Sobornar'}
+    return f"🎲 {labels.get(action,action)} · dificultad {dc}/6\n\nLanza un dado 🎲 en Telegram. No todos los éxitos terminan igual y un fracaso puede volver después.",None
+
+def _npc_job_resolve_roll(uid,chat_id,row,roll):
+    jid=int(row['job_id']);act=str(row['action_key']);dc=int(row['dc']);now=int(time.time());c=get_db();job=c.execute('SELECT * FROM rpg_npc_moral_jobs WHERE id=? AND user_id=?',(jid,int(uid))).fetchone()
+    if not job or str(job['status'])!='active':
+        c.execute('DELETE FROM rpg_npc_job_pending_roll WHERE user_id=?',(int(uid),));c.commit();c.close();return '📜 Ese encargo ya terminó.',None
+    job=dict(job);p=json.loads(job['payload']);success=int(roll)>=dc;critical=int(roll)==6;disaster=int(roll)==1
+    if act=='investigate':
+        c.execute('UPDATE rpg_npc_moral_jobs SET listened=1,updated_at=? WHERE id=?',(now,jid));c.execute('DELETE FROM rpg_npc_job_pending_roll WHERE user_id=?',(int(uid),));c.commit();job['listened']=1;c.close()
+        txt,kb=_npc_job_card(job,True)
+        prefix='🌟 Encuentras una prueba que confirma parte de su versión.' if critical else ('🔎 Consigues reconstruir mejor lo ocurrido.' if success else '🕯️ No encuentras una prueba definitiva, pero descubres que la historia no era tan simple.')
+        if disaster:_npc3_schedule(uid,str(job['npc_key']),'suspicion',f'Alguien notó que investigabas «{job["title"]}» y empezó a hacer preguntas.',3,10)
+        return f"🎲 {roll} · CD {dc}\n{prefix}\n\n"+txt,kb
+    # Las otras salidas pueden resolver el encargo sin matar ni perdonar de forma simple.
+    if success:
+        outcome={'negotiate':'negotiated','deceive':'deceived','intimidate':'intimidated','bribe':'bribed'}.get(act,'resolved')
+        rep={'negotiate':2,'deceive':-1,'intimidate':-2,'bribe':-1}.get(act,0)+(1 if critical else 0)
+        reward={'negotiate':1500,'deceive':1900,'intimidate':2100,'bribe':1700}.get(act,1500)+(500 if critical else 0)
+        c.execute("INSERT INTO rpg_npc_moral_completed(user_id,npc_key,title,outcome,completed_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,npc_key,title) DO NOTHING",(int(uid),str(job['npc_key']),str(job['title']),outcome,now));c.execute("UPDATE rpg_npc_moral_jobs SET status=?,updated_at=? WHERE id=?",(outcome,now,jid));c.execute('DELETE FROM rpg_npc_job_pending_roll WHERE user_id=?',(int(uid),));c.commit();c.close()
+        try:change_kiwons(uid,reward,'npc_encargo_decision',actor_id=uid,chat_id=int(chat_id),note=str(job['title']))
+        except Exception:pass
+        try:record_world_decision(uid,f'npc_job_{outcome}:{jid}',f'Resolviste «{job["title"]}» mediante {act}.',rep,npc_key=str(job['npc_key']),traits={'opportunist':1} if act in ('deceive','bribe') else {'honorable':1} if act=='negotiate' else {},chat_id=int(chat_id))
+        except Exception:pass
+        if act in ('deceive','intimidate','bribe'):_npc3_schedule(uid,str(job['npc_key']),'suspicion',f'La forma en que resolviste «{job["title"]}» vuelve a circular entre otras personas.',5,18)
+        desc={'negotiate':'Logras una salida que ninguna de las partes esperaba.','deceive':'Tu mentira funciona... por ahora.','intimidate':'Ceden ante la presión, pero no olvidan tu cara.','bribe':'El dinero cambia de manos y el problema desaparece de la vista.'}.get(act,'El asunto queda resuelto.')
+        return f"🎲 {roll} · CD {dc}\n✅ {desc}\n\n🪙 +{reward:,} KW\n⚖️ Reputación: {rep:+d}\n\n🌎 La decisión queda guardada. Puede regresar después.",None
+    c.execute('DELETE FROM rpg_npc_job_pending_roll WHERE user_id=?',(int(uid),));c.commit();c.close()
+    if disaster:_npc3_schedule(uid,str(job['npc_key']),'witness',f'Tu intento fallido durante «{job["title"]}» dejó un testigo que te reconoció.',2,9)
+    txt,kb=_npc_job_card(job,reveal=bool(job.get('listened')))
+    return f"🎲 {roll} · CD {dc}\n❌ No sale como esperabas. El encargo sigue abierto."+(' Alguien vio demasiado.' if disaster else '')+'\n\n'+txt,kb
+
+# Conservamos el resolver de ataque/perdón original y añadimos las nuevas rutas.
+_npc_moral_job_action_v4=npc_moral_job_action
+def npc_moral_job_action(user_id,chat_id,job_id,action):
+    if action in ('investigate','negotiate','deceive','intimidate','bribe'):
+        return _npc_job_start_roll(user_id,chat_id,job_id,action)
+    return _npc_moral_job_action_v4(user_id,chat_id,job_id,action)
+
+def _npc_social_seduce(uid,chat_id,key):
+    st=_npc3_state(uid,key); rel=int(st.get('relation') or 0); base=4
+    # Algunos son más reservados; la relación previa ayuda.
+    if key in ('seraph','torven','ivar'):base=6
+    dc=max(2,min(6,base-(1 if rel>=3 else 0)))
+    c=get_db();c.execute('''INSERT INTO rpg_npc_pending_roll(user_id,chat_id,npc_key,action_key,dc,amount,scene_key,created_at) VALUES(?,?,?,?,?,0,'social',?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,npc_key=EXCLUDED.npc_key,action_key=EXCLUDED.action_key,dc=EXCLUDED.dc,amount=0,scene_key='social',created_at=EXCLUDED.created_at''',(int(uid),int(chat_id),str(key),'seduce',dc,int(time.time())));c.commit();c.close()
+    return f"😉 Intentas conquistar a {WORLD_NPCS.get(key,(key,0))[0]}.\n🎲 Dificultad {dc}/6.\n\nLanza un dado 🎲. Puede darte un regalo, un favor, Kiwons... o dejar un recuerdo bastante incómodo jajajaja."
+
+# Extiende la resolución genérica para Seducir con premios reales y memoria.
+_npc3_resolve_roll_before_social=_npc3_resolve_roll
+def _npc3_resolve_roll(uid,chat_id,row,roll):
+    if str(row.get('action_key'))!='seduce':return _npc3_resolve_roll_before_social(uid,chat_id,row,roll)
+    key=str(row['npc_key']);dc=int(row['dc']);name=WORLD_NPCS.get(key,(key,0))[0];now=int(time.time());c=get_db();c.execute('DELETE FROM rpg_npc_pending_roll WHERE user_id=?',(int(uid),));c.commit();c.close()
+    if roll==1:
+        delta=-2;txt=f"🎲 1 · 💀 SALE TERRIBLE\n\n{name} te mira en silencio. Definitivamente esto será recordado."
+        _npc3_schedule(uid,key,'suspicion',f'Alguien escuchó una versión exagerada de tu intento de seducir a {name}.',4,14)
+    elif roll<dc:
+        delta=-1;txt=f"🎲 {roll} · 😅 NO FUNCIONÓ\n\n{name} no cae, pero tampoco convierte el momento en una tragedia."
+    else:
+        delta=2 if roll==6 else 1;reward=random.randint(1200,3000)*(2 if roll==6 else 1)
+        try:change_kiwons(uid,reward,'npc_social_reward',actor_id=uid,chat_id=int(chat_id),note=f'Seducir a {name}')
+        except Exception:reward=0
+        if key=='mara':
+            try:
+                ch=get_active_character(uid);eff=effective_character_stats(ch);heal=max(1,int(eff['max_hp']*.15));c2=get_db();c2.execute('UPDATE characters SET hp=LEAST(?,hp+?),updated_at=? WHERE id=?',(int(eff['max_hp']),heal,now,int(ch['id'])));c2.commit();c2.close()
+                extra=f"\n🍲 Mara además te da comida: recuperas hasta {heal} HP."
+            except Exception:extra=''
+        else:extra=''
+        txt=f"🎲 {roll} · {'🌟 LE ENCANTÓ' if roll==6 else '😉 FUNCIONÓ'}\n\n{name} entra en el juego. Te llevas un detalle que normalmente no habría dado gratis.\n🪙 +{reward:,} Kiwons{extra}"
+        if roll==6:_npc3_schedule(uid,key,'favor',f'{name} todavía recuerda aquella conversación y decide devolverte el gesto.',6,20)
+    c=get_db();c.execute('UPDATE rpg_npc_story_state SET relation=relation+?,updated_at=? WHERE user_id=? AND npc_key=?',(delta,now,int(uid),key));c.commit();c.close();_npc_remember(uid,key,'seduce',f'Intentaste seducir a {name}; tirada {roll}.')
+    return txt+'\n\n🌎 La relación con este NPC cambió.',_npc_role_keyboard(key)
+
+# Callback final del viajero: oficio fuera; dilemas dentro del Encargo.
+_world_npc_callback_before_roles=world_npc_callback
+def world_npc_callback(uid,chat_id,thread_id,key,action):
+    key=str(key);action=str(action)
+    if action=='mission':return _npc_offer_moral_job(uid,chat_id,key)
+    if action=='history':return _legacy_npc_history_text(uid,key)
+    if action=='social_seduce':return _npc_social_seduce(uid,chat_id,key)
+    if action.startswith('role_'):
+        _npc_remember(uid,key,action,NPC_ROLE_TEXT.get(action,'Compartieron un momento fuera de los encargos.'))
+        # Pequeños efectos propios del oficio, sin convertirlos en botones de premio gratis.
+        if action=='role_food' and key=='mara':
+            try:
+                ch=get_active_character(uid);eff=effective_character_stats(ch);heal=max(5,int(eff['max_hp']*.08));c=get_db();c.execute('UPDATE characters SET hp=LEAST(?,hp+?),updated_at=? WHERE id=?',(int(eff['max_hp']),heal,int(time.time()),int(ch['id'])));c.commit();c.close();return f"🍲 Mara te sirve algo caliente. Recuperas hasta {heal} HP.\n\n—La próxima sí me ayudas a lavar los platos.",_npc_role_keyboard(key)
+            except Exception:pass
+        return NPC_ROLE_TEXT.get(action,'El viajero reacciona de una forma muy suya y recuerda el encuentro.'),_npc_role_keyboard(key)
+    # Utilidades históricas del NPC (curar, tienda, forja, etc.) siguen funcionando.
+    return _world_npc_callback_before_roles(uid,chat_id,thread_id,key,action)
+
+# Dado final: primero resuelve decisiones de Encargo; si no, Mundo Vivo/social.
+def handle_rpg_dice(message):
+    if not message.get('dice'):return False
+    uid=int((message.get('from') or {}).get('id') or 0);chat_id=int((message.get('chat') or {}).get('id') or 0);val=int((message.get('dice') or {}).get('value') or 0)
+    if not uid or not val:return False
+    _ensure_npcjob4_db();c=get_db();jr=c.execute('SELECT * FROM rpg_npc_job_pending_roll WHERE user_id=?',(uid,)).fetchone();c.close()
+    if jr and int(jr.get('chat_id') or 0)==chat_id:
+        txt,kb=_npc_job_resolve_roll(uid,chat_id,dict(jr),val);send_message(chat_id,txt,reply_markup=kb);return True
+    _ensure_npc3_db();c=get_db();r=c.execute('SELECT * FROM rpg_npc_pending_roll WHERE user_id=?',(uid,)).fetchone();c.close()
+    if not r or int(r.get('chat_id') or 0)!=chat_id:return False
+    txt,kb=_npc3_resolve_roll(uid,chat_id,dict(r),val);send_message(chat_id,txt,reply_markup=kb);return True
 
 # =========================================================
 # START

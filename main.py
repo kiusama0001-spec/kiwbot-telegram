@@ -22072,14 +22072,19 @@ def npc_moral_job_action(user_id,chat_id,job_id,action):
         return f"{ab['emoji']} {ab['name']} · 🎲 {roll}\n⚔️ {dmg} daño · ❤️ recibes {retaliation}\n\n{tone}\n\n"+txt,kb
 
 # Encuentros del mundo: ahora sí existen Épicos/Legendarios/Míticos reales, extremadamente raros.
+# Balance de rarezas del Mundo Vivo.
+# Es probabilidad real por encuentro: NO existe un contador que fuerce la rareza.
+# Internamente conservamos la clave histórica `ultra` para no romper partidas/estadísticas,
+# pero desde ahora se presenta al jugador como ÉPICO.
 RPG_ENCOUNTER_RARITIES[:] = [
-    ('mythic',0.00010),      # 0.01% ~ 1/10,000
-    ('legendary',0.00090),   # 0.09% ~ 1/1,111
-    ('ultra',0.00600),       # 0.60%
-    ('rare',0.03000),        # 3.00%
-    ('uncommon',0.11000),    # 11.00%
-    ('normal',0.85300),
+    ('mythic',0.00300),      # 0.30% ~ 1/333
+    ('legendary',0.01700),   # 1.70% ~ 1/59
+    ('ultra',0.05000),       # 5.00% ÉPICO
+    ('rare',0.13000),        # 13.00%
+    ('uncommon',0.25000),    # 25.00%
+    ('normal',0.55000),      # 55.00%
 ]
+RPG_ENCOUNTER_RARITY_DATA['ultra'].update({'icon':'🟣','label':'ÉPICO','suffix':' — Épico'})
 RPG_ENCOUNTER_RARITY_DATA['mythic']={'icon':'🌟','label':'MÍTICO','hp':1.90,'atk':1.45,'def':1.38,'reward':4.50,'suffix':' — Primordial'}
 
 _roll_rpg_drop_mv8_base=roll_rpg_drop

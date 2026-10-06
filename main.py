@@ -4684,7 +4684,20 @@ def set_active_character(user_id, name):
 def character_card(row):
     if not row:
         return "Sin personaje activo."
+    # Nunca pintes una copia vieja del personaje: varios combates/curas actualizan HP
+    # después de que el callback obtuvo su fila. Refrescar aquí evita el efecto
+    # "volvió mi HP anterior" en /perfil y en el hub.
+    try:
+        cid=int(row.get('id') or 0)
+        if cid:
+            with db_lock:
+                _c=get_db(); _fresh=_c.execute("SELECT * FROM characters WHERE id=?",(cid,)).fetchone(); _c.close()
+            if _fresh: row=_fresh
+    except Exception:
+        pass
     eff=effective_character_stats(row)
+    # Si cambió el HP máximo por equipo/buffs, la vista siempre queda dentro del rango real.
+    shown_hp=max(0,min(int(row.get('hp') or 0),int(eff['max_hp'])))
     b=eff["bonus"]
     extra=""
     atk=f"{row['atk']}"+(f" + {b['atk']} = {eff['atk']}" if b['atk'] else "")
@@ -5579,6 +5592,32 @@ def world_npc_keyboard(key):
     rows.append([{'text':'📖 Su historia','callback_data':f'wnpc:{key}:history'}])
     return {'inline_keyboard':rows}
 
+NPC_SPAWN_LINES={
+ 'eira':['Eira acomoda sus vendas. —Si vienes sangrando, siéntate.','Eira revisa su bolsa. —Hoy ya curé a tres tercos. No seas el cuarto.'],
+ 'brok':['Brok deja el martillo. —A ver qué rompiste ahora.','Brok mira tu equipo de arriba abajo. —Eso puede quedar mejor.'],
+ 'elias':['Elías cierra su libro. —Llegas justo cuando la historia se estaba poniendo buena.','Elías moja la pluma. —Cuéntame algo que valga la tinta.'],
+ 'orin':['Orin hace sonar un manojo de llaves. —Seguro cargas algo raro.','Orin sonríe al ver tu mochila. —No tires nada antes de enseñármelo.'],
+ 'erick':['Erick mira tu arma. —Tiene algo que decir.','Una runa se apaga entre los dedos de Erick. —Llegaste a tiempo.'],
+ 'mara':['Mara levanta la cuchara. —Si tienes hambre, habla rápido.','Huele a comida caliente. Mara te señala un banco. —Siéntate.'],
+ 'nox':['Nox aparece como si siempre hubiera estado ahí. —No preguntes de dónde vengo.','Nox mira el camino vacío. —Por ahí no iría yo. Tú sabrás.'],
+ 'lyra':['Lyra extiende un mapa lleno de tachones. —El camino cambió otra vez.','Lyra guarda una flecha. —Hay huellas nuevas al norte.'],
+ 'kael':['Kael apoya la mano en la espada. —¿Has mejorado?','Kael sonríe apenas. —Todavía recuerdo nuestra última charla.'],
+ 'vesper':['Vesper habla bajo. —Tengo algo que quizá no quieras saber.','Vesper gira una moneda. —Los rumores también tienen precio.'],
+ 'torven':['Torven observa el camino. —Hoy está demasiado tranquilo.','Torven ajusta el escudo. —Si vas a viajar, escucha primero.'],
+ 'selene':['Selene mira el cielo antes que a ti. —Curioso...','Selene guarda su astrolabio. —Las estrellas volvieron a moverse.'],
+ 'darius':['Darius dobla un contrato. —Tengo trabajo. No todo es bonito.','Darius revisa el tablón. —Hay una recompensa nueva.'],
+ 'nyra':['Nyra aparta un frasco humeante. —Ese no lo toques.','Algo explota bajito en el carro de Nyra. —Estaba calculado. Más o menos.'],
+ 'ivar':['Ivar señala unas huellas. —Eso no es un lobo.','Ivar huele el aire. —Hay una bestia cerca.'],
+ 'seraph':['Seraph apaga su linterna. —Este lugar recuerda demasiado.','Seraph inclina la cabeza. —No todas las ruinas están vacías.'],
+ 'valka':['Valka limpia su espada. —Si buscas trabajo, habla.','Valka te mide con la mirada. —Espero que no vengas a hacerme perder tiempo.'],
+ 'aurel':['Aurel saluda como si todavía tuviera corte. —Qué raro encontrar modales en este camino.','Aurel apoya el escudo. —Un reino se pierde. Las costumbres tardan más.'],
+ 'malkor':['Malkor abre una caja apenas un poco. —Tal vez esto te interese.','Malkor sonríe. —Siempre apareces cuando tengo algo peligroso que vender.'],
+}
+
+def _npc_spawn_line(key,rng=random):
+    pool=NPC_SPAWN_LINES.get(str(key)) or ['El viajero se detiene al verte.']
+    return rng.choice(pool)
+
 def spawn_world_npc(chatrow,now=None,rng=random):
     now=int(now or time.time()); cid=int(chatrow['chat_id']); tid=int(chatrow.get('message_thread_id') or 0)
     keys=list(WORLD_NPCS); weights=[WORLD_NPCS[k][1] for k in keys]; key=rng.choices(keys,weights=weights,k=1)[0]; name=WORLD_NPCS[key][0]
@@ -5586,7 +5625,7 @@ def spawn_world_npc(chatrow,now=None,rng=random):
         c=get_db(); c.execute("UPDATE rpg_world_npcs SET status='gone' WHERE chat_id=? AND thread_id=? AND status='active'",(cid,tid)); c.execute("INSERT INTO rpg_world_npcs(chat_id,thread_id,npc_key,status,spawned_at,expires_at,message_id) VALUES(?,?,?,'active',?,?,0) ON CONFLICT(chat_id,thread_id,npc_key) DO UPDATE SET status='active',spawned_at=EXCLUDED.spawned_at,expires_at=EXCLUDED.expires_at",(cid,tid,key,now,now+20*60)); c.commit(); c.close()
     old=get_current_message_thread_id(); set_current_message_thread_id(tid or None)
     try:
-        caption=f"🌒 VIAJERO DEL MUNDO\n\n{name} ha aparecido.\n⏳ Se quedará 20 minutos."
+        caption=f"🌒 {name}\n\n{_npc_spawn_line(key,rng)}\n\n⏳ 20 min."
         if not send_rpg_image(cid,f"npc:{key}",caption,reply_markup=world_npc_keyboard(key)):
             send_message(cid,caption,reply_markup=world_npc_keyboard(key))
     finally: set_current_message_thread_id(old)
@@ -10499,12 +10538,26 @@ def _boss_grant_loot(b,p):
     return got
 
 def _boss_gacha_exclusive_keys():
-    """Claves exclusivas del Gacha que jamás deben entrar en cajas de Boss."""
+    """Claves exclusivas del Gacha que jamás deben entrar en cajas de Boss.
+
+    RPG_WEAPON_GACHA_BRANCHES es una lista de (slug,nombre), no un dict.
+    Construimos las claves con el mismo esquema usado al crear el Gacha.
+    """
     keys=set()
     try:
-        for branch in RPG_WEAPON_GACHA_BRANCHES.values():
-            for entry in branch:
-                if entry: keys.add(str(entry[0]))
+        branches=(RPG_WEAPON_GACHA_BRANCHES.items() if isinstance(RPG_WEAPON_GACHA_BRANCHES,dict) else RPG_WEAPON_GACHA_BRANCHES)
+        for branch in branches:
+            if isinstance(branch,(list,tuple)) and branch:
+                slug=str(branch[0])
+            else:
+                slug=str(branch)
+            for rarity in ('raro','ultra_raro','legendario'):
+                for idx in range(1,7):
+                    keys.add(f"gacha_weapon_{slug}_{rarity}_{idx}")
+                    keys.add(f"gacha_outfit_{slug}_{rarity}_{idx}")
+            # Hasta tres míticas destacadas por rotación.
+            for idx in range(1,4):
+                keys.add(f"gacha_weapon_{slug}_mitico_{idx}")
     except Exception:
         logger.exception("No pude construir la lista de equipo exclusivo del Gacha")
     return keys
@@ -10637,8 +10690,8 @@ def boss_action(chat_id,user_id,boss_id,ability_key=None,defend=False):
         return _boss_action_impl(chat_id,user_id,boss_id,ability_key=ability_key,defend=defend)
     finally:
         elapsed=time.monotonic()-started
-        if elapsed>=1.25:
-            logger.warning("Boss turn lento: boss=%s user=%s %.3fs",boss_id,user_id,elapsed)
+        if elapsed>=10.0:
+            logger.warning("Boss turn realmente lento: boss=%s user=%s %.3fs",boss_id,user_id,elapsed)
         lock.release()
 
 def _boss_action_impl(chat_id,user_id,boss_id,ability_key=None,defend=False):
@@ -13904,6 +13957,16 @@ def rpg_auto_world_tick(now=None):
             finally:
                 set_current_message_thread_id(_old_topic)
     except Exception: logger.exception("Error sincronizando eventos mensuales")
+    # Halloween: un visitante de Dulce o Truco cada 3 horas mientras el evento esté activo.
+    try:
+        for _hr in _echats:
+            _halloween_spawn_due(int(_hr['chat_id']),now)
+    except Exception: logger.exception("Error creando Dulce o Truco de Halloween")
+    # Halloween: encuentros especiales separados de Dulce o Truco.
+    try:
+        for _hr in _echats:
+            _halloween_monster_spawn_due(int(_hr['chat_id']),now)
+    except Exception: logger.exception("Error creando monstruo especial de Halloween")
     # Boss normal cooperativo cada 3 horas. Los Bosses Mundiales pertenecen solo a eventos. Si el anterior sigue vivo, no se duplica:
     # simplemente se programa la siguiente comprobación 3 horas después.
     for rr in boss_due:
@@ -15552,6 +15615,24 @@ def handle_rpg_callback(query):
         if not (_dc and int(_dc)==int(chat_id) and ((_dt is None and not thread_id) or (_dt is not None and int(_dt)==int(thread_id)))):
             send_message(chat_id,"📍 La tienda del evento pertenece al topic oficial del Jefe de Evento."); return True
         txt,kb=event_shop_text(chat_id,uid); send_message(chat_id,txt,reply_markup=kb); return True
+    if data.startswith('hallowtt:'):
+        try:
+            _,sid,choice=data.split(':',2); send_message(chat_id,_halloween_tt_claim(uid,chat_id,int(sid),choice))
+        except Exception:
+            logger.exception('Error Dulce o Truco'); send_message(chat_id,'🎃 El visitante desapareció antes de resolver tu elección.')
+        return True
+    if data.startswith('hmon:'):
+        try:
+            _,sid=data.split(':',1); sid=int(sid); msg2=_halloween_monster_fight(uid,chat_id,sid)
+            kb=None if ('+20 Fichas' in msg2 or 'Ya derrotaste' in msg2 or 'desapareció' in msg2) else {'inline_keyboard':[[{'text':'⚔️ Atacar otra vez','callback_data':f'hmon:{sid}'}]]}
+            send_message(chat_id,msg2,reply_markup=kb)
+        except Exception:
+            logger.exception('Error encuentro Halloween'); send_message(chat_id,'🎃 El monstruo escapó entre la niebla.')
+        return True
+    if data.startswith('hshop:'):
+        kind=data.split(':',1)[1]
+        ok,msg2=_halloween_shop_buy(chat_id,uid,kind); send_message(chat_id,msg2)
+        return True
     if data.startswith("event_buy:"):
         _dc,_dt=get_rpg_chat_route('worldboss',None,None,realm_id=chat_id)
         if not (_dc and int(_dc)==int(chat_id) and ((_dt is None and not thread_id) or (_dt is not None and int(_dt)==int(thread_id)))):
@@ -16700,7 +16781,7 @@ def rpg_welcome_keyboard(user_id):
     if is_owner(user_id): rows.append([{"text":"🎆 INICIAR GRAN APERTURA","callback_data":"welcome:open"},{"text":"🔄 Nueva era","callback_data":"rpg_reset_begin"}])
     return {"inline_keyboard":rows}
 
-ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /torreaqui /torre /torreprogreso /jefeeventoaqui /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo /dnd /dndcrear /dndiniciar /dndunirme /dndcrearpersonaje /dndficha /dndgrupo /dndhistoria /dndestado /dndmundo /dndmanual /dndcomenzar /dndretrato /dndinventario /dndmisiones /dndrelaciones /dndsecretos /dndcementerio /dndtumbas /dnddescansar /dndpausa /dndreanudar /dndcampana /dndarcos /dndsecundarias /dndsidequests /dndreiniciar'
+ALL_REGISTERED_COMMANDS_TEXT = '/setchat /delchat /delchataqui /chatsrpg /carrera /terminarasesinato /rumores /reponercajahead /reponercajarecuerdo /autorizarrecuerdo /autorizarhead /activarhiddenblade /addcolmillos /addkiwons /advertir /apagarrpg /armas /arterpg /aventura /ayuda /ayudarpg /ban /bestiario /bestiarioadmin /bienvenida /borrarcombates /borrarimagenrpg /boss /boss1hpevento /torreaqui /torre /torreprogreso /jefeeventoaqui /bosses /bossevento /cancelar_combate /cancelarboda /cancelarpropuesta /cartas /casar /catalogomisiones /cerrarmalkor /chronicles /clan /clases /clasesrpg /cofre /comandos /combatir /compartiritem /correo /crear_personaje /crearclan /crearpersonaje /cronicas /cronicas_on /cronicasoff /cronicason /dar_pocion /daranilloprueba /darcolmillos /dare /daresencia /darkiwons /darpocion /darprimeros /darr /darrcolmillos /darskiwons /dbstatus /decisiones /depositarboda /depositaritempareja /depositarpareja /desadvertir /divorciar /divorcio /doble_espada /duelo /duelodados /duelopvp /eliminarboss /encuentro /equipamiento /equipo /espadas /evento /eventorpg /eventos /fama /fondoboda /fondopareja /forge /forja /forjador /fundadorrpg /gacha /gachaarma /gachaarmas /generararte /generarimagen /generarimagenrpg /guardar_espadas /guardarpareja /habilidades /help /heroes /heroeslegendarios /historiapersonal /huir /iaoff /iaon /iastatus /imagenesrpg /iniciarevento /inicio /intercambiar /intercambio /inv /inventario /inventariopareja /invocarboss /invocarnpc /invocaromega /kennyomega /kick /kiwmute /kiwons /kiwrpg /kiwunmute /liberarme /limpiarcombates /listamisiones /logros /malkor /mascota /mascotas /materiales /matrimonio /matrimonioestado /mats /mazmorra /mejorar /mejorararma /mejorarequipo /mejorequipo /autoequipar /banco /prestamo /empeno /desmantelar /reciclar /memoria /mercader /miclan /minijuego /misionactual /misiones /misionesaleatorias /misionesrpg /misionrapida /mochilapareja /modetest /modotest /mundo /mundovivo /mute /objetosclave /olvida /olvidar /omega /omega1hp /pagar /liquidar /liquidarprestamo /pareja /pasaritem /peleadados /perfil /perfilpvp /personaje /personajes /pets /ping /pj /primeros /proponer /pvp /quitar /quitarboss /quitarkiwons /quitarmercader /ranking /rankingdinero /rankingomega /rankingpvp /rechazarpropuesta /recordar /recuerda /recuerdos /regalarpareja /regenerararte /regenerarimagen /registrarimagen /registrarme /registro /reglas /reiniciarcombate /reiniciarapertura /reiniciarrpg /reliquias /removekiwons /rendicion /rendirse /reputacion /reset_rpg /resetboda /resetcombate /resetcombates /resetmatrimonio /resetomega /resetwill /retirarboda /retiraritempareja /retirarpareja /ricos /robar /robo /rpg /rpgaqui /rpgnotificaciones /rpgsilencio /rules /sacarpareja /saldo /salirclan /salircombate /salirtodo /sellar_espadas /shop /spawnboss /spawnomega /start /subirarma /taberna /tablon /tavern /testanillo /testboda /testbossevento /testcasar /testdivorcio /testesencia /testimagenia /testmazmorra /testmision /testmisionvoz /testmisionwill /testmundo /testdulceotruco /testuser /testusuario /testvoz /testwill /testwillmision /tienda /tiendaevento /titulos /topkiwons /toppvp /trade /tranferir /transferir /truth /unban /unirclan /unmute /unwarn /usar_personaje /usarpersonaje /venerarimagen /verarterpg /verimagen /warn /welcome /yo /dnd /dndcrear /dndiniciar /dndunirme /dndcrearpersonaje /dndficha /dndgrupo /dndhistoria /dndestado /dndmundo /dndmanual /dndcomenzar /dndretrato /dndinventario /dndmisiones /dndrelaciones /dndsecretos /dndcementerio /dndtumbas /dnddescansar /dndpausa /dndreanudar /dndcampana /dndarcos /dndsecundarias /dndsidequests /dndreiniciar'
 
 def rpg_commands_text(user_id=0):
     txt=("📜 GUÍA DE COMANDOS — KIWRPG\n\n"
@@ -18062,6 +18143,13 @@ def process_command(
     if command in ("/mundo", "/mundovivo"):
         if not chronicles_enabled(): send_message(chat_id,"📜 Crónicas está temporalmente desactivado."); return True
         ensure_player(message.get("from",{})); send_message(chat_id,chronicles_world_text(user_id)); return True
+    if command=="/testdulceotruco" and is_owner(user_id):
+        try:
+            _halloween_spawn_due(chat_id,int(time.time()),force=True)
+        except Exception:
+            logger.exception("Error en /testdulceotruco"); send_message(chat_id,"🎃 No pude invocar al visitante de prueba.")
+        return True
+
     if command=="/testmundo" and is_owner(user_id):
         ensure_player(message.get("from",{}))
         try:
@@ -21418,7 +21506,23 @@ def _npc_job_actions(row):
       'hunter':[('🔎 Revisar las huellas','investigate'),('🤝 Mediar con el pueblo','negotiate'),('😠 Intimidarla','intimidate')],
       'cargo':[('🔎 Rastrear la carga','investigate'),('🤝 Negociar','negotiate'),('💰 Cobrar por callar','bribe')],
       'smuggler':[('🔎 Investigar la ruta','investigate'),('🤝 Hacer un trato','negotiate'),('💰 Exigir una parte','bribe')],
-    }.get(kind,[('🔎 Investigar','investigate'),('🤝 Negociar','negotiate'),('🎭 Mentir','deceive')])
+      'past':[('📜 Revisar la lista','investigate'),('🤝 Pedir que declare','negotiate'),('🎭 Ocultar su pasado','deceive')],
+      'water':[('🔎 Revisar las reservas','investigate'),('🤝 Repartir el agua','negotiate'),('😠 Presionar al dueño','intimidate')],
+      'letter':[('✉️ Leer la carta','investigate'),('🤝 Dejarla pasar','negotiate'),('💰 Comprar la carta','bribe')],
+      'executioner':[('🔎 Buscar el expediente','investigate'),('🤝 Hablar con la familia','negotiate'),('😠 Exigir una confesión','intimidate')],
+      'alchemist':[('🧪 Revisar las notas','investigate'),('🤝 Ayudar con la cura','negotiate'),('🎭 Desviar las sospechas','deceive')],
+      'hunter2':[('🔎 Buscar a la niña','investigate'),('🤝 Mediar con el gremio','negotiate'),('🎭 Cambiar el informe','deceive')],
+      'witch':[('🐾 Buscar marcas','investigate'),('🤝 Escuchar a Elen','negotiate'),('🎭 Mentir al pueblo','deceive')],
+      'father':[('🔎 Esperar al amanecer','investigate'),('🤝 Hacer un trato','negotiate'),('😠 Presionar a Soren','intimidate')],
+      'captain':[('🔎 Revisar las cuentas','investigate'),('🤝 Negociar el peaje','negotiate'),('💰 Comprar el paso','bribe')],
+      'prisoner':[('📜 Revisar su condena','investigate'),('🤝 Dejar que se entregue','negotiate'),('🎭 Ocultar su rastro','deceive')],
+      'sword':[('🩸 Revisar la espada','investigate'),('🤝 Proteger la prueba','negotiate'),('💰 Vender la prueba','bribe')],
+      'blood':[('🔎 Buscar testigos','investigate'),('🤝 Pedir reparación','negotiate'),('😠 Exigir venganza','intimidate')],
+      'granary':[('🌾 Revisar el granero','investigate'),('🤝 Repartir comida','negotiate'),('😠 Presionar al vigilante','intimidate')],
+      'mistake':[('🧪 Revisar la dosis','investigate'),('🤝 Buscar reparación','negotiate'),('🎭 Ocultar el error','deceive')],
+      'war':[('🔎 Buscar supervivientes','investigate'),('🤝 Pedir que responda','negotiate'),('😠 Forzar una confesión','intimidate')],
+      'healer':[('🧪 Revisar los frascos','investigate'),('🤝 Ayudar con antídotos','negotiate'),('🎭 Ocultar su método','deceive')],
+    }.get(kind,[('🔎 Investigar','investigate'),('🤝 Hablar','negotiate'),('🎭 Engañar','deceive')])
     # Siempre cinco dilemas visibles; atacar y dejar ir son los extremos.
     return [('⚔️ Atacar','attack')]+middle[:3]+[('🕊️ Dejar ir','spare')]
 
@@ -21519,6 +21623,26 @@ def _npc3_resolve_roll(uid,chat_id,row,roll):
     c=get_db();c.execute('UPDATE rpg_npc_story_state SET relation=relation+?,updated_at=? WHERE user_id=? AND npc_key=?',(delta,now,int(uid),key));c.commit();c.close();_npc_remember(uid,key,'seduce',f'Intentaste seducir a {name}; tirada {roll}.')
     return txt+'\n\n🌎 La relación con este NPC cambió.',_npc_role_keyboard(key)
 
+NPC_SIMPLE_REPLIES={
+ 'mara':{'role_food':['—Come antes de que se enfríe.','—No preguntes qué lleva. Sólo come.'],'role_help':['—Toma ese cuchillo. Las verduras no se cortan solas.','—Bien. Lava eso y luego hablamos.'],'role_talk':['—La gente cuenta de todo cuando tiene un plato enfrente.','—Hoy escuché algo raro en la caravana.']},
+ 'brok':{'role_drink':['—Una. Luego vuelvo a la fragua.'],'role_talk':['—El metal miente menos que la gente.']},
+ 'eira':{'role_remedy':['—Toma. Dos gotas. Tres y dormirás demasiado.'],'role_talk':['—Estoy bien. Pregunta por los heridos.']},
+ 'nox':{'role_routes':['—El camino corto no siempre llega primero.'],'role_info':['—Si ganas, te cuento algo. Si pierdes, olvídalo.']},
+ 'vesper':{'role_info':['—Paga por la verdad, no por lo que quieres oír.'],'role_secret':['—Tú primero. Yo decido cuánto vale.'],'role_game':['—Juguemos. Pero no preguntes qué apostamos todavía.']},
+ 'nyra':{'role_sample':['—Si burbujea, déjalo en el suelo.'],'role_alchemy':['—No mezcles rojo con azul. Aprendí eso de la peor forma.'],'role_help':['—Sujeta esto. Y no respires tan cerca.']},
+ 'kael':{'role_combat':['—La fuerza sirve. Saber cuándo parar sirve más.'],'role_challenge':['—Cuando quieras. Pero no llores por la armadura.']},
+ 'valka':{'role_contract':['—Mi precio depende de cuánto quieras seguir vivo.'],'role_combat':['—Un contrato fácil suele esconder algo.']},
+ 'aurel':{'role_advice':['—No confundas orgullo con valor.'],'role_past':['—Ese reino ya no existe. Yo sí.']},
+ 'seraph':{'role_bless':['—Que regreses siendo la misma persona.'],'role_ruins':['—Escuché algo debajo de las piedras. No era viento.']},
+}
+
+def _npc_role_response(key,action):
+    pool=(NPC_SIMPLE_REPLIES.get(str(key)) or {}).get(str(action))
+    if pool:return random.choice(pool)
+    # Respuesta corta por defecto: el texto largo queda para Su historia/Encargo.
+    fallbacks={'role_talk':'—¿Qué quieres saber?','role_help':'—Bien. Échame una mano.','role_drink':'—Una ronda. Nada más.','role_hunt':'—Mira primero las huellas.','role_combat':'—No todo se arregla desenvainando.','role_trade':'—Enséñame qué traes.','role_info':'—La información cuesta.','role_advice':'—Piensa antes de elegir.','role_past':'—Eso fue hace mucho.','role_food':'—Come. Luego hablamos.'}
+    return fallbacks.get(str(action),NPC_ROLE_TEXT.get(str(action),'—Te escucho.'))
+
 # Callback final del viajero: oficio fuera; dilemas dentro del Encargo.
 _world_npc_callback_before_roles=world_npc_callback
 def world_npc_callback(uid,chat_id,thread_id,key,action):
@@ -21533,7 +21657,7 @@ def world_npc_callback(uid,chat_id,thread_id,key,action):
             try:
                 ch=get_active_character(uid);eff=effective_character_stats(ch);heal=max(5,int(eff['max_hp']*.08));c=get_db();c.execute('UPDATE characters SET hp=LEAST(?,hp+?),updated_at=? WHERE id=?',(int(eff['max_hp']),heal,int(time.time()),int(ch['id'])));c.commit();c.close();return f"🍲 Mara te sirve algo caliente. Recuperas hasta {heal} HP.\n\n—La próxima sí me ayudas a lavar los platos.",_npc_role_keyboard(key)
             except Exception:pass
-        return NPC_ROLE_TEXT.get(action,'El viajero reacciona de una forma muy suya y recuerda el encuentro.'),_npc_role_keyboard(key)
+        return _npc_role_response(key,action),_npc_role_keyboard(key)
     # Utilidades históricas del NPC (curar, tienda, forja, etc.) siguen funcionando.
     return _world_npc_callback_before_roles(uid,chat_id,thread_id,key,action)
 
@@ -21548,6 +21672,437 @@ def handle_rpg_dice(message):
     _ensure_npc3_db();c=get_db();r=c.execute('SELECT * FROM rpg_npc_pending_roll WHERE user_id=?',(uid,)).fetchone();c.close()
     if not r or int(r.get('chat_id') or 0)!=chat_id:return False
     txt,kb=_npc3_resolve_roll(uid,chat_id,dict(r),val);send_message(chat_id,txt,reply_markup=kb);return True
+
+# =========================================================
+# KIWRPG — HALLOWEEN ANTICIPADO + DULCE O TRUCO
+# =========================================================
+RPG_EVENT_LEAD_DAYS = 14
+HALLOWEEN_TRICK_INTERVAL = 3 * 60 * 60
+HALLOWEEN_TRICK_TTL = 3 * 60 * 60
+_HALLOWEEN_NPCS=[('bruja_caramelo','🧙‍♀️','La Bruja del Caramelo'),('calabaza_riente','🎃','Jack, la Calabaza Risueña'),('fantasma_tacaño','👻','El Fantasma Tacaño'),('catrina_errante','💀','La Catrina Errante'),('vampiro_dulcero','🧛','El Vampiro Dulcero'),('cuervo_medianoche','🐦‍⬛','El Cuervo de Medianoche'),('espantapajaros','🕸️','El Espantapájaros de las Ánimas'),('nino_mascara','🎭','El Niño de la Máscara')]
+_halloween_schema_ready=False
+_halloween_schema_lock=threading.Lock()
+def _ensure_halloween_db():
+    global _halloween_schema_ready
+    if _halloween_schema_ready:return
+    with _halloween_schema_lock:
+        if _halloween_schema_ready:return
+        c=get_db()
+        c.execute("CREATE TABLE IF NOT EXISTS rpg_halloween_trick_spawns(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,npc_key TEXT NOT NULL,npc_name TEXT NOT NULL,spawned_at BIGINT NOT NULL,expires_at BIGINT NOT NULL,status TEXT DEFAULT 'active')")
+        c.execute("CREATE TABLE IF NOT EXISTS rpg_halloween_trick_claims(spawn_id BIGINT NOT NULL,user_id BIGINT NOT NULL,choice TEXT NOT NULL,result_text TEXT DEFAULT '',claimed_at BIGINT NOT NULL,PRIMARY KEY(spawn_id,user_id))")
+        c.execute('CREATE INDEX IF NOT EXISTS idx_halloween_spawn_chat ON rpg_halloween_trick_spawns(chat_id,spawned_at)')
+        c.commit();c.close();_halloween_schema_ready=True
+
+def _halloween_boot_start(now=None):
+    now=int(now or time.time());key='halloween_2026_patch_start_at';c=get_db();r=c.execute('SELECT value FROM rpg_chronicles_settings WHERE setting_key=?',(key,)).fetchone()
+    if r:
+        try:start=int(r['value'])
+        except Exception:start=now+12*60*60
+    else:
+        start=now+12*60*60;c.execute('INSERT INTO rpg_chronicles_settings(setting_key,value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO NOTHING',(key,str(start),now));c.commit()
+    c.close();return start
+
+def _halloween_2026_window(now=None):
+    now=int(now or time.time());return _halloween_boot_start(now),int(time.mktime((2026,11,2,23,59,59,0,0,-1)))
+
+def _halloween_active(chat_id,now=None):
+    now=int(now or time.time());start,end=_halloween_2026_window(now)
+    if not(start<=now<=end):return False
+    st=_event_get(chat_id);return bool(st and st.get('status')=='active' and st.get('event_key')=='event_2026_10')
+
+_event_auto_sync_before_halloween=_event_auto_sync
+def _event_auto_sync(chat_id,now=None):
+    now=int(now or time.time());st=_event_get(chat_id)
+    if st and st.get('event_key')=='opening_2026' and st.get('status')=='active':return _event_auto_sync_before_halloween(chat_id,now)
+    start,end=_halloween_2026_window(now)
+    if start<=now<=end:
+        with db_lock:
+            c=get_db();route=c.execute('SELECT enabled FROM rpg_auto_chats WHERE chat_id=?',(int(chat_id),)).fetchone();c.close()
+        if route and int(route.get('enabled') or 0)==1 and is_active_rpg_chat(chat_id):
+            cfg=_event_cfg(2026,10)
+            if not st or st.get('status')!='active' or st.get('event_key')!=cfg['key']:
+                _event_activate(chat_id,cfg)
+                with db_lock:
+                    c=get_db();c.execute('UPDATE rpg_event_state SET ends_at=? WHERE chat_id=?',(end,int(chat_id)));c.commit();c.close()
+                st=_event_get(chat_id)
+                send_message(chat_id,"🎃🕯️🕸️ HALLOWEEN HA DESPERTADO 👻\n\nLa Noche de las Sombras comienza antes este año. Durante el evento aparecerán visitantes de Halloween cada 3 horas con una sola pregunta: ¿Dulce o Truco?\n\n🍬 Dulce suele ser más seguro.\n🎭 Truco puede premiarte muchísimo... o salir espantosamente mal.\n\n/eventos · /bossevento · /tiendaevento")
+            return st
+    return _event_auto_sync_before_halloween(chat_id,now)
+
+def _halloween_spawn_keyboard(spawn_id):return {'inline_keyboard':[[{'text':'🍬 DULCE','callback_data':f'hallowtt:{int(spawn_id)}:dulce'},{'text':'🎭 TRUCO','callback_data':f'hallowtt:{int(spawn_id)}:truco'}]]}
+def _halloween_spawn_due(chat_id,now=None,force=False):
+    now=int(now or time.time());_ensure_halloween_db()
+    if not force and not _halloween_active(chat_id,now):return False
+    c=get_db();last=c.execute('SELECT * FROM rpg_halloween_trick_spawns WHERE chat_id=? ORDER BY spawned_at DESC LIMIT 1',(int(chat_id),)).fetchone()
+    if last and not force and now-int(last['spawned_at'])<HALLOWEEN_TRICK_INTERVAL:c.close();return False
+    key,icon,name=random.choice(_HALLOWEEN_NPCS);r=c.execute("INSERT INTO rpg_halloween_trick_spawns(chat_id,npc_key,npc_name,spawned_at,expires_at,status) VALUES(?,?,?,?,?,'active') RETURNING id",(int(chat_id),key,name,now,now+HALLOWEEN_TRICK_TTL)).fetchone();c.commit();c.close();sid=int(r['id'])
+    send_message(chat_id,f"🎃🕯️ DULCE O TRUCO 🕸️👻\n\n{icon} {name} ha aparecido entre las sombras.\n\n—Sólo puedes escoger uno. No sabrás si vine a darte algo... o a llevármelo.\n\n⏳ Permaneceré hasta la próxima visita.",reply_markup=_halloween_spawn_keyboard(sid));return True
+
+def _halloween_random_item(uid,source):
+    ch=get_active_character(uid)
+    if not ch:return None
+    c=get_db();rows=c.execute("SELECT item_key,name,rarity FROM rpg_items WHERE COALESCE(item_key,'')<>'' AND LOWER(COALESCE(rarity,'')) NOT IN ('mítico','mitico','único','unico','evento','festividad') ORDER BY RANDOM() LIMIT 20").fetchall();c.close()
+    if not rows:return None
+    row=random.choice(rows)
+    try:grant_rpg_item(uid,int(ch['id']),str(row['item_key']),source);return str(row['name'])
+    except Exception:return None
+
+def _halloween_tt_claim(uid,chat_id,spawn_id,choice):
+    _ensure_halloween_db();now=int(time.time());choice=str(choice);c=get_db();sp=c.execute('SELECT * FROM rpg_halloween_trick_spawns WHERE id=?',(int(spawn_id),)).fetchone()
+    if not sp or int(sp['chat_id'])!=int(chat_id):c.close();return '🌫️ Ese visitante ya no está aquí.'
+    if now>int(sp['expires_at']):c.execute("UPDATE rpg_halloween_trick_spawns SET status='expired' WHERE id=?",(int(spawn_id),));c.commit();c.close();return '🕯️ Llegaste tarde. El visitante desapareció entre las sombras.'
+    old=c.execute('SELECT result_text FROM rpg_halloween_trick_claims WHERE spawn_id=? AND user_id=?',(int(spawn_id),int(uid))).fetchone()
+    if old:c.close();return '🎃 Ya elegiste con este visitante. No puedes cambiar tu suerte.'
+    c.close();ch=get_active_character(uid);roll=random.randint(1,100);name=str(sp['npc_name']);result=''
+    if choice=='dulce':
+        if roll<=38:
+            kw=random.randint(3000,9000);change_kiwons(uid,kw,'halloween_dulce',chat_id=chat_id,note=str(spawn_id));result=f'🍬 {name} deja caer una bolsa pesada.\n💰 +{kw:,} Kiwons.'
+        elif roll<=62 and ch:
+            xp=max(100,int(exp_needed(int(ch['level']))*random.uniform(.10,.25)));grant_rpg_exp(int(ch['id']),xp);result=f'🍭 El dulce estaba encantado.\n✨ +{xp:,} EXP.'
+        elif roll<=78:
+            item=_halloween_random_item(uid,f'halloween:dulce:{spawn_id}');result=f'🎁 Dentro del envoltorio había {item}.' if item else '🍬 Era un dulce normal... pero al menos no pasó nada malo.'
+        elif roll<=92 and ch:
+            eff=effective_character_stats(ch);heal=max(10,int(eff['max_hp']*.25));c=get_db();c.execute('UPDATE characters SET hp=LEAST(?,hp+?),updated_at=? WHERE id=?',(int(eff['max_hp']),heal,now,int(ch['id'])));c.commit();c.close();result=f'❤️ El dulce sabe horrible, pero funciona. Recuperas hasta {heal} HP.'
+        else:
+            bal=max(0,int(get_kiwons(uid) or 0));loss=min(bal,max(500,random.randint(1000,4000)));change_kiwons(uid,-loss,'halloween_dulce_malo',chat_id=chat_id,note=str(spawn_id));result=f'🪱 Eso definitivamente NO era un dulce.\n💸 -{loss:,} Kiwons.'
+    else:
+        if roll<=22:
+            kw=random.randint(12000,30000);change_kiwons(uid,kw,'halloween_truco',chat_id=chat_id,note=str(spawn_id));result=f'🎭 Tu truco impresiona a {name}.\n💰 +{kw:,} Kiwons.'
+        elif roll<=38:
+            item=_halloween_random_item(uid,f'halloween:truco:{spawn_id}');result=f'🗡️ El visitante ríe y te entrega {item}.' if item else '🎭 El truco funciona, pero el visitante no llevaba nada útil.'
+        elif roll<=52 and ch:
+            xp=max(250,int(exp_needed(int(ch['level']))*random.uniform(.25,.50)));grant_rpg_exp(int(ch['id']),xp);result=f'🌟 Las sombras te favorecen.\n✨ +{xp:,} EXP.'
+        elif roll<=68:
+            bal=max(0,int(get_kiwons(uid) or 0));loss=min(bal,max(1000,random.randint(5000,15000)));change_kiwons(uid,-loss,'halloween_truco_malo',chat_id=chat_id,note=str(spawn_id));result=f'👻 El truco era PARA TI. Cuando miras tu bolsa faltan monedas.\n💸 -{loss:,} Kiwons.'
+        elif roll<=84 and ch:
+            eff=effective_character_stats(ch);dmg=max(1,int(eff['max_hp']*random.uniform(.10,.25)));c=get_db();c.execute('UPDATE characters SET hp=GREATEST(1,hp-?),updated_at=? WHERE id=?',(dmg,now,int(ch['id'])));c.commit();c.close();result=f'🕸️ Una maldición te alcanza antes de que puedas reírte.\n🩸 -{dmg} HP.'
+        else:
+            try:_npc3_schedule(uid,'nox','halloween_curse','Una broma de Halloween que creías olvidada acaba de regresar.',2,8)
+            except Exception:pass
+            result='🕯️ El visitante no hace nada. Sólo memoriza tu rostro.\n\n🌎 Algo quedó pendiente... y puede regresar más adelante.'
+    c=get_db()
+    try:c.execute('INSERT INTO rpg_halloween_trick_claims(spawn_id,user_id,choice,result_text,claimed_at) VALUES(?,?,?,?,?)',(int(spawn_id),int(uid),choice,result,now));c.commit()
+    except Exception:c.rollback();c.close();return '🎃 Ya elegiste con este visitante.'
+    c.close();return f"🎃 {choice.upper()}\n\n{result}"
+
+
+# =========================================================
+# KIWRPG — HALLOWEEN V2: FICHAS, TIENDA ÚNICA Y CAZA DE MONSTRUOS
+# =========================================================
+HALLOWEEN_MONSTER_INTERVAL = 75 * 60
+HALLOWEEN_MONSTER_TTL = 45 * 60
+_HALLOWEEN_MONSTERS = [
+    ('calabaza_poseida','🎃','Calabaza Poseída',72),
+    ('novia_fantasma','👻','Novia Fantasma',82),
+    ('espantapajaros_maldito','🕸️','Espantapájaros Maldito',90),
+    ('hombre_lobo_hambriento','🐺','Hombre Lobo Hambriento',105),
+    ('caballero_sin_cabeza','🗡️','Caballero sin Cabeza',120),
+    ('muneca_cosida','🪡','Muñeca Cosida',78),
+    ('murcielago_gigante','🦇','Murciélago Gigante',68),
+    ('bruja_del_pantano','🧙‍♀️','Bruja del Pantano',98),
+]
+_halloween_monster_db_ready=False
+
+def _ensure_halloween_monster_db():
+    global _halloween_monster_db_ready
+    if _halloween_monster_db_ready:return
+    c=get_db()
+    c.execute("CREATE TABLE IF NOT EXISTS rpg_halloween_monster_spawns(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,monster_key TEXT NOT NULL,monster_name TEXT NOT NULL,max_hp BIGINT NOT NULL,spawned_at BIGINT NOT NULL,expires_at BIGINT NOT NULL,status TEXT DEFAULT 'active')")
+    c.execute("CREATE TABLE IF NOT EXISTS rpg_halloween_monster_players(spawn_id BIGINT NOT NULL,user_id BIGINT NOT NULL,hp BIGINT NOT NULL,monster_hp BIGINT NOT NULL,won INTEGER DEFAULT 0,claimed INTEGER DEFAULT 0,updated_at BIGINT NOT NULL,PRIMARY KEY(spawn_id,user_id))")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_halloween_monsters_chat ON rpg_halloween_monster_spawns(chat_id,spawned_at)")
+    c.commit();c.close();_halloween_monster_db_ready=True
+
+def _halloween_event_state(chat_id):
+    st=_event_auto_sync(chat_id)
+    if st and st.get('status')=='active' and st.get('event_key')=='event_2026_10': return st
+    return None
+
+def _halloween_add_tokens(chat_id,uid,amount):
+    st=_halloween_event_state(chat_id)
+    if not st:return 0
+    amount=max(0,int(amount)); now=int(time.time())
+    with db_lock:
+        c=get_db(); event_player_row(chat_id,st['event_key'],uid,False,c)
+        c.execute("UPDATE rpg_event_players SET currency=currency+?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?",(amount,now,int(chat_id),st['event_key'],int(uid)))
+        c.commit();c.close()
+    return amount
+
+def _halloween_tokens(chat_id,uid):
+    st=_halloween_event_state(chat_id)
+    if not st:return 0
+    p=event_player_row(chat_id,st['event_key'],uid)
+    return int(p['currency'] or 0) if p else 0
+
+# Dulce o Truco también alimenta la moneda propia de Halloween.
+_halloween_tt_claim_base=_halloween_tt_claim
+def _halloween_tt_claim(uid,chat_id,spawn_id,choice):
+    result=_halloween_tt_claim_base(uid,chat_id,spawn_id,choice)
+    if result.startswith('🎃 ') and 'Ya elegiste' not in result:
+        bonus=6 if str(choice)=='dulce' else 10
+        _halloween_add_tokens(chat_id,uid,bonus)
+        result += f"\n\n🎃 +{bonus} Fichas de Halloween"
+    return result
+
+def _halloween_monster_spawn_due(chat_id,now=None,force=False):
+    now=int(now or time.time()); _ensure_halloween_monster_db()
+    if not force and not _halloween_active(chat_id,now):return False
+    c=get_db(); last=c.execute("SELECT * FROM rpg_halloween_monster_spawns WHERE chat_id=? ORDER BY spawned_at DESC LIMIT 1",(int(chat_id),)).fetchone()
+    if last and not force and now-int(last['spawned_at'])<HALLOWEEN_MONSTER_INTERVAL:c.close();return False
+    key,icon,name,hp=random.choice(_HALLOWEEN_MONSTERS)
+    row=c.execute("INSERT INTO rpg_halloween_monster_spawns(chat_id,monster_key,monster_name,max_hp,spawned_at,expires_at,status) VALUES(?,?,?,?,?,?,'active') RETURNING id",(int(chat_id),key,name,hp,now,now+HALLOWEEN_MONSTER_TTL)).fetchone();c.commit();c.close()
+    sid=int(row['id']); left=_event_countdown(HALLOWEEN_MONSTER_TTL)
+    send_message(chat_id,f"🎃 ENCUENTRO DE HALLOWEEN\n\n{icon} {name} apareció entre la niebla.\n\n⚔️ Véncelo y consigue 20 Fichas de Halloween.\n⏳ Desaparece en {left}.",reply_markup={'inline_keyboard':[[{'text':'⚔️ Enfrentar','callback_data':f'hmon:{sid}'}]]})
+    return True
+
+def _halloween_monster_fight(uid,chat_id,sid):
+    _ensure_halloween_monster_db(); now=int(time.time()); ch=get_active_character(uid)
+    if not ch:return '🧙 Necesitas un personaje activo.'
+    c=get_db(); sp=c.execute("SELECT * FROM rpg_halloween_monster_spawns WHERE id=?",(int(sid),)).fetchone()
+    if not sp or int(sp['chat_id'])!=int(chat_id):c.close();return '🌫️ Ese monstruo ya no está aquí.'
+    if now>int(sp['expires_at']):c.execute("UPDATE rpg_halloween_monster_spawns SET status='expired' WHERE id=?",(int(sid),));c.commit();c.close();return '🌫️ El monstruo desapareció entre la niebla.'
+    eff=effective_character_stats(ch); player_max=max(1,int(eff['max_hp']))
+    row=c.execute("SELECT * FROM rpg_halloween_monster_players WHERE spawn_id=? AND user_id=?",(int(sid),int(uid))).fetchone()
+    if not row:
+        c.execute("INSERT INTO rpg_halloween_monster_players(spawn_id,user_id,hp,monster_hp,updated_at) VALUES(?,?,?,?,?)",(int(sid),int(uid),player_max,int(sp['max_hp']),now));c.commit()
+        php=player_max; mhp=int(sp['max_hp']); won=0; claimed=0
+    else:
+        php=int(row['hp']);mhp=int(row['monster_hp']);won=int(row['won']);claimed=int(row['claimed'])
+    if won:
+        c.close();return '🎃 Ya derrotaste a este monstruo y reclamaste sus fichas.'
+    roll=random.randint(1,6); enemy_roll=random.randint(1,6)
+    # Combate corto y personal: escala con estadísticas, sin tocar el HP persistente del personaje.
+    dmg=max(4,int(eff['atk'])*roll//18); retaliation=max(2,(int(sp['max_hp'])//14)*enemy_roll//3-max(0,int(eff['defense'])//30))
+    mhp=max(0,mhp-dmg)
+    text=f"🎃 {sp['monster_name']}\n\n🎲 Tú: {roll} · ⚔️ {dmg} daño"
+    if mhp<=0:
+        c.execute("UPDATE rpg_halloween_monster_players SET monster_hp=0,won=1,claimed=1,updated_at=? WHERE spawn_id=? AND user_id=?",(now,int(sid),int(uid)));c.commit();c.close()
+        _halloween_add_tokens(chat_id,uid,20)
+        return text+"\n\n💀 Lo derrotaste.\n🎃 +20 Fichas de Halloween"
+    php=max(0,php-retaliation)
+    if php<=0:
+        # No mata al personaje real: este encuentro especial simplemente se pierde y puede reintentarse desde cero.
+        php=player_max;mhp=int(sp['max_hp'])
+        text+=f"\n🎲 Monstruo: {enemy_roll} · 🩸 {retaliation} daño\n\n👻 Te expulsó del encuentro. Puedes intentarlo otra vez."
+    else:
+        text+=f"\n🎲 Monstruo: {enemy_roll} · 🩸 {retaliation} daño\n\n❤️ Tú: {php}/{player_max}\n👹 Monstruo: {mhp}/{int(sp['max_hp'])}"
+    c.execute("UPDATE rpg_halloween_monster_players SET hp=?,monster_hp=?,updated_at=? WHERE spawn_id=? AND user_id=?",(php,mhp,now,int(sid),int(uid)));c.commit();c.close()
+    return text
+
+_HALLOWEEN_SHOP={
+ 'lantern':('🏮 Linterna de las Ánimas',85,'accesorio',7,8,55,'Una luz que sólo aparece durante Noche de las Sombras.'),
+ 'scythe':('🩸 Guadaña del Espantapájaros',180,'arma',34,4,35,'Arma exclusiva de Halloween 2026.'),
+ 'mask':('🎭 Máscara del Visitante',130,'casco',6,18,80,'Nadie recuerda bien el rostro que había debajo.'),
+ 'coat':('🕸️ Abrigo de la Casa Vacía',210,'armadura',5,27,150,'Armadura exclusiva de Halloween 2026.'),
+ 'ring':('💍 Anillo del Truco',155,'accesorio',18,7,45,'Un recuerdo para quienes eligieron arriesgarse.'),
+ 'boots':('👻 Botas del Pasillo Infinito',120,'botas',10,13,70,'Parecen no hacer ruido al caminar.'),
+}
+
+def _halloween_shop_item(kind):
+    cfg=_HALLOWEEN_SHOP.get(kind)
+    if not cfg:return None
+    name,price,slot,atk,de,hp,desc=cfg; key=f'halloween_2026_{kind}'; now=int(time.time())
+    with db_lock:
+        c=get_db();c.execute("""INSERT INTO rpg_items(item_key,name,rarity,item_type,description,atk_bonus,def_bonus,hp_bonus,max_global_copies,tradeable,created_at,equip_slot,allowed_classes,min_level) VALUES(?,?,?,?,?,?,?,?,NULL,1,?,?,?,?) ON CONFLICT(item_key) DO NOTHING""",(key,name,'evento',slot,desc,atk,de,hp,now,slot,'Guerrero,Mago,Pícaro,Paladín,Arquero,The Cleaner',10));c.commit();c.close()
+    return key
+
+def _halloween_shop_text(chat_id,user_id):
+    st=_halloween_event_state(chat_id)
+    if not st:return '🌙 La tienda de Halloween está cerrada.',None
+    cur=_halloween_tokens(chat_id,user_id); left=max(0,int(st['ends_at'])-int(time.time()))
+    lines=["🎃 TIENDA DE HALLOWEEN — 2026","",f"🎃 Tus fichas: {cur}",f"⏳ Cierra en: {_event_countdown(left)}","","Objetos exclusivos de esta Noche de las Sombras:"]
+    rows=[]
+    for k,(name,price,*_) in _HALLOWEEN_SHOP.items():
+        lines.append(f"{name} — {price}"); rows.append([{'text':f'{name} · {price}','callback_data':f'hshop:{k}'}])
+    lines += ["","🍬 Dulce o Truco y los monstruos especiales dan Fichas de Halloween.","Los objetos permanecen cuando termine el evento."]
+    return '\n'.join(lines),{'inline_keyboard':rows}
+
+def _halloween_shop_buy(chat_id,uid,kind):
+    if kind not in _HALLOWEEN_SHOP:return False,'Objeto desconocido.'
+    st=_halloween_event_state(chat_id);ch=get_active_character(uid)
+    if not st or not ch:return False,'🎃 La tienda de Halloween está cerrada.'
+    name,price,*_=_HALLOWEEN_SHOP[kind]
+    with db_lock:
+        c=get_db();p=event_player_row(chat_id,st['event_key'],uid,True,c)
+        if int(p['currency'] or 0)<price:c.rollback();c.close();return False,f'🎃 Te faltan {price-int(p["currency"] or 0)} fichas.'
+        c.execute("UPDATE rpg_event_players SET currency=currency-?,updated_at=? WHERE chat_id=? AND event_key=? AND user_id=?",(price,int(time.time()),int(chat_id),st['event_key'],int(uid)));c.commit();c.close()
+    key=_halloween_shop_item(kind);grant_rpg_item(uid,int(ch['id']),key,'tienda_halloween_2026')
+    return True,f'🎃 Compraste {name}.\n🎒 Ya está en tu inventario.'
+
+# Halloween tiene tienda propia: no recicla la tienda genérica mensual.
+_event_shop_text_base=event_shop_text
+def event_shop_text(chat_id,user_id):
+    st=_event_auto_sync(chat_id)
+    if st and st.get('status')=='active' and st.get('event_key')=='event_2026_10':return _halloween_shop_text(chat_id,user_id)
+    return _event_shop_text_base(chat_id,user_id)
+
+# Contador visible también en el World Boss.
+_event_boss_card_base=event_boss_card
+def event_boss_card(chat_id,user_id):
+    txt,kb=_event_boss_card_base(chat_id,user_id);st=_event_get(_rpg_route_chat('worldboss',chat_id))
+    if st and st.get('status')=='active':txt += f"\n⏳ Evento termina en: {_event_countdown(max(0,int(st['ends_at'])-int(time.time())))}"
+    return txt,kb
+
+_event_boss_combat_panel_base=event_boss_combat_panel
+def event_boss_combat_panel(chat_id,user_id):
+    txt,kb=_event_boss_combat_panel_base(chat_id,user_id);st=_event_get(_rpg_route_chat('worldboss',chat_id))
+    if st and st.get('status')=='active':txt += f"\n⏳ Evento termina en: {_event_countdown(max(0,int(st['ends_at'])-int(time.time())))}"
+    return txt,kb
+
+
+
+# =========================================================
+# KIWRPG — MUNDO VIVO 8: 100 ENCARGOS/NPC + MORAL REAL + LOOT MÍTICO
+# =========================================================
+# 25 situaciones x 4 giros = 100 encargos distintos para CADA NPC.
+# No existe un botón moralmente correcto: el resultado depende de lo que realmente ocurrió.
+_NPC_JOB_SEEDS = [
+('El carro incendiado','un carretero acusado','Un carro de medicinas ardió y alguien exige un culpable.','El acusado provocó el incendio para ocultar que vendía medicinas falsas.','guilty'),
+('Las monedas del templo','una acólita','Faltan donaciones y la acusan de robarlas.','Tomó parte del dinero para comprar comida, pero también escondió una parte para ella.','mixed'),
+('El niño desaparecido','un rastreador','Una familia dice que fue la última persona que vio al niño.','Lo encontró herido y lo ocultó porque el padre era quien lo golpeaba.','innocent'),
+('La casa cerrada','un propietario','Vecinos oyen gritos detrás de una puerta que nunca abre.','Tiene encerrado a un ladrón peligroso y pretende cobrar por entregarlo.','mixed'),
+('El veneno del pozo','una boticaria','Tres personas enfermaron después de beber del mismo pozo.','Contaminó el pozo para espantar a una banda, sabiendo que también beberían vecinos.','guilty'),
+('El saco de monedas','un jornalero','Apareció con dinero justo después de un robo.','Encontró el saco y gastó parte antes de saber de quién era.','mixed'),
+('La tumba abierta','un sepulturero','Una tumba fue profanada durante la noche.','Abrió la tumba porque escuchó golpes: enterraron viva a una persona.','innocent'),
+('El mercader perdido','una guía','Un mercader desapareció siguiendo su ruta.','Lo abandonó tras descubrir que traficaba prisioneros; no sabe si sobrevivió.','mixed'),
+('La granja vacía','un recaudador','Una familia huyó después de su visita.','Amenazó con quitarles todo y aceptó dinero extra para borrar parte de la deuda.','guilty'),
+('El collar ensangrentado','una cazadora','Lleva un collar perteneciente a una persona muerta.','Mató al dueño en defensa propia, pero se quedó con el collar por codicia.','mixed'),
+('La puerta del norte','un guardia','Dejó pasar a desconocidos sin registrarlos.','Eran refugiados perseguidos injustamente y decidió arriesgar su puesto.','innocent'),
+('El almacén quemado','un comerciante','Su competencia perdió todo en un incendio.','Pagó a alguien para quemarlo y ahora intenta culpar a un vagabundo.','guilty'),
+('La espada del hermano','un joven soldado','Porta el arma de un soldado desaparecido.','Su hermano murió protegiéndolo y le entregó la espada antes de morir.','innocent'),
+('Los lobos del valle','un pastor','Lo culpan por atraer lobos cerca del pueblo.','Los alimentó para alejarlos de su rebaño y terminó acercándolos a otras casas.','mixed'),
+('El mapa falso','una cartógrafa','Una expedición murió usando uno de sus mapas.','Sabía que faltaba revisar una ruta y aun así vendió el mapa por necesidad.','guilty'),
+('El preso sin nombre','un carcelero','Un prisionero desapareció de una celda cerrada.','Lo liberó al descubrir que la orden de arresto era falsa.','innocent'),
+('La medicina cara','un curandero','Subió brutalmente el precio de un remedio durante una epidemia.','Usó parte de las ganancias para fabricar dosis gratuitas y se quedó con el resto.','mixed'),
+('La campana rota','una artesana','La alarma del pueblo falló durante un ataque.','Aceptó materiales baratos para ahorrar dinero aunque sabía que podían fallar.','guilty'),
+('El monstruo encadenado','un cuidador','Mantiene una criatura peligrosa oculta bajo su casa.','La criatura fue humana y busca una cura; hasta ahora no ha herido a nadie.','innocent'),
+('La carta vendida','un mensajero','Vendió una copia de una carta privada.','La carta probaba corrupción, pero también cobró dos veces por la información.','mixed'),
+('El puente derrumbado','un constructor','El puente que reparó cayó días después.','Robó parte del presupuesto y usó madera inferior.','guilty'),
+('El ladrón herido','una posadera','Oculta a un ladrón buscado en una habitación.','El ladrón robó comida para varios niños; ella desconoce que también apuñaló a un guardia.','mixed'),
+('Las jaulas abiertas','un mozo','Liberó animales peligrosos de un mercader.','Los animales eran maltratados; uno de ellos hirió después a un viajero.','mixed'),
+('El sello real','una escribana','Falsificó documentos con el sello del reino.','Los documentos permitieron escapar a familias perseguidas por una acusación falsa.','innocent'),
+('El pago por una cabeza','un mercenario','Cobró por matar a alguien y asegura haber cumplido.','Mató deliberadamente a la persona equivocada para cobrar rápido y ocultó el error.','guilty'),
+]
+_NPC_JOB_TWISTS=[
+('', 'La primera versión parece convincente.'),
+(' — Sin testigos','No hay testigos fiables y cada parte cuenta algo distinto.'),
+(' — Una segunda versión','Aparece alguien que contradice una parte importante del relato.'),
+(' — La prueba rota','Existe una prueba, pero está incompleta y puede interpretarse de dos maneras.'),
+]
+_NPC_NAMES=['Aren','Lio','Cira','Darek','Mina','Ravel','Sena','Toren','Vika','Eron','Nara','Jorek','Talia','Bren','Iria','Karel','Maren','Dain','Yara','Sorel','Neris','Vael','Rina','Olek','Sian']
+
+def _build_npc_hundred(npc_key):
+    out=[]; offset=sum(ord(x) for x in str(npc_key))%len(_NPC_NAMES)
+    for i,(title,role,hook,truth,moral) in enumerate(_NPC_JOB_SEEDS):
+        for j,(suffix,extra) in enumerate(_NPC_JOB_TWISTS):
+            name=_NPC_NAMES[(offset+i+j*7)%len(_NPC_NAMES)]
+            out.append({'title':title+suffix,'target':f'{name}, {role}','hook':hook+' '+extra,'truth':truth,
+                        'pleas':['—No decidas todavía.','—Hay una parte que no te contaron.','—Haz lo que quieras, pero averigua primero qué pasó.'],
+                        'kind':['witness','debt','past','blood','letter'][((i+j)%5)],'moral':moral})
+    return out[:100]
+
+NPC_MORAL_POOL_SIZE=100
+NPC_MORAL_JOBS_BY_NPC={k:_build_npc_hundred(k) for k in WORLD_NPCS.keys()}
+
+# Reputación según la verdad del encargo y no según "perdonar siempre es bueno".
+def _npc_moral_rep(moral,outcome,attacks=0):
+    moral=str(moral or 'mixed'); attacks=int(attacks or 0)
+    if outcome=='spared': base={'innocent':4,'mixed':0,'guilty':-4}.get(moral,0)
+    elif outcome=='killed': base={'innocent':-6,'mixed':-1,'guilty':4}.get(moral,0)
+    else: base=0
+    # Matar rápido a un culpable puede ser visto como justicia; prolongarlo parece crueldad.
+    if outcome=='killed' and attacks>=4: base-=min(5,attacks-3)
+    if outcome=='spared' and attacks>=3: base-=min(3,attacks-2)
+    return max(-10,min(8,base))
+
+def _npc_job_reward_item(uid,char_id,moral,outcome,source):
+    # Recompensas variadas, sin convertir cada encargo en una fábrica de legendarios.
+    x=random.random(); pool=[]
+    if x<.18: pool=['venda_viajero','cristal_opaco','polvo_forja']
+    elif x<.28: pool=['hoja_ceniza','foco_cristal','escudo_guardian','botas_niebla']
+    elif x<.34: pool=['yelmo_carmesi','tunica_arcana','guantes_acechador','anillo_carmesi']
+    if not pool:return None
+    try:return grant_rpg_item(uid,int(char_id),random.choice(pool),source)
+    except Exception:return None
+
+def _npc_attack_keyboard(job_id,char):
+    abs_=rpg_abilities_for(char['class_name'])[:3]
+    rows=[]
+    for a in abs_:
+        rows.append([{'text':f"{a['emoji']} {a['name']}",'callback_data':f"npcjob:{int(job_id)}:atk_{a['key']}"}])
+    rows.append([{'text':'⬅️ Volver','callback_data':f'npcjob:{int(job_id)}:back'}])
+    return {'inline_keyboard':rows}
+
+def npc_moral_job_action(user_id,chat_id,job_id,action):
+    _ensure_npc_moral_jobs_db(); uid=int(user_id); now=int(time.time()); char=get_active_character(uid)
+    if not char:return 'Necesitas un personaje activo.',None
+    if action in ('investigate','negotiate','deceive','intimidate','bribe'):
+        return _npc_job_start_roll(uid,chat_id,job_id,action)
+    with db_lock:
+        c=get_db(); row=c.execute("SELECT * FROM rpg_npc_moral_jobs WHERE id=? AND user_id=? FOR UPDATE",(int(job_id),uid)).fetchone()
+        if not row:c.rollback();c.close();return '🌫️ Ese encargo ya no está disponible.',None
+        if row['status']!='active':c.rollback();c.close();return '📜 Ese encargo ya terminó.',None
+        row=dict(row);p=json.loads(row['payload']);attacks=int(row['attacks'] or 0);hp=int(row['target_hp']);mh=int(row['target_max_hp'])
+        if action=='back':c.rollback();c.close();return _npc_job_card(row,bool(row.get('listened')))
+        if action=='listen':
+            c.execute("UPDATE rpg_npc_moral_jobs SET listened=1,updated_at=? WHERE id=?",(now,int(job_id)));c.commit();row['listened']=1;c.close();return _npc_job_card(row,True)
+        if action=='attack':c.rollback();c.close();return '⚔️ ¿Cómo quieres atacar?',_npc_attack_keyboard(job_id,char)
+        if action=='spare':
+            rep=_npc_moral_rep(p.get('moral'),'spared',attacks);reward=random.randint(500,1800)
+            c.execute("INSERT INTO rpg_npc_moral_completed(user_id,npc_key,title,outcome,completed_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,npc_key,title) DO NOTHING",(uid,str(row['npc_key']),str(row['title']),'spared',now));c.execute("UPDATE rpg_npc_moral_jobs SET status='spared',updated_at=? WHERE id=?",(now,int(job_id)));c.commit();c.close()
+            change_kiwons(uid,reward,'npc_encargo_spare',actor_id=uid,chat_id=int(chat_id),note=str(row['title']))
+            item=_npc_job_reward_item(uid,char['id'],p.get('moral'),'spared',f'npc_encargo:{job_id}')
+            record_world_decision(uid,f'npc_moral_spare:{job_id}',f'Dejaste ir a {row["target_name"]}.',rep,npc_key=str(row['npc_key']),traits={'merciful':1},chat_id=int(chat_id))
+            moral_txt={'innocent':'Después aparecen pruebas: dejarlo ir evitó castigar a alguien que no era culpable.','mixed':'Después queda claro que no era inocente ni completamente culpable.','guilty':'Más tarde aparecen pruebas de que sí era responsable. Tu decisión tendrá consecuencias.'}.get(p.get('moral'),'La verdad tarda en acomodarse.')
+            return f"🕊️ Lo dejas ir.\n\n{moral_txt}\n\n🪙 +{reward:,} KW\n⚖️ Reputación: {rep:+d}"+(f"\n🎁 También recibiste {item['name']}." if item else '')+'\n\n🌎 Esto puede volver después.',None
+        if not str(action).startswith('atk_'):c.rollback();c.close();return 'Acción no válida.',None
+        ability_key=str(action)[4:];ab=_rpg_get_ability(char['class_name'],ability_key)
+        if not ab:c.rollback();c.close();return 'Ese movimiento no está disponible.',None
+        eff=effective_character_stats(char);roll=random.randint(1,6);power=float(ab.get('power') or 1.0);dmg=max(5,int(eff['atk']*power*(0.45+roll*0.09)));hp=max(0,hp-dmg);attacks+=1
+        retaliation=max(1,int((6+attacks*2)*random.uniform(.7,1.2)));fresh=c.execute('SELECT hp FROM characters WHERE id=?',(int(char['id']),)).fetchone();curhp=int(fresh['hp']) if fresh else int(char['hp']);newphp=max(1,curhp-retaliation);c.execute('UPDATE characters SET hp=?,updated_at=? WHERE id=?',(newphp,now,int(char['id'])))
+        if hp<=0:
+            rep=_npc_moral_rep(p.get('moral'),'killed',attacks);reward=random.randint(1200,3200)
+            c.execute("INSERT INTO rpg_npc_moral_completed(user_id,npc_key,title,outcome,completed_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id,npc_key,title) DO NOTHING",(uid,str(row['npc_key']),str(row['title']),'killed',now));c.execute("UPDATE rpg_npc_moral_jobs SET status='killed',target_hp=0,attacks=?,updated_at=? WHERE id=?",(attacks,now,int(job_id)));c.commit();c.close();change_kiwons(uid,reward,'npc_encargo_kill',actor_id=uid,chat_id=int(chat_id),note=str(row['title']))
+            item=_npc_job_reward_item(uid,char['id'],p.get('moral'),'killed',f'npc_encargo:{job_id}')
+            style=('Fuiste directo. No pareces disfrutar alargando una muerte.' if attacks<=2 else ('Te tomaste tu tiempo. La gente empieza a hablar de ello.' if attacks>=5 else 'No fue rápido ni especialmente prolongado.'))
+            record_world_decision(uid,f'npc_moral_kill:{job_id}',f'Mataste a {row["target_name"]} con {ab["name"]} tras {attacks} ataques.',rep,npc_key=str(row['npc_key']),traits={'cruel':max(0,attacks-2)},chat_id=int(chat_id))
+            if attacks>=5:_npc3_schedule(uid,str(row['npc_key']),'witness',f'Corren historias sobre cuánto prolongaste la muerte de {row["target_name"]}.',3,12)
+            return f"{ab['emoji']} {ab['name']} · 🎲 {roll}\n⚔️ {dmg} daño.\n\n☠️ {row['target_name']} cae.\n{style}\n\n📖 Lo que descubres después:\n{p['truth']}\n\n🪙 +{reward:,} KW\n⚖️ Reputación: {rep:+d}"+(f"\n🎁 {item['name']}" if item else '')+'\n\n🌎 El mundo recordará cómo lo hiciste.',None
+        c.execute('UPDATE rpg_npc_moral_jobs SET target_hp=?,attacks=?,updated_at=? WHERE id=?',(hp,attacks,now,int(job_id)));c.commit();row['target_hp']=hp;row['attacks']=attacks;c.close();txt,kb=_npc_job_card(row,reveal=bool(row.get('listened')))
+        tone='Un golpe y nada más.' if attacks==1 else ('Ya van varios. Esto empieza a parecer personal.' if attacks>=4 else 'La pelea continúa.')
+        return f"{ab['emoji']} {ab['name']} · 🎲 {roll}\n⚔️ {dmg} daño · ❤️ recibes {retaliation}\n\n{tone}\n\n"+txt,kb
+
+# Encuentros del mundo: ahora sí existen Épicos/Legendarios/Míticos reales, extremadamente raros.
+RPG_ENCOUNTER_RARITIES[:] = [
+    ('mythic',0.00010),      # 0.01% ~ 1/10,000
+    ('legendary',0.00090),   # 0.09% ~ 1/1,111
+    ('ultra',0.00600),       # 0.60%
+    ('rare',0.03000),        # 3.00%
+    ('uncommon',0.11000),    # 11.00%
+    ('normal',0.85300),
+]
+RPG_ENCOUNTER_RARITY_DATA['mythic']={'icon':'🌟','label':'MÍTICO','hp':1.90,'atk':1.45,'def':1.38,'reward':4.50,'suffix':' — Primordial'}
+
+_roll_rpg_drop_mv8_base=roll_rpg_drop
+def roll_rpg_drop(user_id,character_id,enemy_key,encounter_rarity='normal'):
+    rarity=str(encounter_rarity or 'normal')
+    if rarity=='mythic':
+        # Equipo mítico real del catálogo. Si una pieza limitada ya no puede salir, prueba otra.
+        c=get_db();rows=c.execute("SELECT item_key FROM rpg_items WHERE LOWER(COALESCE(rarity,'')) IN ('mitico','mítico') AND COALESCE(equip_slot,'')<>'' ORDER BY RANDOM() LIMIT 12").fetchall();c.close()
+        for r in rows:
+            try:
+                item=grant_rpg_item(user_id,character_id,r['item_key'],f'encuentro:{enemy_key}:mythic')
+                if item:return item
+            except Exception:pass
+        return _roll_rpg_drop_mv8_base(user_id,character_id,enemy_key,'legendary')
+    if rarity=='legendary':
+        # Legendario garantiza equipo/reliquia de alto nivel si hay disponibilidad.
+        c=get_db();rows=c.execute("SELECT item_key FROM rpg_items WHERE LOWER(COALESCE(rarity,'')) IN ('legendario','reliquia') AND COALESCE(equip_slot,'')<>'' ORDER BY RANDOM() LIMIT 10").fetchall();c.close()
+        for r in rows:
+            try:
+                item=grant_rpg_item(user_id,character_id,r['item_key'],f'encuentro:{enemy_key}:legendary')
+                if item:return item
+            except Exception:pass
+    return _roll_rpg_drop_mv8_base(user_id,character_id,enemy_key,rarity)
 
 # =========================================================
 # START

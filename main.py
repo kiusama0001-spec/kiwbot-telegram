@@ -15207,11 +15207,21 @@ def handle_rpg_callback(query):
         if act=='character': send_message(chat_id,character_card(char),reply_markup=_rpg_back_kb()); return True
         if act=='identity': send_message(chat_id,rpg_identity_text(char),reply_markup=_rpg_identity_keyboard(char)); return True
         if act=='origins':
-            rows=[[{'text':v[0],'callback_data':f'rpg_origin:{k}'}] for k,v in RPG_ORIGINS.items()]; rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}]); send_message(chat_id,'🌍 ELIGE TU ORIGEN\n\nEs permanente para este personaje. El bono es pequeño.',reply_markup={'inline_keyboard':rows}); return True
+            def _short_bonus(b):
+                labels={'atk':'ATK','defense':'DEF','hp':'HP','exp_pct':'EXP','kiw_pct':'Kiwons'}
+                return ' · '.join(f"+{v}% {labels.get(k,k)}" if k.endswith('_pct') else f"+{v} {labels.get(k,k)}" for k,v in b.items())
+            rows=[[{'text':f"{v[0]} · {_short_bonus(v[1])}",'callback_data':f'rpg_origin_preview:{k}'}] for k,v in RPG_ORIGINS.items()]
+            rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}])
+            send_message(chat_id,'🌍 ELIGE TU ORIGEN\n\nToca uno para ver su historia y bono ANTES de confirmarlo. No se guarda hasta que pulses Confirmar.',reply_markup={'inline_keyboard':rows}); return True
         if act=='traits':
             # Tres opciones estables por personaje: variedad sin reroll infinito.
             keys=list(RPG_TRAITS); rng=random.Random(int(char['id'])*7919); rng.shuffle(keys); keys=keys[:3]
-            rows=[[{'text':RPG_TRAITS[k][0],'callback_data':f'rpg_trait:{k}'}] for k in keys]; rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}]); send_message(chat_id,'🧬 ELIGE UN RASGO\n\nTe salieron estas tres opciones. La elección es permanente.',reply_markup={'inline_keyboard':rows}); return True
+            def _short_trait_bonus(b):
+                labels={'atk':'ATK','defense':'DEF','hp':'HP','exp_pct':'EXP','kiw_pct':'Kiwons'}
+                return ' · '.join(f"+{v}% {labels.get(k,k)}" if k.endswith('_pct') else f"+{v} {labels.get(k,k)}" for k,v in b.items())
+            rows=[[{'text':f"{RPG_TRAITS[k][0]} · {_short_trait_bonus(RPG_TRAITS[k][1])}",'callback_data':f'rpg_trait_preview:{k}'}] for k in keys]
+            rows.append([{'text':'⬅️ Volver','callback_data':'rpg_hub:identity'}])
+            send_message(chat_id,'🧬 ELIGE UN RASGO\n\nEstas tres opciones quedan ligadas a tu personaje. Toca una para conocerla; no se guarda hasta confirmar.',reply_markup={'inline_keyboard':rows}); return True
         if act=='ascend':
             if int(char['level'])<100: send_message(chat_id,'🔒 La Ascensión se desbloquea al nivel 100.',reply_markup=_rpg_back_kb()); return True
             if str(char.get('evolution_key') or ''): send_message(chat_id,'✨ Este personaje ya realizó su Ascensión.',reply_markup=_rpg_back_kb()); return True
@@ -15228,16 +15238,34 @@ def handle_rpg_callback(query):
         if act=='skills': txt,kb=techniques_text_keyboard(uid); send_message(chat_id,txt,reply_markup=kb); return True
         if act=='achievements': send_message(chat_id,chronicles_achievements_text(uid),reply_markup=_rpg_back_kb()); return True
         return True
+    if data.startswith('rpg_origin_preview:'):
+        char=get_active_character(uid); key=data.split(':',1)[1]
+        if not char or str(char.get('origin_key') or ''): send_message(chat_id,'Ese personaje ya eligió origen.'); return True
+        item=RPG_ORIGINS.get(key)
+        if not item: return True
+        label,bonus,lore=item; labels={'atk':'ATK','defense':'DEF','hp':'HP','exp_pct':'EXP','kiw_pct':'Kiwons'}
+        bonus_txt=' · '.join(f"+{v}% {labels.get(k,k)}" if k.endswith('_pct') else f"+{v} {labels.get(k,k)}" for k,v in bonus.items())
+        kb={'inline_keyboard':[[{'text':'✅ Confirmar origen','callback_data':f'rpg_origin:{key}'}],[{'text':'🌍 Ver otros orígenes','callback_data':'rpg_hub:origins'}],[{'text':'⬅️ Identidad','callback_data':'rpg_hub:identity'}]]}
+        send_message(chat_id,f"{label}\n\n{lore}\n\n🎁 Bono permanente: {bonus_txt}\n\n⚠️ La elección será permanente solamente cuando pulses Confirmar.",reply_markup=kb); return True
+    if data.startswith('rpg_trait_preview:'):
+        char=get_active_character(uid); key=data.split(':',1)[1]
+        if not char or str(char.get('trait_key') or ''): send_message(chat_id,'Ese personaje ya eligió rasgo.'); return True
+        item=RPG_TRAITS.get(key)
+        if not item: return True
+        label,bonus,lore=item; labels={'atk':'ATK','defense':'DEF','hp':'HP','exp_pct':'EXP','kiw_pct':'Kiwons'}
+        bonus_txt=' · '.join(f"+{v}% {labels.get(k,k)}" if k.endswith('_pct') else f"+{v} {labels.get(k,k)}" for k,v in bonus.items())
+        kb={'inline_keyboard':[[{'text':'✅ Confirmar rasgo','callback_data':f'rpg_trait:{key}'}],[{'text':'🧬 Ver mis otras opciones','callback_data':'rpg_hub:traits'}],[{'text':'⬅️ Identidad','callback_data':'rpg_hub:identity'}]]}
+        send_message(chat_id,f"{label}\n\n{lore}\n\n🎁 Bono permanente: {bonus_txt}\n\n⚠️ Se guardará solamente si pulsas Confirmar.",reply_markup=kb); return True
     if data.startswith('rpg_origin:'):
         char=get_active_character(uid); key=data.split(':',1)[1]
         if not char or str(char.get('origin_key') or ''): send_message(chat_id,'Ese personaje ya eligió origen.'); return True
         if key not in RPG_ORIGINS: return True
-        _rpg_save_identity(uid,'origin_key',key); send_message(chat_id,f"🌍 Origen elegido: {RPG_ORIGINS[key][0]}",reply_markup=_rpg_back_kb()); return True
+        _rpg_save_identity(uid,'origin_key',key); send_message(chat_id,f"🌍 Origen confirmado: {RPG_ORIGINS[key][0]}\n\nYa forma parte de la identidad de {char['name']}.",reply_markup={'inline_keyboard':[[{'text':'🧬 Elegir rasgo','callback_data':'rpg_hub:traits'}],[{'text':'⬅️ Identidad','callback_data':'rpg_hub:identity'}]]}); return True
     if data.startswith('rpg_trait:'):
         char=get_active_character(uid); key=data.split(':',1)[1]
         if not char or str(char.get('trait_key') or ''): send_message(chat_id,'Ese personaje ya eligió rasgo.'); return True
         if key not in RPG_TRAITS: return True
-        _rpg_save_identity(uid,'trait_key',key); send_message(chat_id,f"🧬 Rasgo elegido: {RPG_TRAITS[key][0]}",reply_markup=_rpg_back_kb()); return True
+        _rpg_save_identity(uid,'trait_key',key); send_message(chat_id,f"🧬 Rasgo confirmado: {RPG_TRAITS[key][0]}\n\nYa forma parte de la identidad de {char['name']}.",reply_markup={'inline_keyboard':[[{'text':'⬅️ Identidad','callback_data':'rpg_hub:identity'}],[{'text':'⚔️ KiwRPG','callback_data':'rpg_hub:home'}]]}); return True
     if data.startswith('rpg_evolve:'):
         char=get_active_character(uid); key=data.split(':',1)[1]
         if not char or int(char['level'])<100 or str(char.get('evolution_key') or ''): send_message(chat_id,'No puedes realizar esa Ascensión.'); return True

@@ -12698,7 +12698,15 @@ def _tower_action(chat_id,thread_id,uid,defend=False,ability_key=None):
         except Exception: pass
         final="\n\n🏆 COMPLETASTE LOS 100 PISOS. Doble dado permanente desbloqueado. 🎲🎲" if floor>=100 else ""
         return f"👑 BOSS DEL PISO {floor} DERROTADO.\n💥 {dmg} daño final.\n🪙 +{reward:,} KW · ✨ +{exp} EXP\n🔥 Bonus {duration//60} min: +{bonus}% ATK · +{max(2,bonus//2)}% DEF.{final}\n\n➡️ Piso {nextfloor}."
-    incoming=max(1,int(f['enemy_atk'])-defense//2); incoming=max(1,incoming//2) if defend else incoming; php=max(0,int(f['player_hp'])-incoming)
+    # El monstruo también tira y siempre conserva daño relevante: la defensa reduce, no anula.
+    enemy_roll=random.randint(1,6)
+    enemy_atk=max(1,int(f['enemy_atk']))
+    # 55%-105% del ATK según dado; la defensa absorbe hasta ~45%, con piso de daño del 18% del ATK.
+    raw=max(1,int(enemy_atk*(0.45+enemy_roll*0.10)))
+    absorbed=min(int(raw*0.45),max(0,defense//3))
+    incoming=max(max(1,int(enemy_atk*0.18)),raw-absorbed)
+    if defend: incoming=max(1,int(incoming*0.50))
+    php=max(0,int(f['player_hp'])-incoming)
     if php<=0:
         floor=int(f['floor'])
         with db_lock:
@@ -12706,7 +12714,7 @@ def _tower_action(chat_id,thread_id,uid,defend=False,ability_key=None):
         return f"💥 Dado: {rolltxt} · {dmg} daño.\n☠️ {f['enemy_name']} te derrotó.\n\nSigues en el piso {floor}, pero al volver repetirás sus encuentros desde el primero."
     with db_lock:
         c=get_db(); c.execute("UPDATE rpg_tower_fights SET enemy_hp=?,player_hp=?,updated_at=? WHERE user_id=?",(enemy_hp,php,now,int(uid))); c.commit(); c.close()
-    return f"🎲 {rolltxt} · 💥 {dmg} daño.\n👹 Contraataque: -{incoming} HP.\n❤️ Tú: {php}/{f['player_max_hp']} · 👹 {enemy_hp}/{f['enemy_max_hp']}"
+    return f"🎲 Tu tirada: {rolltxt} · 💥 {dmg} daño.\n👹 {f['enemy_name']} responde: 🎲 {enemy_roll} · -{incoming} HP.\n❤️ Tú: {php}/{f['player_max_hp']} · 👹 {enemy_hp}/{f['enemy_max_hp']}"
 
 def _tower_progress_text(uid):
     p=_tower_progress(uid)

@@ -7193,7 +7193,7 @@ def rpg_main_menu(user_id):
           f"{char['class_name']} · Nivel {lv}{asc}\n{evo if evo!='Sin ascender' else ''}").rstrip()
     kb={"inline_keyboard":[
         [{"text":"👤 Mi personaje","callback_data":"rpg_hub:character"},{"text":"⚔️ Combate","callback_data":"rpg_hub:combat"}],
-        [{"text":"🏰 Torre","callback_data":"rpg_hub:tower"},{"text":"📜 Misiones","callback_data":"rpg_hub:missions"}],
+        [{"text":f"🏰 Torre · Piso {int((_tower_progress(user_id) or {}).get('floor') or 1)}","callback_data":"rpg_hub:tower"},{"text":"📜 Misiones","callback_data":"rpg_hub:missions"}],
         [{"text":"🎒 Inventario","callback_data":"rpg_show_inventory"},{"text":"🐉 Mascotas","callback_data":"rpg_hub:pets"}],
         [{"text":"✨ Habilidades","callback_data":"rpg_hub:skills"},{"text":"🏆 Logros","callback_data":"rpg_hub:achievements"}],
         [{"text":"🖼️ Retrato","callback_data":"rpg_hub:portrait"},{"text":"🧬 Identidad","callback_data":"rpg_hub:identity"}],
@@ -15291,6 +15291,15 @@ def handle_rpg_callback(query):
         rows=get_characters(uid); target=next((r for r in rows if int(r['id'])==cid),None)
         if not target: send_message(chat_id,"No encontré ese personaje en tu cuenta."); return True
         ok,name=set_active_character(uid,str(target['name'])); send_message(chat_id,f"⭐ Personaje activo: {name}" if ok else "No pude cambiar el personaje."); return True
+    if data.startswith("invclean:"):
+        act=data.split(":",1)[1]
+        if not _is_private_chat_obj(msg.get("chat")):
+            send_message(chat_id,"🧹 Esta acción sólo funciona por privado."); return True
+        if act=="cancel": send_message(chat_id,"🧹 Limpieza cancelada. No se tocó ningún objeto."); return True
+        if act in ("delete","sell"):
+            txt=_inventory_cleanup_apply(uid,sell=(act=="sell")); send_message(chat_id,txt); return True
+        return True
+
     if data.startswith("opening_choice:"):
         choice=data.split(":",1)[1]
         choices={
@@ -17917,6 +17926,15 @@ def process_command(
     user_id = int((message.get("from") or {}).get("id") or 0)
     if chat.get("type") in ("group","supergroup"):
         _touch_rpg_realm(user_id,chat_id)
+
+    # Limpieza segura de inventario: sólo por privado y siempre con confirmación.
+    if command=="/limpiarinventario":
+        if chat.get("type")!="private":
+            send_message(chat_id,"🧹 La limpieza de inventario sólo se hace por privado con KiwBot.")
+            return True
+        txt,kb=_inventory_cleanup_preview(user_id)
+        send_message(chat_id,txt,reply_markup=kb)
+        return True
 
     if command=="/delchataqui":
         if chat.get("type")=="private": send_message(chat_id,"Este comando se usa dentro del grupo/topic que quieras liberar."); return True
@@ -21015,6 +21033,254 @@ def configure_webhook():
         result
     )
 
+
+_world_npc_callback_v2 = world_npc_callback
+
+# =========================================================
+# KIWRPG — MUNDO VIVO 3.0: DECISIONES, DADOS Y CONSECUENCIAS DIFERIDAS
+# =========================================================
+# Este bloque amplía a los NPC existentes. No crea un RPG paralelo.
+NPC_PERSONALITIES={
+'eira':('compasiva pero pragmática',2),'brok':('orgulloso, directo y leal',0),'elias':('curioso y cauteloso',1),
+'orin':('codicioso y obsesionado con reliquias',-1),'erick':('enigmático y calculador',0),'mara':('protectora y observadora',2),
+'nox':('impredecible y desconfiado',-1),'lyra':('valiente y metódica',1),'kael':('competitivo y honorable',0),
+'vesper':('manipuladora y oportunista',-2),'torven':('honorable y severo',1),'selene':('mística y reservada',0),
+'darius':('profesional con código propio',0),'nyra':('arriesgada y curiosa',0),'ivar':('práctico y protector de bestias',0),
+'seraph':('devoto y difícil de leer',1),'valka':('mercenaria, dura y negociadora',-1),'aurel':('noble, orgulloso y justo',1),
+'malkor':('comerciante astuto y poco sentimental',-2)}
+
+NPC_SCENES=[
+('testigo','Un viajero asegura haber visto algo que podría meterte en problemas.'),
+('deuda','Alguien reclama una deuda antigua y el NPC conoce ambas versiones.'),
+('carga','Una caja sellada apareció donde no debía. Nadie admite ser su dueño.'),
+('fugitivo','Una persona perseguida pide protección mientras se escuchan guardias cerca.'),
+('reliquia','Una reliquia desaparecida reaparece en manos equivocadas.'),
+('acusacion','Dos desconocidos se acusan mutuamente y sólo uno parece decir toda la verdad.'),
+('contrato','Hay una recompensa por alguien que quizá no merezca morir.'),
+('robo','Un objeto valioso fue robado y una pista apunta hacia alguien conocido.'),
+('veneno','Alguien está enfermo y el único antídoto disponible tiene un precio extraño.'),
+('secreto','El NPC conoce un secreto que una facción pagaría mucho por silenciar.')]
+
+NPC_ACTIONS={
+'eira':[('🤝 Ayudar','help'),('🩺 Curar al implicado','mercy'),('💰 Sobornar','bribe'),('🎭 Mentir','lie'),('🚶 No involucrarte','leave')],
+'brok':[('⚖️ Exigir la verdad','investigate'),('🤝 Negociar','deal'),('💰 Sobornar','bribe'),('😠 Intimidar','intimidate'),('⚔️ Resolver por la fuerza','attack')],
+'vesper':[('💰 Comprar su silencio','bribe'),('🎭 Engañarla','lie'),('🤝 Intercambiar información','deal'),('🔎 Investigar primero','investigate'),('⚔️ Silenciarla','attack')],
+'valka':[('💰 Contratarla','bribe'),('🤝 Hacer un trato','deal'),('😠 Desafiarla','intimidate'),('🔎 Investigar','investigate'),('⚔️ Atacarla','attack')],
+'malkor':[('💰 Sobornar','bribe'),('🤝 Regatear','deal'),('🎭 Engañarlo','lie'),('🔎 Examinar el trato','investigate'),('🚶 Rechazar','leave')],
+}
+NPC_DEFAULT_ACTIONS=[('🤝 Ayudar','help'),('🔎 Investigar','investigate'),('💰 Sobornar','bribe'),('🎭 Mentir','lie'),('😠 Intimidar','intimidate'),('⚔️ Atacar','attack')]
+NPC_ACTION_DIFFICULTY={'help':2,'mercy':2,'investigate':3,'deal':3,'bribe':3,'lie':4,'intimidate':4,'attack':4,'leave':1}
+NPC_ACTION_LABEL={a:l for l,a in NPC_DEFAULT_ACTIONS}
+for _v in NPC_ACTIONS.values():
+    for _l,_a in _v: NPC_ACTION_LABEL[_a]=_l
+
+_npc3_schema_ready=False
+_npc3_schema_lock=threading.Lock()
+def _ensure_npc3_db():
+    global _npc3_schema_ready
+    if _npc3_schema_ready:return
+    with _npc3_schema_lock:
+        if _npc3_schema_ready:return
+        c=get_db()
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_story_state(user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,scene_key TEXT DEFAULT '',scene_seed BIGINT DEFAULT 0,stage BIGINT DEFAULT 0,relation BIGINT DEFAULT 0,suspicion BIGINT DEFAULT 0,last_result TEXT DEFAULT '',updated_at BIGINT DEFAULT 0,PRIMARY KEY(user_id,npc_key))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_pending_roll(user_id BIGINT PRIMARY KEY,chat_id BIGINT NOT NULL,npc_key TEXT NOT NULL,action_key TEXT NOT NULL,dc BIGINT NOT NULL,amount BIGINT DEFAULT 0,scene_key TEXT DEFAULT '',created_at BIGINT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS rpg_npc_consequences(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,npc_key TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT DEFAULT '',due_after BIGINT NOT NULL,status TEXT DEFAULT 'pending',created_at BIGINT NOT NULL,resolved_at BIGINT DEFAULT 0)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_npc_consequence_due ON rpg_npc_consequences(user_id,status,due_after)")
+        c.commit();c.close();_npc3_schema_ready=True
+
+def _npc3_state(uid,key):
+    _ensure_npc3_db(); now=int(time.time()); c=get_db()
+    c.execute("INSERT INTO rpg_npc_story_state(user_id,npc_key,updated_at) VALUES(?,?,?) ON CONFLICT(user_id,npc_key) DO NOTHING",(int(uid),str(key),now))
+    r=c.execute("SELECT * FROM rpg_npc_story_state WHERE user_id=? AND npc_key=?",(int(uid),str(key))).fetchone();c.commit();c.close();return dict(r)
+
+def _npc3_scene(uid,key):
+    st=_npc3_state(uid,key); seed=int(st.get('scene_seed') or 0)
+    if not seed:
+        seed=random.randint(100000,999999); scene=NPC_SCENES[seed%len(NPC_SCENES)][0]
+        c=get_db();c.execute("UPDATE rpg_npc_story_state SET scene_key=?,scene_seed=?,updated_at=? WHERE user_id=? AND npc_key=?",(scene,seed,int(time.time()),int(uid),str(key)));c.commit();c.close();st['scene_key']=scene;st['scene_seed']=seed
+    scene_key=str(st.get('scene_key') or NPC_SCENES[0][0]); desc=next((d for k,d in NPC_SCENES if k==scene_key),NPC_SCENES[0][1]);return st,scene_key,desc
+
+def _npc3_keyboard(key):
+    acts=NPC_ACTIONS.get(key,NPC_DEFAULT_ACTIONS)
+    # Cinco decisiones como núcleo; algunos NPC tienen seis pero se rotan para evitar menús idénticos.
+    if len(acts)>5:
+        rot=(int(time.time())//3600 + sum(map(ord,key)))%len(acts); acts=(acts[rot:]+acts[:rot])[:5]
+    rows=[]
+    for i in range(0,len(acts),2): rows.append([{'text':l,'callback_data':f'wnpc:{key}:story_{a}'} for l,a in acts[i:i+2]])
+    rows.append([{'text':'📖 Su historia','callback_data':f'wnpc:{key}:history'},{'text':'🕯️ Encargo','callback_data':f'wnpc:{key}:mission'}])
+    return {'inline_keyboard':rows}
+
+def world_npc_keyboard(key):
+    return _npc3_keyboard(str(key))
+
+def _npc3_offer_keyboard(key,action):
+    vals=(1000,5000,10000,25000,50000,100000)
+    rows=[[{'text':f'🪙 {v:,}','callback_data':f'wnpc:{key}:offer_{action}_{v}'} for v in vals[i:i+2]] for i in range(0,len(vals),2)]
+    rows.append([{'text':'⬅️ Otras decisiones','callback_data':f'wnpc:{key}:story_back'}]);return {'inline_keyboard':rows}
+
+def _npc3_start_roll(uid,chat_id,key,action,amount=0):
+    st,scene,desc=_npc3_scene(uid,key); base=NPC_ACTION_DIFFICULTY.get(action,3); rel=int(st.get('relation') or 0); susp=int(st.get('suspicion') or 0)
+    dc=max(2,min(6,base + (1 if susp>=3 else 0) - (1 if rel>=4 else 0)))
+    if action=='bribe':
+        # Personalidad y gravedad determinan si una oferta baja empeora la dificultad.
+        greed=abs(NPC_PERSONALITIES.get(key,('',0))[1]); expected=5000*(1+greed)+2500*dc
+        if amount>=expected*2: dc=max(2,dc-2)
+        elif amount>=expected: dc=max(2,dc-1)
+        elif amount<expected//2: dc=min(6,dc+1)
+    c=get_db();c.execute("""INSERT INTO rpg_npc_pending_roll(user_id,chat_id,npc_key,action_key,dc,amount,scene_key,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET chat_id=EXCLUDED.chat_id,npc_key=EXCLUDED.npc_key,action_key=EXCLUDED.action_key,dc=EXCLUDED.dc,amount=EXCLUDED.amount,scene_key=EXCLUDED.scene_key,created_at=EXCLUDED.created_at""",(int(uid),int(chat_id),str(key),str(action),int(dc),int(amount),scene,int(time.time())));c.commit();c.close()
+    return f"🎲 {WORLD_NPCS.get(key,(key,0))[0]} espera tu movimiento.\n{NPC_ACTION_LABEL.get(action,action)} · dificultad {dc}/6\n\nLanza 🎲 en Telegram. El resultado puede dejar consecuencias ahora... o mucho después."
+
+def _npc3_schedule(uid,key,kind,payload,delay_min=3,delay_max=12):
+    _ensure_npc3_db(); due=int(time.time())+random.randint(delay_min,delay_max)*RPG_AUTO_ENCOUNTER_INTERVAL
+    c=get_db();c.execute("INSERT INTO rpg_npc_consequences(user_id,npc_key,kind,payload,due_after,status,created_at) VALUES(?,?,?,?,?,'pending',?)",(int(uid),str(key),str(kind),str(payload)[:700],due,int(time.time())));c.commit();c.close()
+
+def _npc3_resolve_roll(uid,chat_id,row,roll):
+    key=str(row['npc_key']); action=str(row['action_key']); dc=int(row['dc']); amount=int(row.get('amount') or 0); st=_npc3_state(uid,key); name=WORLD_NPCS.get(key,(key,0))[0]
+    margin=int(roll)-dc; relation_delta=0;susp_delta=0;rep_delta=0; future=None
+    if roll==1:
+        outcome='💀 DESASTRE'; relation_delta=-2;susp_delta=2;rep_delta=-2
+        variants=['Te descubren en el peor momento. Alguien más vio suficiente para recordarlo.','La situación se vuelve contra ti y pierdes el control de la historia.','Tu intento deja una prueba que no debería existir.']
+        detail=random.choice(variants); future=('witness',f'Una consecuencia de tu decisión con {name} ha regresado.')
+    elif margin<0:
+        outcome='❌ FALLÓ'; relation_delta=-1;susp_delta=1;rep_delta=-1
+        detail=random.choice(['No consigues lo que querías y el NPC ahora desconfía más de ti.','La otra parte rechaza tu movimiento y recuerda el intento.','Sales sin resolverlo; alguien empieza a hacer preguntas.']);future=('suspicion',f'Los rumores sobre lo ocurrido con {name} empiezan a circular.')
+    elif roll==6:
+        outcome='🌟 ÉXITO EXCEPCIONAL';relation_delta=2;rep_delta=1
+        detail=random.choice(['Todo encaja a tu favor y además obtienes una pequeña ventaja para el futuro.','Lo consigues limpiamente; el NPC no olvidará cómo resolviste esto.','Tu decisión funciona mejor de lo esperado y abre una oportunidad nueva.']);future=('favor',f'{name} recuerda una deuda pendiente contigo.')
+    else:
+        outcome='✅ ÉXITO' if margin>=1 else '⚠️ ÉXITO CON PRECIO';relation_delta=1 if margin>=1 else 0;susp_delta=0 if margin>=1 else 1
+        detail=random.choice(['Consigues avanzar, pero la situación cambia y no todo queda cerrado.','Funciona. Aun así, alguien tendrá motivos para recordar lo ocurrido.','Obtienes lo que buscabas, aunque dejas una pequeña deuda detrás.'])
+        if margin==0: future=('debt',f'El precio de lo ocurrido con {name} acaba de llegar.')
+    if action=='attack':
+        if roll<=2: detail='Intentas resolverlo por la fuerza, pero hay testigos y tu nombre empieza a circular.';rep_delta-=2;future=('wanted',f'Un guardia te relaciona con la violencia ocurrida cerca de {name}.')
+        elif roll>=5: detail='La violencia termina rápido. Crees haber eliminado las pruebas... pero no puedes saber quién observaba.';future=('revenge',f'Alguien relacionado con lo ocurrido con {name} ha empezado a buscarte.')
+    if action=='bribe':
+        char=get_active_character(uid)
+        # Sólo cobramos el soborno si el resultado no es un rechazo total; nunca saldo negativo.
+        if amount>0 and roll>=dc:
+            try: change_kiwons(uid,-amount,'npc_bribe',chat_id=chat_id,note=key)
+            except Exception: pass
+            detail+=f"\n🪙 Entregaste {amount:,} Kiwons."
+        elif amount>0 and roll<dc: detail+=f"\n😒 —{amount:,}? Eso no compra mi silencio."
+    if rep_delta:
+        try:
+            c2=get_db(); c2.execute("INSERT INTO rpg_reputation(user_id,score,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET score=rpg_reputation.score+EXCLUDED.score,updated_at=EXCLUDED.updated_at",(int(uid),int(rep_delta),int(time.time()))); c2.commit(); c2.close()
+        except Exception: pass
+    c=get_db();c.execute("UPDATE rpg_npc_story_state SET relation=relation+?,suspicion=GREATEST(0,suspicion+?),stage=stage+1,last_result=?,scene_seed=0,scene_key='',updated_at=? WHERE user_id=? AND npc_key=?",(relation_delta,susp_delta,outcome,int(time.time()),int(uid),key));c.execute("DELETE FROM rpg_npc_pending_roll WHERE user_id=?",(int(uid),));c.commit();c.close()
+    if future:_npc3_schedule(uid,key,*future)
+    rep=f"\n⭐ Reputación: {rep_delta:+d}" if rep_delta else ''
+    return f"🎲 {roll} · CD {dc}\n{outcome}\n\n{detail}{rep}\n\n🌎 El mundo recordará esta decisión.",_npc3_keyboard(key)
+
+def _npc3_due_consequence(uid):
+    _ensure_npc3_db();now=int(time.time());c=get_db();r=c.execute("SELECT * FROM rpg_npc_consequences WHERE user_id=? AND status='pending' AND due_after<=? ORDER BY due_after,id LIMIT 1 FOR UPDATE",(int(uid),now)).fetchone()
+    if not r:c.rollback();c.close();return None
+    c.execute("UPDATE rpg_npc_consequences SET status='resolved',resolved_at=? WHERE id=?",(now,int(r['id'])));c.commit();c.close();
+    kind=str(r['kind']);heads={'witness':'👁️ ALGUIEN TE VIO','suspicion':'🗣️ LOS RUMORES REGRESAN','favor':'🤝 UNA DEUDA A TU FAVOR','debt':'📜 UNA DEUDA REGRESA','wanted':'🚨 TE ESTÁN BUSCANDO','revenge':'🗡️ ALGUIEN QUIERE RESPUESTAS'}
+    return f"{heads.get(kind,'🌎 EL MUNDO REACCIONA')}\n\n{r['payload']}\n\nUna decisión anterior acaba de alcanzar tu presente."
+
+def world_npc_callback(uid,chat_id,thread_id,key,action):
+    key=str(key);action=str(action)
+    if action=='history': return _legacy_npc_history_text(uid,key)
+    # Una consecuencia antigua puede irrumpir cuando vuelves a relacionarte con el Mundo Vivo.
+    if action.startswith(('story_','offer_')):
+        due=_npc3_due_consequence(uid)
+        if due:
+            return (due+'\n\n¿Qué haces ahora?',_npc3_keyboard(key))
+    if action=='mission':
+        try:return _npc_mission_offer(uid,chat_id,thread_id,key)
+        except Exception:return '🕯️ Este viajero no tiene un encargo disponible ahora.'
+    if action=='story_back':
+        st,scene,desc=_npc3_scene(uid,key);pers=NPC_PERSONALITIES.get(key,('impredecible',0))[0]
+        return (f"{WORLD_NPCS.get(key,(key,0))[0]}\n\n{desc}\n\n🧠 Personalidad: {pers}.\n¿Qué haces?",_npc3_keyboard(key))
+    if action.startswith('offer_'):
+        try:_,real,raw=action.split('_',2);amount=int(raw)
+        except Exception:return 'Oferta inválida.'
+        char=get_active_character(uid)
+        try:
+            bal=int(get_kiwons(uid) or 0)
+        except Exception: bal=0
+        if amount>bal:return f"🪙 No tienes {amount:,} Kiwons disponibles."
+        return _npc3_start_roll(uid,chat_id,key,'bribe',amount)
+    if action.startswith('story_'):
+        act=action[6:]
+        if act=='bribe':return (f"💰 {WORLD_NPCS.get(key,(key,0))[0]} te observa sin decir una cifra.\n\n¿Cuánto vale para ti que esto termine aquí?",_npc3_offer_keyboard(key,'bribe'))
+        if act=='leave':
+            _npc3_schedule(uid,key,'debt',f'Decidiste no involucrarte cuando {WORLD_NPCS.get(key,(key,0))[0]} estaba presente.',4,15)
+            return ('🚶 Te marchas. Nadie te detiene.\n\n🌎 Eso no significa que el asunto haya terminado.',_npc3_keyboard(key))
+        return _npc3_start_roll(uid,chat_id,key,act)
+    # Conserva las utilidades históricas que no son parte de una escena moral.
+    return _legacy_world_npc_utility(uid,chat_id,thread_id,key,action)
+
+# Guardamos la implementación anterior de utilidades antes de sobrescribirla en runtime.
+# Se asigna más abajo mediante el alias capturado justo antes del START.
+
+# Inventario: elimina/vende sólo stacks repetidos seguros; conserva 1 unidad.
+def _inventory_cleanup_candidates(uid):
+    char=get_active_character(uid)
+    if not char:return []
+    c=get_db();rows=c.execute("""SELECT i.id,i.item_key,i.quantity,x.name,x.rarity,x.item_type,x.equip_slot FROM rpg_inventory i JOIN rpg_items x ON x.item_key=i.item_key WHERE i.user_id=? AND i.character_id=? AND COALESCE(i.equipped,0)=0 AND COALESCE(i.quantity,0)>1""",(int(uid),int(char['id']))).fetchall();c.close()
+    blocked={'legendario','mítico','mitico','evento','único','unico'};out=[]
+    for r in rows:
+        if str(r.get('rarity') or '').lower() in blocked:continue
+        if str(r.get('item_type') or '').lower() in ('quest','mission','titulo','title','gift','regalo'):continue
+        out.append(dict(r))
+    return out
+
+def _inventory_cleanup_preview(uid):
+    rows=_inventory_cleanup_candidates(uid);dups=sum(max(0,int(r['quantity'])-1) for r in rows)
+    if not dups:return '🧹 No encontré objetos repetidos seguros para limpiar.',{'inline_keyboard':[[{'text':'❌ Cerrar','callback_data':'invclean:cancel'}]]}
+    txt=f"🧹 LIMPIEZA DE INVENTARIO\n\nEncontré {dups} unidades repetidas en {len(rows)} tipos de objeto.\nSe conservará 1 de cada uno.\n\n🔒 No toca equipados, únicos, legendarios/míticos, evento, misión, títulos ni regalos.\n\n¿Qué quieres hacer?"
+    kb={'inline_keyboard':[[{'text':'🧹 Eliminar repetidos','callback_data':'invclean:delete'}],[{'text':'💰 Vender repetidos','callback_data':'invclean:sell'}],[{'text':'❌ Cancelar','callback_data':'invclean:cancel'}]]};return txt,kb
+
+def _inventory_cleanup_apply(uid,sell=False):
+    rows=_inventory_cleanup_candidates(uid)
+    if not rows:return '🧹 Ya no hay repetidos seguros que limpiar.'
+    removed=0;earned=0;c=get_db()
+    try:
+        for r in rows:
+            extra=max(0,int(r['quantity'])-1)
+            if not extra:continue
+            c.execute('UPDATE rpg_inventory SET quantity=1 WHERE id=?',(int(r['id']),));removed+=extra
+            if sell:
+                # Valor conservador por rareza; evita explotar objetos sin precio de venta explícito.
+                unit={'común':25,'comun':25,'poco común':50,'raro':100,'épico':250,'epico':250}.get(str(r.get('rarity') or '').lower(),20);earned+=unit*extra
+        c.commit();c.close()
+    except Exception:c.rollback();c.close();raise
+    if sell and earned:
+        try:change_kiwons(uid,earned,'inventory_cleanup_sale',note=f'{removed} duplicados')
+        except Exception:earned=0
+    return f"🧹 Inventario limpiado.\n♻️ Repetidos retirados: {removed}"+(f"\n🪙 Venta: +{earned:,} Kiwons" if sell else '')+'\n\nConservé 1 unidad de cada objeto y protegí los objetos especiales.'
+
+# Alias del callback viejo para utilidades (curación, forja, etc.) y override de dado manual.
+def _legacy_world_npc_utility(uid,chat_id,thread_id,key,action):
+    if key=='eira' and action=='heal':
+        char=get_active_character(uid)
+        if not char:return 'Necesitas un personaje activo.'
+        eff=effective_character_stats(char);maxhp=int(eff.get('max_hp') or char.get('max_hp') or 1)
+        c=get_db();c.execute('UPDATE characters SET hp=?,updated_at=? WHERE id=?',(maxhp,int(time.time()),int(char['id'])));c.commit();c.close();return f'🩺 Eira cerró tus heridas.\n❤️ HP restaurado a {maxhp}.'
+    if key=='brok' and action in ('gear','forge'):return '🔨 Brok revisa tu equipo. —No gastes materiales sólo por rareza; compara la pieza, su Forja y lo que piensas usar después.'
+    if key=='elias':return '📚 Elías comparte una pista de sus crónicas. —No todo lo raro es mejor; algunas decisiones pesan más que una pieza de equipo.'
+    if key=='orin':return chronicles_key_items_text(uid)+'\n\n🗝️ Orin observa tus hallazgos. —No vendas lo que todavía no entiendes.'
+    if key=='erick':return '✨ Erick: —Puedo despertar una pieza sacrificando otra. Elige con cuidado.'
+    try:
+        return _world_npc_callback_v2(uid,chat_id,thread_id,key,action)
+    except Exception:
+        return _legacy_npc_history_text(uid,key)
+
+def handle_rpg_dice(message):
+    if not message.get('dice'):return False
+    uid=int((message.get('from') or {}).get('id') or 0);chat_id=int((message.get('chat') or {}).get('id') or 0);val=int((message.get('dice') or {}).get('value') or 0)
+    if not uid or not val:return False
+    _ensure_npc3_db();c=get_db();r=c.execute('SELECT * FROM rpg_npc_pending_roll WHERE user_id=?',(uid,)).fetchone();c.close()
+    if not r or int(r.get('chat_id') or 0)!=chat_id:return False
+    txt,kb=_npc3_resolve_roll(uid,chat_id,dict(r),val);send_message(chat_id,txt,reply_markup=kb);return True
+
+# En cada aparición de NPC, una consecuencia antigua puede volver antes de la escena nueva.
+_old_spawn_world_npc=spawn_world_npc
+def spawn_world_npc(chatrow,now=None,rng=random):
+    result=_old_spawn_world_npc(chatrow,now,rng)
+    # No conocemos de antemano qué jugador interactuará; las consecuencias se revelan al siguiente contacto.
+    return result
 
 # =========================================================
 # START

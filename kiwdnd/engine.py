@@ -153,7 +153,10 @@ def _render_campaign_scene(camp):
 
 def _db(): return _DB()
 
+_SCHEMA_READY=False
 def _schema():
+    global _SCHEMA_READY
+    if _SCHEMA_READY: return
     c=_db()
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_campaigns(id BIGSERIAL PRIMARY KEY,chat_id BIGINT NOT NULL,thread_id BIGINT NOT NULL DEFAULT 0,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',arc BIGINT NOT NULL DEFAULT 1,chapter BIGINT NOT NULL DEFAULT 1,scene BIGINT NOT NULL DEFAULT 1,scene_key TEXT DEFAULT '',scene_text TEXT DEFAULT '',flags TEXT NOT NULL DEFAULT '{}',created_by BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE(chat_id,thread_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_characters(id BIGSERIAL PRIMARY KEY,campaign_id BIGINT NOT NULL,user_id BIGINT NOT NULL,telegram_name TEXT DEFAULT '',name TEXT NOT NULL,class_key TEXT NOT NULL,class_name TEXT NOT NULL,background TEXT DEFAULT '',appearance TEXT DEFAULT '',level BIGINT NOT NULL DEFAULT 1,xp BIGINT NOT NULL DEFAULT 0,hp BIGINT NOT NULL DEFAULT 20,max_hp BIGINT NOT NULL DEFAULT 20,str BIGINT NOT NULL DEFAULT 10,dex BIGINT NOT NULL DEFAULT 10,con BIGINT NOT NULL DEFAULT 10,intel BIGINT NOT NULL DEFAULT 10,wis BIGINT NOT NULL DEFAULT 10,cha BIGINT NOT NULL DEFAULT 10,status TEXT NOT NULL DEFAULT 'active',joined_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE(campaign_id,user_id))""")
@@ -174,6 +177,7 @@ def _schema():
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_sidequest_pool(campaign_id BIGINT NOT NULL,quest_key TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'locked',created_at BIGINT NOT NULL,PRIMARY KEY(campaign_id,quest_key))""")
     c.execute("""CREATE TABLE IF NOT EXISTS dnd_scene_options(campaign_id BIGINT NOT NULL,user_id BIGINT NOT NULL,slot BIGINT NOT NULL,label TEXT NOT NULL,action_text TEXT NOT NULL,created_at BIGINT NOT NULL,PRIMARY KEY(campaign_id,user_id,slot))""")
     c.commit(); c.close()
+    _SCHEMA_READY=True
 
 def _topic(message): return int(message.get('message_thread_id') or 0)
 def _campaign(chat_id,thread_id):
@@ -400,7 +404,14 @@ def handle_command(message,text):
         else:
             _S(chat_id,thread,"🐉 No hay una campaña KiwD&D activa en ESTE tema.\n\nUsa /dndcrear aquí para convertir este tema en la mesa de juego.")
         return True
-    if cmd in ('/dnd','/dndmenu'): _S(chat_id,thread,f"🐉 {camp['name']}\n📖 Arco {camp['arc']} · Capítulo {camp['chapter']}\n\nElige un control o escribe una acción cuando la escena esté activa.",reply_markup=_menu()); return True
+    if cmd in ('/dnd','/dndmenu'):
+        ch=_char(camp['id'],uid)
+        if ch:
+            scene_text=_render_campaign_scene(camp)
+            _send_with_choices(chat_id,thread,camp,uid,f"🐉 {camp['name']}\n\n{scene_text}",scene_text)
+        else:
+            _S(chat_id,thread,f"🐉 {camp['name']}\n📖 Arco {camp['arc']} · Capítulo {camp['chapter']}\n\nPrimero crea tu aventurero con /dndunirme.",reply_markup=_menu())
+        return True
     if cmd in ('/dndunirme','/dndcrearpersonaje'):
         if _char(camp['id'],uid): _S(chat_id,thread,"🎭 Ya tienes personaje en esta campaña.",reply_markup=_menu()); return True
         _S(chat_id,thread,f"🎭 {_mention(user)}, elige tu clase.\n\nEsto define capacidades y conocimientos, no tus decisiones. También puedes crear una clase propia.",reply_markup=_class_keyboard()); return True
@@ -729,7 +740,10 @@ def handle_message(message,text):
         _S(chat_id,thread,f"✨ Clase personalizada creada: {concept.title()}\n\nLa idea se conserva como identidad narrativa y usa una base equilibrada de atributos.\n\n{_sheet(ch)}\n\nAhora puedes escribir: Apariencia: <cómo quieres verte>",reply_markup=_menu()); return True
     if not ch: return False
     if low.startswith('apariencia:'):
-        appearance=t.split(':',1)[1].strip()[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close(); _S(chat_id,thread,"🎨 Apariencia guardada. Será la referencia canónica para el retrato de tu personaje."); return True
+        appearance=t.split(':',1)[1].strip()[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close(); _S(chat_id,thread,"🎨 Apariencia guardada. Será la referencia canónica para el retrato de tu personaje.",reply_markup=_suggestion_keyboard(camp,'')); return True
+    if not str(ch.get('appearance') or '').strip() and len(t)>=20:
+        appearance=t[:1000]; c=_db(); c.execute("UPDATE dnd_characters SET appearance=?,updated_at=? WHERE campaign_id=? AND user_id=?",(appearance,int(time.time()),int(camp['id']),uid)); c.commit(); c.close()
+        _S(chat_id,thread,"🎨 Apariencia guardada. Ya no la trataré como una escena. Usa /dnd para volver a la historia.",reply_markup=_suggestion_keyboard(camp,'')); return True
     # Juego rápido: el texto libre ya no intenta adivinar acciones.
     # Se conserva para charla/rol; las acciones mecánicas salen de los 7 botones.
     _S(chat_id,thread,f"💬 {_mention(user)}: {t[:700]}",reply_markup=_suggestion_keyboard(camp,t)); return True
